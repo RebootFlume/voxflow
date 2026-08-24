@@ -1,83 +1,94 @@
 # Python Sidecar 方案
 
-> 本文档定义从"纯 Rust 推理"回退到"Rust 系统级 + Python 推理 sidecar"的架构。
+> 本文档定义从"纯 Rust 推理"回退到"Rust 系统级 + Python 全能 sidecar"的架构。
 
 ---
 
 ## 1. 核心思路
 
 ```
-┌─────────────────── Tauri 2 ──────────────────────────┐
-│                                                       │
-│  Rust 主进程              Python sidecar 子进程        │
-│  ─────────────            ──────────────────────       │
-│  • 全局热键                • TTS 推理（Kokoro PyTorch） │
-│  • 托盘/剪贴板上屏         • ASR 推理（SenseVoice 等）  │
-│  • 音频采集（cpal）        • GPU 检测（nvidia-smi）     │
-│  • 模型下载（hf-hub）     • 音频解码（soundfile）       │
-│  • 数据持久化                                           │
-│                                                       │
-│           ◄── JSON lines over stdin/stdout ──►         │
-└───────────────────────────────────────────────────────┘
+┌─────────────────── Tauri 2 ──────────────────────────────┐
+│                                                           │
+│  Rust 主进程                 Python sidecar 子进程          │
+│  ─────────────               ──────────────────────        │
+│  • 全局热键                   • TTS 推理（Kokoro PyTorch）  │
+│  • 托盘/剪贴板上屏            • ASR 推理（待接入）           │
+│  • 音频采集（cpal）           • 模型下载（huggingface_hub） │
+│  • 数据持久化                 • GPU 检测（nvidia-smi）      │
+│  • 事件转发给前端             • 音频解码（soundfile）        │
+│                                                           │
+│             ◄── JSON lines over stdin/stdout ──►           │
+└───────────────────────────────────────────────────────────┘
 ```
 
-**前端完全不变。** Tauri command 名字不变，只是 Rust 侧把推理请求转发给 Python。
+**Rust 只做系统级**，其余全交给 Python。前端零改动。
 
 ---
 
 ## 2. IPC 协议
 
-沿用原 CapsWriter 风格：**JSON lines over stdin/stdout**。
+JSON lines over stdin/stdout。
 
 ### Rust → Python（请求）
 
 ```json
-{"action": "tts_load", "model_path": "/path/to/Kokoro-82M", "device": "cuda"}
-{"action": "tts_infer", "text": "Hello world", "voice": "af", "lang": "en", "speed": 1.0}
-{"action": "tts_set_language", "lang": "zh"}
-{"action": "asr_load", "model_path": "/path/to/model", "device": "cuda"}
-{"action": "asr_transcribe", "file_path": "/path/to/audio.wav"}
-{"action": "asr_transcribe_chunk", "samples": [...], "sample_rate": 16000}
-{"action": "gpu_info"}
+// 推理
+{"action": "tts_load", "request_id": "r1", "model_path": "...", "device": "cuda"}
+{"action": "tts_infer", "request_id": "r2", "text": "Hello", "voice": "af_heart", "lang": "a", "speed": 1.0}
+{"action": "tts_set_language", "request_id": "r3", "lang": "a"}
+{"action": "tts_list_voices", "request_id": "r4"}
+{"action": "asr_load", "request_id": "r5", "model_path": "...", "device": "cuda"}
+{"action": "asr_transcribe", "request_id": "r6", "file_path": "..."}
+
+// 下载
+{"action": "download_model", "request_id": "r7", "repo_id": "hexgrad/Kokoro-82M", "model_name": "Kokoro-82M"}
+{"action": "cancel_download", "request_id": "r8", "model_name": "Kokoro-82M"}
+{"action": "delete_model", "request_id": "r9", "model_name": "Kokoro-82M"}
+{"action": "list_models", "request_id": "r10"}
+
+// 系统
+{"action": "gpu_info", "request_id": "r11"}
+{"action": "decode_audio", "request_id": "r12", "file_path": "..."}
+{"action": "bootstrap", "request_id": "r13", "model_root": "...", "mirror": "...", "proxy": "..."}
 {"action": "shutdown"}
 ```
 
-### Python → Rust（响应 / 事件）
+### Python → Rust（响应）
 
 ```json
-{"status": "ok", "request_id": "...", "data": {...}}
-{"status": "error", "request_id": "...", "msg": "model not found"}
-{"status": "model_ready", "model": "Kokoro-82M", "device": "cuda"}
-{"status": "progress", "model": "Kokoro-82M", "percent": 45}
-{"event": "asr_result", "text": "hello world", "is_final": true}
+{"request_id": "r1", "status": "ok", "data": {...}}
+{"request_id": "r1", "status": "error", "msg": "model not found"}
+```
+
+### Python → Rust（异步事件，Rust 转发给前端）
+
+```json
+{"event": "model_ready", "model": "Kokoro-82M", "device": "cuda"}
+{"event": "download_progress", "model": "Kokoro-82M", "percent": 45, "speed": "12.3 MB/s"}
+{"event": "download_done", "model": "Kokoro-82M", "path": "/..."}
+{"event": "asr_result", "text": "hello", "is_final": true}
 {"event": "audio_level", "level": 0.3}
 ```
 
-### 事件推送（Python → Rust，异步）
-
-Python 可随时推事件（识别中间结果、音量等），Rust 通过 `app.emit("sidecar://event", ...)` 转发给前端。协议与当前 `sidecar://event` 完全兼容，前端零改动。
+Rust 收到事件后 `app.emit("sidecar://event", ...)` 转发给前端。**前端事件协议完全不变。**
 
 ---
 
-## 3. Rust 侧保留的命令
+## 3. 职责分工
 
-| 命令 | 保留原因 |
-|---|---|
-| `send_to_sidecar_safe` | 改为转发到 Python（推理 action）或 Rust 原生处理（bootstrap/download 等） |
-| `set_hotkey` | 系统级，rdev + global-shortcut |
-| `get_gpu_info` | 转发到 Python（nvidia-smi） |
-| `decode_audio_file` | 转发到 Python（soundfile）或保留 Rust（hound） |
-| `rust_list_audio_devices` | cpal 原生 |
-| `hf_download_*` | hf-hub Rust crate，下载保持原生 |
-| `read/write_data_file` | 持久化，Rust 原生 |
-| `rust_load_tts_model` → | 转发 `{"action":"tts_load", ...}` |
-| `rust_synthesize` → | 转发 `{"action":"tts_infer", ...}` |
-| `rust_set_tts_language` → | 转发 `{"action":"tts_set_language", ...}` |
-| `rust_list_tts_voices` → | 转发或 Rust 本地扫描 voices 目录 |
-| `rust_load_asr_model` → | 转发 `{"action":"asr_load", ...}` |
-| `rust_transcribe` → | 转发 `{"action":"asr_transcribe", ...}` |
-
-**前端 invoke 接口不变，只是 Rust 侧把推理 action 路由到 Python。**
+| 职责 | Rust | Python |
+|---|---|---|
+| 全局热键 | ✅ rdev + global-shortcut | |
+| 托盘/剪贴板 | ✅ arboard + enigo | |
+| 音频采集 | ✅ cpal | |
+| 数据持久化 | ✅ app data dir | |
+| 事件转发 | ✅ app.emit() | |
+| TTS 推理 | | ✅ Kokoro KPipeline+KModel |
+| ASR 推理 | | ✅ 待选型 |
+| 模型下载 | | ✅ huggingface_hub |
+| GPU 检测 | | ✅ nvidia-smi |
+| 音频解码 | | ✅ soundfile |
+| 模型目录扫描 | | ✅ os.listdir |
 
 ---
 
@@ -85,123 +96,142 @@ Python 可随时推事件（识别中间结果、音量等），Rust 通过 `app
 
 ```
 python-backend/
-├── main.py              # 入口：读 stdin → 分发 → 写 stdout
-├── sidecar.py           # Sidecar 主循环（JSON lines 解析）
+├── main.py              # 入口：spawn sidecar
+├── sidecar.py           # 主循环：读 stdin → 分发 → 写 stdout
 ├── tts/
 │   ├── __init__.py
 │   ├── kokoro_engine.py # Kokoro TTS（KPipeline + KModel）
 │   └── voices.py        # 音色列表扫描
 ├── asr/
 │   ├── __init__.py
-│   └── sensevoice.py    # SenseVoice / Paraformer / 其他 PyTorch ASR
+│   └── engine.py        # ASR（待接入）
+├── download/
+│   ├── __init__.py
+│   └── hf_download.py   # huggingface_hub 封装（下载/删除/状态）
 ├── audio/
 │   ├── __init__.py
 │   └── decode.py        # 音频解码（soundfile）
 ├── utils/
 │   ├── __init__.py
 │   └── gpu.py           # GPU 检测
-├── requirements.txt     # 依赖清单
-└── pyproject.toml       # 项目配置
+├── requirements.txt
+└── pyproject.toml
 ```
 
-### 依赖（精简）
+### 依赖
 
 ```
 torch>=2.0
-kokoro>=0.8          # 或 hexgrad/Kokoro-82M（pip install kokoro）
-soundfile
+kokoro>=0.8              # TTS（pip install kokoro）
+huggingface_hub>=0.20    # 模型下载（官方 HF 库）
+soundfile                # 音频解码
 numpy
 ```
 
-**不需要**：onnxruntime、transformers（除非 ASR 需要）、espeak-ng（kokoro 包自带 G2P）
+---
+
+## 5. 模型下载（huggingface_hub）
+
+```python
+from huggingface_hub import snapshot_download, hf_hub_download
+
+# 整仓下载（Kokoro-82M 含模型+tokenizer+voices）
+snapshot_download(
+    repo_id="hexgrad/Kokoro-82M",
+    local_dir=f"{model_root}/Kokoro-82M",
+    local_dir_use_symlinks=False,
+)
+
+# 单文件下载
+hf_hub_download(repo_id="hexgrad/Kokoro-82M", filename="voices/af_heart.pt")
+```
+
+进度回调 → 推送 `download_progress` 事件 → Rust 转发前端。
+
+**比 Rust hf-hub 优势**：
+- HuggingFace 官方维护，兼容性最好
+- 原生支持 mirror（`HF_ENDPOINT`）、proxy（`HTTP_PROXY`）、token
+- `snapshot_download` 自动断点续传
+- 与 `kokoro` 包共享缓存（不重复下载）
 
 ---
 
-## 5. Kokoro TTS（PyTorch 版）
+## 6. Kokoro TTS（PyTorch）
 
 ```python
 from kokoro import KPipeline, KModel
 
-# 一个 KModel 实例跨语言共享
 model = KModel(repo_id='hexgrad/Kokoro-82M').to(device).eval()
 
-# 每种语言一个 KPipeline（共享 model）
 us_pipeline = KPipeline(lang_code='a', model=model)  # 美式英语
 jp_pipeline = KPipeline(lang_code='j', model=model)  # 日语
 zh_pipeline = KPipeline(lang_code='z', model=model)  # 中文
 
-# 合成
 for gs, ps, audio in us_pipeline("Hello world", voice='af_heart'):
-    # audio: numpy array, 24kHz
-    ...
+    # audio: numpy 24kHz
+    save_wav(audio, output_path)
 ```
 
-**优势**：
-- 正确的 G2P（misaki/neural，不是 espeak 字母直通）
-- 多语言原生支持（a/b/e/f/h/i/j/p/z）
-- 完整音色库（af_*, am_*, bf_*, bm_*, jf_*, zf_* 等）
-- 配置正确时加载 <1 秒
+**优势**：正确 G2P、多语言、完整音色库、配置正确加载 <1 秒。
 
 ---
 
-## 6. 模型下载
+## 7. Rust 侧改造
 
-保持 Rust 原生 hf-hub 下载。下载到 `AppData/com.voxflow.app/models/`。
+### 7.1 保留的命令（直接 Rust 处理）
 
-PyTorch 版 Kokoro 也可以通过 `KPipeline(repo_id='hexgrad/Kokoro-82M')` 自动下载（HuggingFace 缓存），但最好统一走 Rust 下载管理器，保持前端进度条一致。
+| 命令 | 原因 |
+|---|---|
+| `set_hotkey` | 系统级 |
+| `rust_list_audio_devices` | cpal |
+| `read/write_data_file` | 持久化 |
 
----
+### 7.2 转发到 Python 的命令
 
-## 7. Rust 侧改造要点
+| 前端调用 | 转发 action |
+|---|---|
+| `send_to_sidecar({action:"bootstrap"})` | `bootstrap` |
+| `send_to_sidecar({action:"download_model"})` | `download_model` |
+| `send_to_sidecar({action:"list_models"})` | `list_models` |
+| `send_to_sidecar({action:"delete_model"})` | `delete_model` |
+| `rust_load_tts_model(...)` | `tts_load` |
+| `rust_synthesize(...)` | `tts_infer` |
+| `rust_set_tts_language(...)` | `tts_set_language` |
+| `rust_list_tts_voices()` | `tts_list_voices` |
+| `rust_load_asr_model(...)` | `asr_load` |
+| `rust_transcribe(...)` | `asr_transcribe` |
+| `get_gpu_info()` | `gpu_info` |
+| `decode_audio_file(...)` | `decode_audio` |
 
-### 7.1 `send_to_sidecar_safe` 改造
+### 7.3 可删除的 Rust 模块
 
-```rust
-// 当前：所有 action 在 Rust 原生处理
-// 改后：推理 action 转发到 Python
-fn send_to_sidecar_safe(...) {
-    match action {
-        // ── Rust 原生 ──
-        "bootstrap" | "set_model_root" | "set_mirror" | "set_proxy"
-        | "list_models" | "download_model" | "cancel_download" | "delete_model" => {
-            // 保持不变
-        }
-        // ── 转发到 Python ──
-        "tts_load" | "tts_infer" | "tts_set_language" | "tts_list_voices"
-        | "asr_load" | "asr_transcribe" | "gpu_info" => {
-            sidecar.send(payload)  // 写到 Python stdin
-            // 等待 Python 响应 或 异步推送事件
-        }
-    }
-}
-```
-
-### 7.2 Python 子进程管理
-
-```rust
-// 启动：app 启动时 spawn python-backend/main.py
-// 通信：tokio::process::Child（stdin/stdout 异步读写）
-// 关闭：app 退出时发 {"action":"shutdown"} 等待退出
-```
+| 模块 | 原因 |
+|---|---|
+| `model_manager.rs` | 下载/扫描全部移到 Python |
+| `tts/` 整个目录 | 推理移到 Python |
+| `inference/` 整个目录 | 推理移到 Python |
+| `download.rs` | 下载移到 Python |
+| `sidecar.rs` | GPU 检测移到 Python |
 
 ---
 
-## 8. ASR 方案（待定）
+## 8. ASR（待定）
 
 | 方案 | 模型 | 依赖 | 说明 |
 |---|---|---|---|
-| A | SenseVoice-Small | funasr + torch | 中文识别优秀，1.5B |
+| A | SenseVoice-Small | funasr + torch | 中文识别优秀 |
 | B | Paraformer | funasr + torch | 非自回归，毫秒级 |
-| C | Qwen3-ASR（GGUF） | llama-cpp-python | 0.6B 轻量，但需 llama-cpp binding |
-| D | 先不做 ASR | — | Tauri 骨架保留，Python 侧后续接入 |
+| C | Qwen3-ASR | llama-cpp-python | 轻量但需额外 binding |
+| D | 先不做 | — | Tauri 骨架保留 |
 
 ---
 
 ## 9. 执行顺序
 
-1. **创建 `python-backend/`**，搭 sidecar 主循环 + IPC 协议
-2. **接入 Kokoro TTS**（PyTorch 版），验证合成质量
-3. **Rust 侧改造**：推理命令转发到 Python
-4. **前端零改动**验证（TTS 合成能跑通）
-5. **ASR 接入**（选方案后）
-6. **打包**：PyInstaller / Nuitka 打包 Python sidecar 到 Tauri 安装包
+1. **搭 `python-backend/`**：sidecar 主循环 + IPC 协议
+2. **接入 Kokoro TTS**：下载 + 推理，验证质量
+3. **接入模型下载**：huggingface_hub，进度回调
+4. **Rust 侧改造**：推理/下载命令转发到 Python，删除旧模块
+5. **前端零改动**验证
+6. **ASR 接入**
+7. **打包**：PyInstaller/Nuitka 打包 Python 到 Tauri 安装包
