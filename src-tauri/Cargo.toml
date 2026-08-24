@@ -1,0 +1,40 @@
+[package]
+name = "voxflow"
+version = "0.1.0"
+description = "VoxFlow — local Qwen3-ASR voice tool"
+authors = ["you"]
+edition = "2021"
+
+[lib]
+name = "voxflow_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+parking_lot = "0.12"
+once_cell = "1"
+cpal = "0.15"
+tauri-plugin-global-shortcut = "2"
+rdev = "0.5"
+arboard = "3"
+enigo = "0.2"
+which = "7"
+
+# 推理引擎依赖
+hf-hub = { version = "1.0", features = ["blocking"] }  # Hugging Face 模型下载
+anyhow = "1"                                            # 错误处理
+dirs = "5"                                            # 目录路径
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }  # 磁盘剩余空间（Windows）
+ndarray = "0.16"             # numpy 替代
+hound = "3.5"                # WAV 编解码
+base64 = "0.22"              # base64 编解码
+chrono = { version = "0.4", features = ["clock"] }
+ort = { version = "2.0.0-rc.13", features = ["directml"] }  # ONNX Runtime 1.28 + DirectML
+llama-cpp-2 = "0.1"         # llama.cpp GGUF 推理
