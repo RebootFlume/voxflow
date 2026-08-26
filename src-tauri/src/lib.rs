@@ -1,5 +1,6 @@
 #[allow(unused_imports)]
 pub mod audio;
+use std::process::Command;
 mod app_state;
 #[allow(unused_imports)]
 pub mod clipboard;
@@ -10,6 +11,7 @@ mod errors;
 pub mod hotkey;
 pub mod inference;
 pub mod model_manager;
+pub mod data_root;
 #[allow(unused_imports)]
 pub mod persistence;
 #[allow(unused_imports)]
@@ -21,7 +23,6 @@ pub mod tts;
 use tauri::Emitter;
 
 use crate::app_state::AppState;
-use crate::inference::engine::InferenceEngine;
 use crate::tts::traits::TtsEngine;
 
 #[tauri::command]
@@ -37,7 +38,15 @@ fn set_hotkey(app: tauri::AppHandle, hotkey: String) -> Result<(), String> {
 /// 模型是否使用中：按注册表 kind（与前端 modelState.resolveModelKind 一致）判定对应引擎
 fn is_model_in_use(state: &AppState, name: &str) -> bool {
     match model_manager::find_model_info(name).map(|i| i.kind()) {
-        Some("asr") => state.asr.lock().is_loaded(),
+        // ASR：查 sherpa（当前加载模型匹配）或 llama-server（运行中）
+        Some("asr") => {
+            let sherpa = crate::inference::sherpa_asr::global_engine();
+            let sherpa_loaded = matches!(
+                sherpa.state(),
+                crate::inference::sherpa_asr::SherpaState::Ready
+            ) && sherpa.model() == name;
+            sherpa_loaded || crate::inference::llama_server::global_engine().is_loaded()
+        }
         Some("tts") => state.tts.lock().is_loaded(),
         _ => false, // 未知模型：无法判定，视为未使用
     }
@@ -189,18 +198,50 @@ fn send_to_sidecar_safe(
             // 根据格式加载到对应引擎
             match info.format() {
                 model_manager::ModelFormat::Gguf => {
-                    // GGUF → llama-cpp-2 引擎（尚未接入）：诚实报错，不假装加载成功
-                    let msg = "ASR GGUF engine not implemented yet".to_string();
-                    eprintln!("[load_model] GGUF not implemented: {}", main_file.display());
-                    let _ = app.emit("sidecar://event", serde_json::json!({
-                        "status": "model_error",
-                        "model": name,
-                        "msg": msg,
-                    }));
+                    // GGUF → llama-server 子进程（ASR 主引擎）
+                    let engine = crate::inference::llama_server::global_engine();
+                    match engine.load() {
+                        Ok(()) => {
+                            let _ = app.emit("sidecar://event", serde_json::json!({
+                                "status": "model_loaded",
+                                "model": name,
+                                "device": device,
+                            }));
+                        }
+                        Err(e) => {
+                            eprintln!("[load_model] llama-server load failed: {e}");
+                            let _ = app.emit("sidecar://event", serde_json::json!({
+                                "status": "model_error",
+                                "model": name,
+                                "msg": format!("GGUF 引擎加载失败: {e}"),
+                            }));
+                        }
+                    }
+                }
+                model_manager::ModelFormat::Onnx if info.kind() == "asr" => {
+                    // ONNX + ASR → sherpa-onnx websocket server（低端设备引擎）
+                    let engine = crate::inference::sherpa_asr::global_engine();
+                    match engine.load(&name) {
+                        Ok(()) => {
+                            let _ = app.emit("sidecar://event", serde_json::json!({
+                                "status": "model_loaded",
+                                "model": name,
+                                "device": device,
+                            }));
+                        }
+                        Err(e) => {
+                            eprintln!("[load_model] sherpa ASR load failed: {e}");
+                            let _ = app.emit("sidecar://event", serde_json::json!({
+                                "status": "model_error",
+                                "model": name,
+                                "msg": format!("sherpa ASR 加载失败: {e}"),
+                            }));
+                        }
+                    }
                 }
                 model_manager::ModelFormat::Onnx => {
-                    // ONNX → ort 引擎（统一 TtsService，经 State<AppState>）
-                    eprintln!("[load_model] ONNX: {}", main_file.display());
+                    // ONNX + TTS → 统一 TtsService（经 State<AppState>）
+                    eprintln!("[load_model] ONNX TTS: {}", main_file.display());
                     let mut guard = state.tts.lock();
                     match guard.load(&main_file, device) {
                         Ok(()) => {
@@ -238,6 +279,125 @@ fn get_gpu_info() -> serde_json::Value {
     sidecar::detect_gpu()
 }
 
+/// 查询显存状态：总显存 + 已用 + 各推理框架占用（按 PID 过滤 nvidia-smi）
+#[tauri::command]
+fn get_vram_status() -> serde_json::Value {
+    let gpu = sidecar::detect_gpu();
+    let total_mb = gpu.get("memoryMB").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    // nvidia-smi 已用显存（总量，无需权限）
+    let used_mb = Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .next()
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+
+    // 各框架进程显存（按 PID 查询；无权限时为 None → 回退到模型文件大小估算）
+    let llama_mb = vram_of_process("llama-server")
+        .or_else(|| pathbuf_size_mb(crate::model_manager::model_dir("Qwen3-ASR-0.6B")));
+    let sherpa_mb = vram_of_process("sherpa-onnx-offline-websocket-server")
+        .or_else(|| {
+            // 当前加载的 sherpa 模型目录大小
+            let eng = crate::inference::sherpa_asr::global_engine();
+            let model = eng.model();
+            if model.is_empty() {
+                None
+            } else {
+                pathbuf_size_mb(crate::model_manager::model_dir(&model))
+            }
+        });
+
+    serde_json::json!({
+        "available": gpu.get("available").and_then(|v| v.as_bool()).unwrap_or(false),
+        "gpu_name": gpu.get("gpuName").cloned().unwrap_or(serde_json::Value::String(String::new())),
+        "total_mb": total_mb,
+        "used_mb": used_mb,
+        "frameworks": {
+            "llama": llama_mb.map(|m| serde_json::json!({ "mb": m }))
+                .unwrap_or_else(|| serde_json::json!(null)),
+            "sherpa": sherpa_mb.map(|m| serde_json::json!({ "mb": m }))
+                .unwrap_or_else(|| serde_json::json!(null)),
+        },
+    })
+}
+
+/// 查询指定进程名的显存占用（MB）——按 PID 匹配 nvidia-smi
+/// 无管理员权限时返回 None（前端显示「不可用」）
+fn vram_of_process(name: &str) -> Option<u64> {
+    use std::process::Command;
+    // 找进程 PID
+    let ps_cmd = format!("Get-Process '{name}' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id");
+    let pid = Command::new("powershell")
+        .args(["-NoProfile", "-Command", &ps_cmd])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().ok()
+            } else {
+                None
+            }
+        })?;
+    // nvidia-smi 按 PID 查
+    let out = Command::new("nvidia-smi")
+        .args(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).lines().find_map(|line| {
+        let mut parts = line.split(',');
+        let pid_str = parts.next()?.trim();
+        if pid_str.parse::<u32>().ok()? == pid {
+            parts.next()?.trim().parse::<u64>().ok()
+        } else {
+            None
+        }
+    })
+}
+
+/// 计算目录大小（MB）——用于无权限时按模型文件大小估算显存
+fn dir_size_mb(dir: &std::path::Path) -> Option<u64> {
+    if !dir.is_dir() {
+        return None;
+    }
+    let mut total: u64 = 0;
+    fn walk(d: &std::path::Path, total: &mut u64) {
+        if let Ok(rd) = std::fs::read_dir(d) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, total);
+                } else if let Ok(md) = e.metadata() {
+                    *total += md.len();
+                }
+            }
+        }
+    }
+    walk(dir, &mut total);
+    if total > 0 {
+        Some(total / (1024 * 1024))
+    } else {
+        None
+    }
+}
+
+/// 目录大小（MB）——PathBuf 版本
+fn pathbuf_size_mb(dir: std::path::PathBuf) -> Option<u64> {
+    dir_size_mb(&dir)
+}
+
 /// Rust 原生音频解码（不依赖 Python）
 /// 输入：文件路径，输出：16kHz mono float32 samples + 时长
 #[tauri::command]
@@ -257,50 +417,6 @@ fn decode_audio_file(path: String) -> Result<serde_json::Value, String> {
 // ============================================================
 
 /// 加载 ASR 模型
-/// 支持传入模型名称（如 "Qwen3-ASR-0.6B"）或完整文件路径
-/// 优先在 modelRoot 下查找，失败后自动回退到 workspace/models（开发期镜像）
-#[tauri::command]
-fn rust_load_asr_model(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    model_path: String,
-    device: String,
-) -> Result<serde_json::Value, String> {
-    let name = model_path.clone();
-    // 判断是模型名还是文件路径
-    let actual_path = if std::path::Path::new(&model_path).exists() {
-        std::path::PathBuf::from(&model_path)
-    } else {
-        let primary = model_manager::model_dir(&model_path);
-        let found = model_manager::find_main_model_file(&primary, &model_manager::ModelFormat::Gguf)
-            .or_else(|| {
-                // 开发期回退：workspace/models 下的镜像
-                let fallback = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../models/qwen3-asr-0.6b-gguf");
-                model_manager::find_main_model_file(&fallback, &model_manager::ModelFormat::Gguf)
-            });
-        match found {
-            Some(f) => f,
-            None => return Err(format!("model file not found for: {model_path}")),
-        }
-    };
-    let result = inference::commands::load_asr_model(&state.asr, &actual_path.to_string_lossy(), &device);
-    match &result {
-        Ok(_) => { let _ = app.emit("sidecar://event", serde_json::json!({"status": "model_ready", "model": name, "device": device})); }
-        Err(e) => { let _ = app.emit("sidecar://event", serde_json::json!({"status": "model_error", "model": name, "msg": e.to_string()})); }
-    }
-    result
-}
-
-/// ASR 语音识别
-#[tauri::command]
-fn rust_transcribe(
-    state: tauri::State<'_, AppState>,
-    file_path: String,
-) -> Result<serde_json::Value, String> {
-    inference::commands::transcribe_file_rust(&state.asr, &file_path)
-}
-
 /// Rust 原生音频设备枚举（替代 Python list_audio_devices）
 #[tauri::command]
 fn rust_list_audio_devices() -> serde_json::Value {
@@ -324,16 +440,45 @@ fn rust_list_audio_devices() -> serde_json::Value {
         "currentName": current_name,
     })
 }
+
+/// 卸载 sherpa ASR 引擎（杀 websocket server 进程）
 #[tauri::command]
-fn rust_asr_status(state: tauri::State<'_, AppState>) -> serde_json::Value {
-    inference::commands::get_asr_status(&state.asr)
+fn rust_unload_sherpa_asr() -> Result<serde_json::Value, String> {
+    crate::inference::sherpa_asr::global_engine().unload();
+    Ok(serde_json::json!({ "status": "unloaded" }))
+}
+
+// ─── llama-server 子进程 + HTTP 命令 ──────────────────────────────────────
+
+/// 启动 llama-server 子进程（启动后才使用 ASR）
+#[tauri::command]
+fn rust_start_llama_server() -> Result<serde_json::Value, String> {
+    inference::commands::start_llama_server()
+}
+
+/// 停止 llama-server 子进程
+#[tauri::command]
+fn rust_stop_llama_server() -> Result<serde_json::Value, String> {
+    inference::commands::stop_llama_server()
+}
+
+/// 查询 llama-server 状态
+#[tauri::command]
+fn rust_llama_server_status() -> serde_json::Value {
+    inference::commands::llama_server_status()
+}
+
+/// 通过 llama-server 转写音频文件
+#[tauri::command]
+fn rust_transcribe_llama(file_path: String) -> Result<serde_json::Value, String> {
+    inference::commands::transcribe_file_via_llama_server(&file_path)
 }
 
 /// 测试 TTS 模型加载（打印输入输出 tensor 名称）
 #[tauri::command]
 fn rust_test_tts_model(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let model_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../models/Kokoro-82M/onnx/model.onnx");
+    let model_path = crate::model_manager::model_dir("Kokoro-v1_0")
+        .join("model.onnx");
     if !model_path.exists() {
         return Err(format!("TTS model not found: {}", model_path.display()));
     }
@@ -446,20 +591,48 @@ pub fn run() {
         .manage(AppState::new())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            // 统一数据根：便携模式（exe旁data\）或安装模式（AppData）
+            // 初始化模型根 = 数据根/models（替代前端 bootstrap 传 model_root）
+            let data_root = crate::data_root::get_data_root(app.handle());
+            let _ = model_manager::set_model_root(&data_root.join("models").to_string_lossy());
+
+            // 启动录音 worker + rdev 全局监听（幂等，热键链路依赖）
+            hotkey::start_capslock_listener(app.handle().clone());
+            // 迁移旧布局模型目录（下载目录名 → 引擎目录名）
+            // 后台线程执行，避免磁盘扫描阻塞窗口显示（白屏 1-2s）
+            let app2 = app.handle().clone();
+            std::thread::Builder::new()
+                .name("legacy-dir-migrate".into())
+                .spawn(move || {
+                    model_manager::migrate_legacy_dirs(&app2);
+                })
+                .ok();
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             greet,
             set_hotkey,
             send_to_sidecar_safe,
             get_gpu_info,
+            get_vram_status,
             decode_audio_file,
             rust_list_audio_devices,
-            rust_load_asr_model,
-            rust_transcribe,
-            rust_asr_status,
+            rust_unload_sherpa_asr,
+            rust_start_llama_server,
+            rust_stop_llama_server,
+            rust_llama_server_status,
+            rust_transcribe_llama,
             tts::commands::rust_load_tts_model,
             tts::commands::rust_synthesize,
             tts::commands::rust_set_tts_language,
             tts::commands::rust_list_tts_voices,
+            tts::commands::rust_list_e2e_tts_models,
+            tts::commands::rust_switch_e2e_tts_model,
+            tts::commands::rust_unload_tts_model,
+            tts::commands::rust_set_tts_clone_voice,
+            tts::commands::rust_clear_tts_clone_voice,
+            tts::commands::rust_list_tts_speakers,
             rust_test_tts_model,
             hf_download_file,
             hf_download_as_string,
@@ -468,6 +641,13 @@ pub fn run() {
             persistence::write_data_file,
             persistence::get_data_dir
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // 应用退出：统一清理子进程（llama-server / sherpa server），避免残留
+            if let tauri::RunEvent::Exit = event {
+                let _ = crate::inference::llama_server::global_engine().unload();
+                crate::inference::sherpa_asr::global_engine().unload();
+            }
+        });
 }

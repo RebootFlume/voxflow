@@ -4,8 +4,8 @@ import App from "./App";
 import "./index.css";
 import { sendToSidecar } from "./lib/tauri";
 import { initPersistence } from "./lib/persistence";
-import { useAppStore } from "./stores/app";
-import { loadAsrModel, loadTtsModel } from "./lib/modelLoader";
+import { useAppStore } from "./stores";
+import { loadAsrModel } from "./lib/modelLoader";
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
@@ -16,14 +16,15 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
 // 异步初始化：读取 config.json + history + 下发 sidecar 配置 + 恢复模型
 (async () => {
   await initPersistence();
+  useAppStore.getState().addLog("🚀 VoxFlow 启动", "info");
 
-  const { asr, tts, models } = useAppStore.getState();
-  if (models.modelRoot || models.mirror || models.proxy !== undefined) {
+  const { asr, models } = useAppStore.getState();
+  if (models.mirror || models.proxy !== undefined) {
     const endpoint =
       models.mirror === "cn" ? "https://hf-mirror.com" : models.mirror && models.mirror !== "official" ? models.mirror : "";
     void sendToSidecar({
       action: "bootstrap",
-      ...(models.modelRoot ? { model_root: models.modelRoot } : {}),
+      // 不再传 model_root：数据根由 Rust setup 统一决定（便携/安装）
       mirror_endpoint: endpoint,
       proxy: models.proxy ?? "",
     }).catch(() => {});
@@ -37,10 +38,12 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     st0.setUseRustEngine(true);
     st0.addLog("[init] auto-enable Rust engine (migrated from Python)", "info");
   }
+  // ASR：走 llama-server 子进程（GGUF 路线），启动时自动拉起常驻服务
+  // （TTS 模型按需加载：用户切换到 TTS 页或第一次合成时才加载，避免启动占用 VRAM）
   if (asr.model) {
     void loadAsrModel(asr.model, asr.device).catch(() => {});
-  }
-  if (tts.model) {
-    void loadTtsModel(tts.model, tts.device).catch(() => {});
+  } else {
+    // 无持久化模型时，默认拉起 llama-server
+    void loadAsrModel("Qwen3-ASR-0.6B", "cuda").catch(() => {});
   }
 })();

@@ -10,16 +10,6 @@ use serde::Deserialize;
 
 use crate::errors::AppError;
 
-/// 管道类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PipelineType {
-    /// A 轨：文本直接 tokenizer 化（Qwen-TTS / Chatterbox 等）
-    Direct,
-    /// B 轨：G2P（espeak-ng）→ IPA → vocab 映射（Kokoro / LuxTTS 等）
-    Phoneme,
-}
-
 /// 张量数据类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -28,26 +18,24 @@ pub enum Dtype {
     F32,
 }
 
-/// 张量角色描述：语义角色（tokens/style/speed）→ 节点名 + 数据类型
+/// 张量角色描述：语义角色（tokens/style）→ 节点名 + 数据类型
 #[derive(Debug, Clone, Deserialize)]
 pub struct TensorSpec {
     pub name: String,
     pub dtype: Dtype,
 }
 
-/// 模型输入张量定义（`style`/`speed` 可选：缺省即不绑定该张量）
+/// 模型输入张量定义（`style` 可选：缺省即不绑定该张量）
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelInputs {
     pub tokens: TensorSpec,
     pub style: Option<TensorSpec>,
-    pub speed: Option<TensorSpec>,
 }
 
 /// 模型清单（manifest.json）
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelManifest {
     pub id: String,
-    pub pipeline_type: PipelineType,
     /// 模型文件（相对模型目录，如 "onnx/model.onnx"）
     pub model_file: String,
     /// tokenizer/vocab 文件（相对模型目录，如 "tokenizer.json"）
@@ -109,7 +97,7 @@ impl ModelManifest {
             .unwrap_or_else(|| model_root.join("voices/af.bin"))
     }
 
-    /// 无 manifest 时的默认配置：标准 Kokoro-82M ONNX 布局 + voices 目录自动探测
+    /// 无 manifest 时的默认配置：标准 ONNX 布局（model.onnx + tokenizer.json + voices 目录自动探测）
     fn default_for(model_root: &Path) -> ModelManifest {
         let model_file = crate::model_manager::find_main_model_file(
             model_root,
@@ -132,14 +120,12 @@ impl ModelManifest {
         );
         ModelManifest {
             id,
-            pipeline_type: PipelineType::Phoneme,
             model_file,
             tokenizer_file,
             sample_rate: 24000,
             inputs: ModelInputs {
                 tokens: TensorSpec { name: "input_ids".into(), dtype: Dtype::I64 },
                 style: Some(TensorSpec { name: "style".into(), dtype: Dtype::F32 }),
-                speed: Some(TensorSpec { name: "speed".into(), dtype: Dtype::F32 }),
             },
             outputs: vec!["waveform".into(), "logits".into(), "audio_out".into(), "audio".into()],
             voices,
@@ -189,13 +175,23 @@ mod tests {
 
     #[test]
     fn test_default_manifest_kokoro() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../models/Kokoro-82M");
-        if !root.exists() {
-            eprintln!("Kokoro model dir missing, skipping");
+        // 通用 ONNX 布局参考目录（模型文件 + tokenizer.json + voices/）
+        // Kokoro-82M 已废弃删除，无现成测试目录 → 跳过
+        let candidates = [
+            crate::model_manager::model_dir("Kokoro-82M"),
+            crate::model_manager::model_dir("Kokoro-v1_0"),
+        ];
+        let root = candidates.iter().find(|p| p.exists());
+        let Some(root) = root else {
+            eprintln!("通用 ONNX 布局模型目录缺失，跳过（Kokoro-82M 已废弃）");
+            return;
+        };
+        // 仅当目录确实是通用 ONNX 布局（含 tokenizer.json）时才断言
+        if !root.join("tokenizer.json").exists() {
+            eprintln!("非通用 ONNX 布局（E2E 模型），跳过");
             return;
         }
-        let m = ModelManifest::load(&root).unwrap();
-        assert_eq!(m.pipeline_type, PipelineType::Phoneme);
+        let m = ModelManifest::load(root).unwrap();
         assert!(m.model_file.ends_with(".onnx"));
         assert_eq!(m.sample_rate, 24000);
         assert!(m.voices.contains_key("en"));
@@ -205,7 +201,6 @@ mod tests {
     fn test_manifest_parse() {
         let json = r#"{
             "id": "test",
-            "pipeline_type": "phoneme",
             "model_file": "model.onnx",
             "tokenizer_file": "tokenizer.json",
             "sample_rate": 24000,
@@ -218,7 +213,7 @@ mod tests {
         }"#;
         let m: ModelManifest = serde_json::from_str(json).unwrap();
         assert_eq!(m.inputs.tokens.name, "input_ids");
-        assert!(m.inputs.speed.is_none());
+        assert!(m.inputs.style.is_some());
         assert_eq!(m.voices.get("en").unwrap(), "voices/af.bin");
     }
 }

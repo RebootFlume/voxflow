@@ -1,6 +1,6 @@
 import { Mic, Loader2, Check, AlertCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useAppStore } from "@/stores/app";
+import { useAppStore } from "@/stores";
 import { t } from "@/lib/i18n";
 
 const STATUS_CONFIG = {

@@ -4,9 +4,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { useAppStore } from "@/stores/app";
+import { useAppStore } from "@/stores";
 import { t } from "@/lib/i18n";
-import { RuntimeLogsPanel } from "./RuntimeLogsPanel";
+import { RuntimeLogsPanel } from "@/modules/runtime/RuntimeLogsPanel";
 
 export function HistoryPanel() {
   const sub = useAppStore((s) => s.activeSubMenu);

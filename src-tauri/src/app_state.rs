@@ -7,19 +7,16 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use crate::inference::asr::AsrEngine;
 use crate::tts::service::TtsService;
 
 /// 全局引擎句柄
 pub struct AppState {
-    pub asr: Arc<Mutex<AsrEngine>>,
     pub tts: Arc<Mutex<TtsService>>,
 }
 
 impl AppState {
     pub fn new() -> Self {
         Self {
-            asr: Arc::new(Mutex::new(AsrEngine::new())),
             tts: Arc::new(Mutex::new(TtsService::new())),
         }
     }

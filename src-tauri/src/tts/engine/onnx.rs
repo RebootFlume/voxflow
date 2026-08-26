@@ -1,7 +1,7 @@
 //! 统一 ONNX 推理器
-//!
+//
 //! 只负责「按 ModelManifest 组装输入 Tensor + 执行推理 + 提取音频」，
-//! 不含任何模型特例（张量名、是否绑定 style/speed、输出节点名均来自 manifest）。
+//! 不含任何模型特例（张量名、是否绑定 style、输出节点名均来自 manifest）。
 
 use super::super::config::ModelManifest;
 use crate::errors::AppError;
@@ -26,9 +26,8 @@ impl GenericOnnxEngine {
         &mut self,
         token_ids: &[i64],
         style: Option<&[f32]>,
-        speed: Option<f32>,
     ) -> Result<Vec<f32>, AppError> {
-        let mut inputs: Vec<(&str, ort::session::SessionInputValue)> = Vec::with_capacity(3);
+        let mut inputs: Vec<(&str, ort::session::SessionInputValue)> = Vec::with_capacity(2);
 
         // tokens 张量（i64, [1, len]）
         let tokens_tensor = ort::value::Tensor::<i64>::from_array((
@@ -47,14 +46,6 @@ impl GenericOnnxEngine {
             })?;
             let t = ort::value::Tensor::<f32>::from_array(([1, 256], data.to_vec().into_boxed_slice()))
                 .map_err(|e| AppError::InferenceFailed(format!("style tensor: {e}")))?;
-            inputs.push((spec.name.as_str(), t.into()));
-        }
-
-        // speed 张量（可选）
-        if let Some(spec) = &self.manifest.inputs.speed {
-            let v = speed.unwrap_or(1.0);
-            let t = ort::value::Tensor::<f32>::from_array(([1], vec![v].into_boxed_slice()))
-                .map_err(|e| AppError::InferenceFailed(format!("speed tensor: {e}")))?;
             inputs.push((spec.name.as_str(), t.into()));
         }
 

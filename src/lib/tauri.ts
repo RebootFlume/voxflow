@@ -13,6 +13,17 @@ export function onSidecarEvent(handler: (payload: Record<string, unknown>) => vo
   return listen<Record<string, unknown>>("sidecar://event", (e) => handler(e.payload));
 }
 
+/** 查询显存状态（总显存 + 已用 + 各框架占用） */
+export function rustGetVramStatus(): Promise<{
+  available: boolean;
+  gpu_name: string;
+  total_mb: number;
+  used_mb: number;
+  frameworks: { llama: { mb: number } | null; sherpa: { mb: number } | null };
+}> {
+  return invoke("get_vram_status");
+}
+
 /** 选择文件夹（需 tauri-plugin-dialog） */
 export async function pickFolder(title: string, defaultPath?: string): Promise<string | null> {
   const dialog = await import("@tauri-apps/plugin-dialog");
@@ -29,24 +40,91 @@ export function openPath(path: string): Promise<void> {
 // Rust 原生推理引擎桥接（Phase 3）
 // ============================================================
 
-/** Rust 引擎：加载 ASR 模型 */
-export function rustLoadAsrModel(modelPath: string, device: string): Promise<Record<string, unknown>> {
-  return invoke("rust_load_asr_model", { modelPath, device });
+/** 卸载 sherpa ASR 引擎（杀 websocket server 进程） */
+export function rustUnloadSherpaAsr(): Promise<Record<string, unknown>> {
+  return invoke("rust_unload_sherpa_asr");
 }
 
-/** Rust 引擎：ASR 语音识别（文件） */
-export function rustTranscribe(filePath: string): Promise<{ text: string; duration: number }> {
-  return invoke("rust_transcribe", { filePath });
+// ============================================================
+// llama-server 子进程桥接（ASR 主力路线）
+// ============================================================
+
+/** 启动 llama-server 子进程（常驻，供 ASR 转写） */
+export function rustStartLlamaServer(): Promise<Record<string, unknown>> {
+  return invoke("rust_start_llama_server");
 }
 
-/** Rust 引擎：查询 ASR 状态 */
-export function rustAsrStatus(): Promise<Record<string, unknown>> {
-  return invoke("rust_asr_status");
+/** 停止 llama-server 子进程 */
+export function rustStopLlamaServer(): Promise<Record<string, unknown>> {
+  return invoke("rust_stop_llama_server");
+}
+
+/** 查询 llama-server 状态 */
+export function rustLlamaServerStatus(): Promise<{ loaded: boolean; model: string }> {
+  return invoke("rust_llama_server_status");
+}
+
+/** 通过 llama-server 转写音频文件（主力 ASR 入口） */
+export function rustTranscribeLlama(filePath: string): Promise<{ text: string; duration: number; model: string }> {
+  return invoke("rust_transcribe_llama", { filePath });
 }
 
 /** Rust 引擎：加载 TTS 模型 */
 export function rustLoadTtsModel(modelPath: string, device: string): Promise<Record<string, unknown>> {
   return invoke("rust_load_tts_model", { modelPath, device });
+}
+
+/** 列出所有可切换的纯 E2E TTS 模型（Kokoro/Matcha/ZipVoice/Pocket/Supertonic/Kitten） */
+export interface E2eTtsModelInfo {
+  id: string;
+  name: string;
+  cli_prefix: string;
+  default_dir: string;
+  is_chinese_optimized: boolean;
+  languages: string[];
+  supports_speaker: boolean;
+  /** auto=自动识别 / fixed=单语言固定 / select=需用户选 / cloning=语音克隆 */
+  language_mode: "auto" | "fixed" | "select" | "cloning";
+  downloaded: boolean;
+}
+
+export function rustListE2eTtsModels(): Promise<{ models: E2eTtsModelInfo[] }> {
+  return invoke("rust_list_e2e_tts_models");
+}
+
+/** 切换 E2E TTS 模型（按 id，如 "kokoro-v1_1" / "matcha"） */
+export function rustSwitchE2eTtsModel(
+  modelId: string,
+  device: string,
+): Promise<Record<string, unknown>> {
+  return invoke("rust_switch_e2e_tts_model", { modelId, device });
+}
+
+/** 卸载当前 TTS 模型（释放引擎，可随后删除模型） */
+export function rustUnloadTtsModel(): Promise<Record<string, unknown>> {
+  return invoke("rust_unload_tts_model");
+}
+
+/** 设置语音克隆参数（参考音频 + 参考文本） */
+export function rustSetTtsCloneVoice(
+  audioPath: string,
+  referenceText: string,
+): Promise<Record<string, unknown>> {
+  return invoke("rust_set_tts_clone_voice", { audioPath, referenceText });
+}
+
+/** 清除语音克隆参数（回到预设音色） */
+export function rustClearTtsCloneVoice(): Promise<Record<string, unknown>> {
+  return invoke("rust_clear_tts_clone_voice");
+}
+
+/** 查询当前 TTS 模型的说话人列表 */
+export function rustListTtsSpeakers(): Promise<{
+  model: string;
+  num_speakers: number;
+  speakers: { sid: number; name: string }[];
+}> {
+  return invoke("rust_list_tts_speakers");
 }
 
 /** TTS 可用语言/音色（由 Rust 扫 voices 目录得来，不写死） */
@@ -58,11 +136,11 @@ export function rustSetTtsLanguage(language: string): Promise<{ language: string
   return invoke("rust_set_tts_language", { language });
 }
 
-/** Rust 引擎：TTS 合成并保存为文件 */
+/** Rust 引擎：TTS 合成并保存为文件（端到端：文本 → 波形，无语速参数） */
 export function rustSynthesize(
-  text: string, voice: string, rate: number, exportDir: string,
+  text: string, voice: string, exportDir: string,
 ): Promise<Record<string, unknown>> {
-  return invoke("rust_synthesize", { text, voice, rate, exportDir });
+  return invoke("rust_synthesize", { text, voice, exportDir });
 }
 
 /** Rust 引擎：查询 TTS 状态 */

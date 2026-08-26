@@ -1,6 +1,6 @@
 import { Check } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useAppStore } from "@/stores/app";
+import { useAppStore } from "@/stores";
 import { t } from "@/lib/i18n";
 
 const ACCENT_PRESETS: { hex: string; key: string }[] = [

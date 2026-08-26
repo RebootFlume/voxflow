@@ -1,6 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { RuntimeLogView } from "@/components/RuntimeLogView";
-import { useAppStore } from "@/stores/app";
+import { useAppStore } from "@/stores";
 import { t } from "@/lib/i18n";
 
 export function RuntimeLogsPanel() {

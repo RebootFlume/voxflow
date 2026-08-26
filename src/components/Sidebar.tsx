@@ -1,5 +1,5 @@
 import { cn } from "@/lib/utils";
-import { useAppStore, DEFAULT_SUB_MENUS } from "@/stores/app";
+import { useAppStore, DEFAULT_SUB_MENUS } from "@/stores";
 import { t } from "@/lib/i18n";
 
 const SUB_MENU_LABEL_KEYS: Record<string, string> = {
@@ -44,7 +44,7 @@ export function Sidebar() {
   if (collapsed) return null;
 
   return (
-    <nav className="flex h-full w-[200px] shrink-0 flex-col border-r bg-muted/30">
+    <nav className="flex h-full w-[200px] shrink-0 flex-col border-r bg-card">
       <div className="px-4 pb-2 pt-4 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
         {t(locale, MODULE_TITLE_KEYS[activeModule])}
       </div>
@@ -59,7 +59,7 @@ export function Sidebar() {
               className={cn(
                 "rounded-md px-3 py-1.5 text-left text-[13px] text-muted-foreground transition-colors",
                 "hover:bg-accent hover:text-foreground",
-                active && "bg-accent font-medium text-foreground",
+                active && "bg-primary/10 font-medium text-primary hover:bg-primary/15 hover:text-primary",
               )}
             >
               {t(locale, SUB_MENU_LABEL_KEYS[key] ?? key)}

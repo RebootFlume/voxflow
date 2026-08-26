@@ -11,6 +11,8 @@ pub enum EngineKind {
     Onnx,
     /// llama.cpp GGUF 推理（LLM、ASR）
     LlamaCpp,
+    /// llama-server 子进程（HTTP 推理）
+    LlamaServer,
     /// Candle（纯 Rust，如 qwen3-asr-rs）
     Candle,
 }

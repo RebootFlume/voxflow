@@ -1,5 +1,5 @@
 import { t } from "@/lib/i18n";
-import { useAppStore } from "@/stores/app";
+import { useAppStore } from "@/stores";
 
 export type ModelStatus = "idle" | "loading" | "ready" | "error";
 

@@ -4,8 +4,7 @@
 
 use std::path::PathBuf;
 
-// 在实际使用中，你需要导入正确的模块路径
-// use voxflow_lib::download::{DownloadConfig, SyncDownloader};
+use voxflow_lib::download;
 
 /// 示例 1：同步下载单个文件
 fn example_sync_download() -> anyhow::Result<()> {

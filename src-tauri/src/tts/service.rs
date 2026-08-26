@@ -1,15 +1,16 @@
-//! TTS 统一调度 Service
+//! TTS 统一调度 Service（端到端 / E2E）
 //!
-//! 负责：manifest 加载、session 构建、tokenizer vocab、voice 管理、
-//! 管道分发（Phoneme / Direct）、状态机。
+//! 负责：manifest 加载、session 构建、E2E 文本分词器、voice 管理、状态机。
+//! 管道即「纯文本 → token ids → 端到端模型推理 → 波形」，
+//! 无音素 / G2P、无语速、无时长预测、无重采样/拉伸后处理。
 //! 具体模型差异全部收敛在 `ModelManifest` 配置中，本 Service 不含模型特例。
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use super::config::{ModelManifest, PipelineType};
+use super::config::ModelManifest;
 use super::engine::onnx::GenericOnnxEngine;
-use super::middleware::{direct_tokenizer, PhonemizerRouter};
+use super::engine::sherpa::SherpaTtsEngine;
+use super::tokenizer::TextTokenizer;
 use super::traits::{TtsEngine, TtsResult};
 use crate::errors::AppError;
 
@@ -28,10 +29,11 @@ pub struct TtsService {
     model_root: Option<PathBuf>,
     engine: Option<GenericOnnxEngine>,
     manifest: Option<ModelManifest>,
-    phonemizer: PhonemizerRouter,
-    phoneme_to_id: HashMap<String, u32>,
+    tokenizer: TextTokenizer,
     voice_embedding: Vec<f32>,
     language: String,
+    /// VITS 后端（sherpa-onnx 子进程）；当加载 VITS 模型时使用
+    sherpa: Option<SherpaTtsEngine>,
 }
 
 impl TtsService {
@@ -41,10 +43,10 @@ impl TtsService {
             model_root: None,
             engine: None,
             manifest: None,
-            phonemizer: PhonemizerRouter::new(),
-            phoneme_to_id: HashMap::new(),
+            tokenizer: TextTokenizer::new(),
             voice_embedding: Vec::new(),
             language: String::new(),
+            sherpa: None,
         }
     }
 
@@ -52,32 +54,13 @@ impl TtsService {
         &self.state
     }
 
-    /// 从 tokenizer.json 的 model.vocab 装载 phoneme → id 映射
+    /// 装载 E2E 文本分词器（tokenizer.json 的 model.vocab）
     fn load_tokenizer(&mut self, model_root: &Path, manifest: &ModelManifest) {
         let Some(tok_file) = &manifest.tokenizer_file else {
             eprintln!("[tts] WARNING: no tokenizer_file in manifest");
             return;
         };
-        let p = model_root.join(tok_file);
-        let Ok(data) = std::fs::read_to_string(&p) else {
-            eprintln!("[tts] WARNING: failed to read tokenizer {}", p.display());
-            return;
-        };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) else {
-            eprintln!("[tts] WARNING: failed to parse tokenizer {}", p.display());
-            return;
-        };
-        let Some(vocab) = v.get("model").and_then(|m| m.get("vocab")).and_then(|v| v.as_object()) else {
-            eprintln!("[tts] WARNING: no model.vocab in tokenizer");
-            return;
-        };
-        self.phoneme_to_id.clear();
-        for (k, val) in vocab {
-            if let Some(id) = val.as_u64() {
-                self.phoneme_to_id.insert(k.clone(), id as u32);
-            }
-        }
-        eprintln!("[tts] loaded {} phoneme mappings", self.phoneme_to_id.len());
+        self.tokenizer.load_tokenizer(model_root, tok_file);
     }
 
     /// 从磁盘读取 voice embedding，兼容裸 f32（af.bin）与 torch ZIP（zf_*.pt）
@@ -151,6 +134,14 @@ impl Default for TtsService {
     }
 }
 
+impl TtsService {
+    /// 获取底层 sherpa 引擎的可变引用（供语音克隆等操作）
+    /// 仅在已加载 sherpa 模型时返回 Some
+    pub fn as_mut_sherpa(&mut self) -> Option<&mut SherpaTtsEngine> {
+        self.sherpa.as_mut()
+    }
+}
+
 impl TtsEngine for TtsService {
     fn name(&self) -> &str {
         match &self.state {
@@ -166,8 +157,41 @@ impl TtsEngine for TtsService {
             return Err(AppError::ModelNotFound(model_path.display().to_string()));
         }
 
-        // 定位模型根目录 + 加载 manifest
+        // 定位模型根目录
         let model_root = ModelManifest::resolve_model_root(model_path);
+
+        // E2E 模型（kokoro/matcha/zipvoice/pocket/supertonic/kitten）→ sherpa-onnx 子进程后端
+        // VITS 模型（vits-*.onnx / rule.far 存在）→ 同样走 sherpa-onnx（音素由 CLI 内部处理）
+        let file_name = model_path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        let is_e2e = [
+            "kokoro", "matcha", "zipvoice", "pocket", "supertonic", "kitten",
+        ]
+        .iter()
+        .any(|k| file_name.contains(k) || model_path.to_string_lossy().to_lowercase().contains(k));
+        if is_e2e || file_name.starts_with("vits-") || model_root.join("rule.far").exists() {
+            eprintln!("[tts] detected sherpa-onnx model (E2E or VITS), using sherpa-onnx backend");
+            let mut vits = SherpaTtsEngine::new();
+            vits.load(model_path, _device)?;
+            let mut model_name = vits.name().to_string();
+            if model_name.is_empty() {
+                // 回退：VITS 用文件名
+                model_name = model_path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "VITS".into());
+            }
+            self.sherpa = Some(vits);
+            self.model_root = Some(model_root);
+            self.manifest = None;
+            self.engine = None;
+            self.language = "zh".to_string();
+            self.state = ServiceState::Ready { model_name };
+            return Ok(());
+        }
+
         let manifest = ModelManifest::load(&model_root)?;
 
         // 构建 ONNX session
@@ -187,7 +211,7 @@ impl TtsEngine for TtsService {
         self.manifest = Some(manifest.clone());
         self.engine = Some(GenericOnnxEngine::new(session, manifest.clone()));
 
-        // tokenizer vocab
+        // E2E 文本分词器
         self.load_tokenizer(&model_root, &manifest);
 
         // 默认语言（有 zh 则 zh，否则 en）→ 默认 voice
@@ -207,7 +231,8 @@ impl TtsEngine for TtsService {
         self.engine = None;
         self.manifest = None;
         self.model_root = None;
-        self.phoneme_to_id.clear();
+        self.sherpa = None;
+        self.tokenizer = TextTokenizer::new();
         self.voice_embedding.clear();
         self.language.clear();
         self.state = ServiceState::Uninitialized;
@@ -219,6 +244,12 @@ impl TtsEngine for TtsService {
     }
 
     fn set_language(&mut self, language: &str) -> TtsResult<()> {
+        // VITS 后端：只支持中文，委托给 sherpa 引擎
+        if let Some(vits) = self.sherpa.as_mut() {
+            vits.set_language(language)?;
+            self.language = language.to_string();
+            return Ok(());
+        }
         let (model_root, manifest) = match (&self.model_root, &self.manifest) {
             (Some(r), Some(m)) => (r.clone(), m.clone()),
             _ => return Err(AppError::NotInitialized),
@@ -242,33 +273,30 @@ impl TtsEngine for TtsService {
         Ok(())
     }
 
-    fn infer(&mut self, text: &str, _voice: &str, rate: f64) -> TtsResult<Vec<i16>> {
+    /// 端到端合成：纯文本 → token ids → 模型推理 → 24kHz i16 PCM
+    fn infer(&mut self, text: &str, _voice: &str) -> TtsResult<Vec<i16>> {
         if !self.is_loaded() {
             return Err(AppError::NotInitialized);
         }
         if text.is_empty() {
             return Ok(Vec::new());
         }
-        let manifest = self.manifest.as_ref().ok_or(AppError::NotInitialized)?;
 
-        // 1. 按管道类型生成 token ids
-        let token_ids = match manifest.pipeline_type {
-            PipelineType::Phoneme => self.phonemizer.to_token_ids(text, &self.phoneme_to_id),
-            PipelineType::Direct => direct_tokenizer::direct_tokenize(text, &self.phoneme_to_id)?,
-        };
-        let has_content = token_ids.len() > 2; // 仅有首尾边界 $ 不算内容
+        // 1. E2E 文本分词（无音素 / G2P）
+        // VITS 后端：直接交给 sherpa-onnx 子进程（内部处理音素）
+        if let Some(vits) = self.sherpa.as_mut() {
+            return vits.infer(text, _voice);
+        }
+        let token_ids = self.tokenizer.encode(text);
         eprintln!(
-            "[tts] text='{}' token_ids(len={}) has_content={} first={:?}",
+            "[tts] text='{}' token_ids(len={}) first={:?}",
             text.chars().take(80).collect::<String>(),
             token_ids.len(),
-            has_content,
             token_ids.iter().take(6).collect::<Vec<_>>()
         );
-        if !has_content {
-            return Err(AppError::G2pFailed(
-                "phoneme encoding is empty for this language — G2P produced no phonemes \
-                 (English uses passthrough; Chinese needs the pinyin fallback)"
-                    .to_string(),
+        if token_ids.is_empty() {
+            return Err(AppError::InvalidInput(
+                "no token ids produced for this text — tokenizer vocab does not cover it".to_string(),
             ));
         }
         let mut token_ids = token_ids;
@@ -279,10 +307,9 @@ impl TtsEngine for TtsService {
         // 2. 推理（engine 按 manifest 组装张量）
         let engine = self.engine.as_mut().ok_or(AppError::NotInitialized)?;
         let style: Option<&[f32]> = Some(&self.voice_embedding);
-        let speed = rate.clamp(0.5, 2.0) as f32;
-        let audio_f32 = engine.run(&token_ids, style, Some(speed))?;
+        let audio_f32 = engine.run(&token_ids, style)?;
 
-        // 3. float32 → int16（24kHz）
+        // 3. float32 → int16（24kHz，直线输出，无重采样/拉伸后处理）
         let samples: Vec<i16> = audio_f32
             .iter()
             .map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
@@ -306,6 +333,6 @@ mod tests {
     #[test]
     fn test_infer_before_load_errors() {
         let mut s = TtsService::new();
-        assert!(matches!(s.infer("hello", "af", 1.0), Err(AppError::NotInitialized)));
+        assert!(matches!(s.infer("hello", "af"), Err(AppError::NotInitialized)));
     }
 }

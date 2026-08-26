@@ -7,6 +7,9 @@ export default {
   ],
   theme: {
     extend: {
+      fontFamily: {
+        sans: ["Geist Variable", "system-ui", "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans SC", "sans-serif"],
+      },
       borderRadius: {
         lg: "var(--radius)",
         md: "calc(var(--radius) - 2px)",

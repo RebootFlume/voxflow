@@ -1,17 +1,17 @@
 import { useCallback, useEffect, useState } from "react";
-import { FileText, Loader2, Mic, Play, Trash2 } from "lucide-react";
+import { Loader2, Mic, Play, Sparkles, Trash2 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Slider } from "@/components/ui/slider";
 import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ModelSelector } from "@/components/ModelSelector";
 import { ModelStatusBadge } from "@/components/ModelStatusBadge";
-import { useAppStore } from "@/stores/app";
+import { useAppStore } from "@/stores";
 import { t } from "@/lib/i18n";
-import { rustListTtsVoices, rustSetTtsLanguage, rustSynthesize } from "@/lib/tauri";
+import { rustListE2eTtsModels, rustListTtsSpeakers, rustListTtsVoices, rustSetTtsCloneVoice, rustClearTtsCloneVoice, rustSetTtsLanguage, rustSynthesize } from "@/lib/tauri";
 import { loadTtsModel } from "@/lib/modelLoader";
 import { useExportDir } from "@/lib/useExportDir";
 
@@ -77,16 +77,55 @@ function ModelDevicePage() {
 // 音色设置子页面
 // ============================================================
 
-const VOICES: { value: string; labelKey: string; descKey: string }[] = [
-  { value: "default", labelKey: "tts.voice.default", descKey: "tts.voice.defaultDesc" },
-  { value: "female-gentle", labelKey: "tts.voice.female", descKey: "tts.voice.femaleDesc" },
-  { value: "male-mature", labelKey: "tts.voice.male", descKey: "tts.voice.maleDesc" },
-];
-
 function VoiceSettingsPage() {
   const locale = useAppStore((s) => s.locale);
   const tts = useAppStore((s) => s.tts);
+  const ttsClone = useAppStore((s) => s.ttsClone);
   const updateTts = useAppStore((s) => s.updateTts);
+  const updateTtsClone = useAppStore((s) => s.updateTtsClone);
+  const [speakers, setSpeakers] = useState<{ sid: number; name: string }[]>([]);
+  const [numSpeakers, setNumSpeakers] = useState(0);
+
+  // 加载模型的说话人列表
+  useEffect(() => {
+    void rustListTtsSpeakers().then((r) => {
+      setSpeakers(r.speakers ?? []);
+      setNumSpeakers(r.num_speakers ?? 0);
+    }).catch(() => {});
+  }, [tts.model]);
+
+  const isCloningModel = /^(zipvoice|pocket)/i.test(tts.model);
+
+  async function handlePickAudio() {
+    const dialog = await import("@tauri-apps/plugin-dialog");
+    const picked = await dialog.open({
+      multiple: false,
+      filters: [{ name: "Audio", extensions: ["wav", "mp3", "flac", "ogg", "m4a"] }],
+      title: t(locale, "tts.voice.clone.pickAudio"),
+    });
+    if (picked && typeof picked === "string") {
+      updateTtsClone({ audioPath: picked, status: "idle", error: "" });
+    }
+  }
+
+  async function handleApplyClone() {
+    const { audioPath, referenceText } = useAppStore.getState().ttsClone;
+    if (!audioPath) return;
+    updateTtsClone({ status: "setting" });
+    try {
+      await rustSetTtsCloneVoice(audioPath, referenceText);
+      updateTtsClone({ active: true, status: "ok" });
+    } catch (e) {
+      updateTtsClone({ status: "error", error: String(e) });
+    }
+  }
+
+  async function handleClearClone() {
+    try {
+      await rustClearTtsCloneVoice();
+    } catch { /* ignore */ }
+    updateTtsClone({ active: false, audioPath: "", referenceText: "", status: "idle", error: "" });
+  }
 
   return (
     <div className="space-y-4">
@@ -94,76 +133,117 @@ function VoiceSettingsPage() {
       <Card>
         <CardHeader>
           <CardTitle className="text-base">{t(locale, "tts.voice.preset")}</CardTitle>
-          <CardDescription>{t(locale, "tts.voice.presetDesc")}</CardDescription>
+          <CardDescription>
+            {numSpeakers > 0
+              ? `${numSpeakers} ${t(locale, "tts.voice.speakersAvailable")}`
+              : t(locale, "tts.voice.presetDesc")}
+          </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-2">
-          {VOICES.map((v) => (
-            <div
-              key={v.value}
-              className={`flex items-center justify-between rounded-lg border p-3 cursor-pointer transition-colors ${
-                tts.voice === v.value ? "border-primary bg-primary/5" : "hover:bg-muted/50"
-              }`}
-              onClick={() => updateTts({ voice: v.value })}
-            >
-              <div className="flex items-center gap-3">
-                <span className={`flex h-5 w-5 items-center justify-center rounded-full border ${
-                  tts.voice === v.value ? "border-primary bg-primary text-primary-foreground" : "border-muted-foreground/30"
-                }`}>
-                  {tts.voice === v.value && <span className="h-2 w-2 rounded-full bg-current" />}
-                </span>
-                <div>
-                  <span className="text-sm font-medium">{t(locale, v.labelKey)}</span>
-                  <span className="ml-2 text-xs text-muted-foreground">{t(locale, v.descKey)}</span>
-                </div>
-              </div>
-              {tts.voice === v.value && <Badge>{t(locale, "tts.current")}</Badge>}
+        <CardContent>
+          {speakers.length > 0 ? (
+            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-2">
+              {speakers.map((sp) => {
+                const selected = tts.voice === String(sp.sid);
+                return (
+                  <button
+                    key={sp.sid}
+                    className={`rounded-lg border px-3 py-2 text-left transition-all ${
+                      selected
+                        ? "border-primary bg-primary/10 ring-1 ring-primary/20"
+                        : "border-border hover:border-primary/40 hover:bg-muted/50"
+                    }`}
+                    onClick={() => {
+                      updateTts({ voice: String(sp.sid) });
+                      if (ttsClone.active) handleClearClone();
+                    }}
+                  >
+                    <span className={`block text-sm font-medium leading-tight truncate ${
+                      selected ? "text-primary" : ""
+                    }`}>{sp.name}</span>
+                    <span className="block text-[10px] text-muted-foreground mt-0.5">sid {sp.sid}</span>
+                  </button>
+                );
+              })}
             </div>
-          ))}
+          ) : (
+            <p className="text-xs text-muted-foreground">{t(locale, "tts.voice.noSpeakers")}</p>
+          )}
+          {numSpeakers > 1 && (
+            <div className="flex items-center gap-2 mt-3 pt-3 border-t">
+              <span className="text-xs text-muted-foreground">sid:</span>
+              <Input
+                type="number"
+                min={0}
+                max={numSpeakers - 1}
+                value={tts.voice}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                  const v = e.target.value;
+                  if (v !== "") updateTts({ voice: v });
+                }}
+                className="h-8 w-20 text-xs"
+              />
+              <span className="text-xs text-muted-foreground">/ {numSpeakers - 1}</span>
+            </div>
+          )}
         </CardContent>
       </Card>
 
-      {/* 语速 */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">{t(locale, "tts.speedLabel")}</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="flex items-center gap-4">
-            <span className="text-xs text-muted-foreground">0.5x</span>
-            <Slider
-              value={[tts.rate]}
-              min={0.5}
-              max={2.0}
-              step={0.05}
-              onValueChange={([rate]) => updateTts({ rate })}
-              className="flex-1"
-            />
-            <span className="text-xs text-muted-foreground">2.0x</span>
-            <span className="w-12 text-right text-sm tabular-nums font-medium">{tts.rate.toFixed(2)}x</span>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* 克隆音色（预留） */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">{t(locale, "tts.voice.clone")}</CardTitle>
-          <CardDescription>{t(locale, "tts.voice.cloneDesc")}</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex gap-2">
-            <Button variant="outline" disabled>
-              <Mic className="mr-2 h-4 w-4" />
-              {t(locale, "tts.voice.record")}
-            </Button>
-            <Button variant="outline" disabled>
-              <FileText className="mr-2 h-4 w-4" />
-              {t(locale, "tts.voice.upload")}
-            </Button>
-          </div>
-          <p className="mt-2 text-xs text-muted-foreground">{t(locale, "tts.voice.comingSoon")}</p>
-        </CardContent>
-      </Card>
+      {/* 语音克隆（仅 ZipVoice / PocketTts 模型显示） */}
+      {isCloningModel && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              {t(locale, "tts.voice.clone")}
+              <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4">{t(locale, "tts.voice.clone.supported")}</Badge>
+            </CardTitle>
+            <CardDescription>{t(locale, "tts.voice.cloneDesc")}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {ttsClone.active && (
+              <div className="flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-xs text-emerald-600 dark:text-emerald-400">
+                <Sparkles className="h-3.5 w-3.5" />
+                {t(locale, "tts.voice.clone.active")}
+              </div>
+            )}
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={() => void handlePickAudio()}>
+                <Mic className="mr-2 h-4 w-4" />
+                {t(locale, "tts.voice.clone.pickAudio")}
+              </Button>
+              {ttsClone.audioPath && (
+                <span className="flex-1 truncate text-xs text-muted-foreground" title={ttsClone.audioPath}>
+                  {ttsClone.audioPath.split(/[\\/]/).pop()}
+                </span>
+              )}
+            </div>
+            {ttsClone.audioPath && (
+              <Input
+                value={ttsClone.referenceText}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => updateTtsClone({ referenceText: e.target.value, status: "idle", error: "" })}
+                placeholder={t(locale, "tts.voice.clone.placeholder")}
+                className="h-8 text-xs"
+              />
+            )}
+            {ttsClone.audioPath && ttsClone.referenceText.trim() && (
+              <div className="flex items-center gap-2">
+                <Button size="sm" className="h-8" disabled={ttsClone.status === "setting"} onClick={() => void handleApplyClone()}>
+                  {ttsClone.status === "setting" && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+                  {t(locale, "tts.voice.clone.apply")}
+                </Button>
+                {ttsClone.active && (
+                  <Button variant="ghost" size="sm" className="h-8" onClick={() => void handleClearClone()}>
+                    {t(locale, "tts.voice.clone.clear")}
+                  </Button>
+                )}
+              </div>
+            )}
+            {ttsClone.status === "error" && ttsClone.error && (
+              <p className="text-xs text-destructive">{ttsClone.error}</p>
+            )}
+            <p className="text-[11px] text-muted-foreground">{t(locale, "tts.voice.clone.hint")}</p>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }
@@ -172,11 +252,40 @@ function VoiceSettingsPage() {
 // 文字转语音子页面（合成 + 任务列表）
 // ============================================================
 
+// 固定英文显示，不跟随软件 locale 切换（用户要求）
+const langLabel: Record<string, string> = {
+  zh: "Chinese",
+  en: "English",
+  ja: "Japanese",
+  ko: "Korean",
+  fr: "French",
+  de: "German",
+  es: "Spanish",
+  ru: "Russian",
+  ar: "Arabic",
+  vi: "Vietnamese",
+};
+
 function LanguageSelector() {
+  const locale = useAppStore((s) => s.locale);
   const language = useAppStore((s) => s.tts.language);
+  const ttsModel = useAppStore((s) => s.tts.model);
   const updateTts = useAppStore((s) => s.updateTts);
   const [langs, setLangs] = useState<string[]>([]);
   const [voicesByLang, setVoicesByLang] = useState<Record<string, string[]>>({});
+  const [modelMode, setModelMode] = useState<
+    "auto" | "fixed" | "select" | "cloning" | null
+  >(null);
+  useEffect(() => {
+    // 从注册表查当前模型的 language_mode（id 匹配：忽略大小写和 -/_）
+    void rustListE2eTtsModels().then((r) => {
+      const norm = (s: string) => s.toLowerCase().replace(/[-_]/g, "");
+      const hit = (r.models ?? []).find(
+        (m) => norm(m.id) === norm(ttsModel) || norm(m.name) === norm(ttsModel),
+      );
+      if (hit) setModelMode(hit.language_mode);
+    }).catch(() => {});
+  }, [ttsModel]);
   useEffect(() => {
     void rustListTtsVoices().then((r) => {
       const langs = (r.languages as string[]) ?? [];
@@ -194,12 +303,34 @@ function LanguageSelector() {
       }
     }).catch(() => {});
   }, []);
-  // 固定英文显示，不跟随软件 locale 切换（用户要求）
-  const langLabel: Record<string, string> = {
-    zh: "Chinese",
-    en: "English",
-    ja: "Japanese",
-  };
+  // 自动识别模式（如 Kokoro 中英混合）→ 不显示语言选择，改为提示
+  if (modelMode === "auto") {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-2.5 py-1 text-xs text-emerald-600 dark:text-emerald-400">
+        <Sparkles className="h-3.5 w-3.5" />
+        {t(locale, "tts.languageAuto")}
+      </span>
+    );
+  }
+  // 单语言固定（Kokoro-en / Kitten / Matcha-zh）→ 显示固定语言标记
+  if (modelMode === "fixed") {
+    const fixedLang = langs.length === 1 ? langs[0] : "en";
+    return (
+      <span className="inline-flex items-center rounded-md border border-border bg-muted/50 px-2.5 py-1 text-xs text-muted-foreground">
+        {langLabel[fixedLang] ?? fixedLang}
+      </span>
+    );
+  }
+  // 语音克隆（ZipVoice / PocketTTS）→ 提示需要参考音频
+  if (modelMode === "cloning") {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/5 px-2.5 py-1 text-xs text-amber-600 dark:text-amber-400">
+        <Mic className="h-3.5 w-3.5" />
+        {t(locale, "tts.languageCloning")}
+      </span>
+    );
+  }
+  // 默认 / select 模式（Supertonic 等）→ 显示语言下拉
   const options = langs.length ? langs : ["zh", "en"];
   return (
     <Select value={language} onValueChange={(v) => {
@@ -251,11 +382,10 @@ function SynthesizePage() {
     if (!trimmed) return;
     const st = useAppStore.getState();
 
-    st.addLog(`[synthesize] start: "${trimmed.slice(0, 40)}" voice=${tts.voice} rate=${tts.rate} dir=${exportDir || "-"}`, "info");
+    st.addLog(`[synthesize] start: "${trimmed.slice(0, 40)}" voice=${tts.voice} dir=${exportDir || "-"}`, "info");
     st.addTtsTask({
       text: trimmed,
       voice: tts.voice,
-      rate: tts.rate,
       status: "synthesizing",
     });
     // addTtsTask 之后从 store 重新取任务 id（避免闭包里 store.ttsTasks 快照滞后导致回写不到，从而一直转圈）
@@ -265,14 +395,13 @@ function SynthesizePage() {
 
     // Rust 原生引擎：直接调用 Tauri invoke
       try {
-        const result = await rustSynthesize(trimmed, tts.voice, tts.rate, exportDir);
+        const result = await rustSynthesize(trimmed, tts.voice, exportDir);
         const cur = useAppStore.getState();
-        cur.addLog(`[synthesize] done: ${result.saved_path as string} duration=${String(result.duration as unknown as string)} size=${String(result.size as unknown as string)}`, "success");
+        cur.addLog(`[synthesize] done: ${result.saved_path as string} size=${String(result.size as unknown as string)}`, "success");
         if (taskId) {
           cur.updateTtsTask(taskId, {
             status: "done",
             savedPath: String((result as { saved_path?: string }).saved_path || ""),
-            duration: Number((result as { duration?: number }).duration) || undefined,
             fileSize: String((result as { size?: string }).size || ""),
           });
         }
@@ -317,9 +446,7 @@ function SynthesizePage() {
           <div className="flex h-10 items-center gap-4">
             <span className="w-20 shrink-0 text-sm font-medium">Voice</span>
             <div className="flex flex-1 items-center gap-2 text-sm">
-              <span>{t(locale, VOICES.find((v) => v.value === tts.voice)?.labelKey ?? "tts.voice.default")}</span>
-              <span className="text-muted-foreground">·</span>
-              <span className="text-muted-foreground">{tts.rate.toFixed(2)}x</span>
+              <span>{tts.voice ? `sid ${tts.voice}` : t(locale, "tts.voice.default")}</span>
             </div>
           </div>
           <div className="flex h-10 items-center gap-4">
@@ -346,9 +473,7 @@ function SynthesizePage() {
           />
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <span>{t(locale, "tts.voiceLabel")}: {t(locale, VOICES.find((v) => v.value === tts.voice)?.descKey ?? "tts.voice.default")}</span>
-              <span>·</span>
-              <span>{t(locale, "tts.speedLabel")} {tts.rate.toFixed(2)}x</span>
+              <span>{t(locale, "tts.voiceLabel")}: sid {tts.voice}</span>
             </div>
             <Button size="sm" onClick={() => void doSynthesize()} disabled={!text.trim() || busy}>
               {busy ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Play className="mr-1.5 h-3.5 w-3.5" />}
@@ -377,10 +502,8 @@ function SynthesizePage() {
                       </Button>
                     </div>
                     <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                      <span>{t(locale, VOICES.find((v) => v.value === task.voice)?.descKey ?? "tts.voice.default")}</span>
+                      <span>sid {task.voice}</span>
                       <span>·</span>
-                      <span>{task.rate}x</span>
-                      {task.duration != null && <><span>·</span><span>{task.duration}s</span></>}
                       {task.fileSize && <><span>·</span><span>{task.fileSize}</span></>}
                       {task.status === "synthesizing" && (
                         <Badge variant="secondary" className="gap-1">

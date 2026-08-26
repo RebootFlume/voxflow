@@ -51,10 +51,10 @@ fn test_audio_float_int16_roundtrip() {
 }
 
 #[test]
-#[ignore = "needs 300MB+ model download; run with --ignored. std FP32 preferred"]
+#[ignore = "needs 300MB+ model download; run with --ignored"]
 fn test_tts_model_load() {
-    let model_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../models/Kokoro-82M/onnx/model.onnx");
+    let model_path = crate::model_manager::model_dir("Kokoro-v1_0")
+        .join("model.onnx");
     if !model_path.exists() {
         eprintln!("Kokoro ONNX 模型未下载，跳过 TTS 加载测试");
         return;
@@ -69,10 +69,10 @@ fn test_tts_model_load() {
 }
 
 #[test]
-#[ignore = "needs model + ort load; run with --ignored. std FP32 preferred"]
+#[ignore = "needs model + sherpa-onnx; run with --ignored"]
 fn test_tts_inference_pipeline() {
-    let model_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../models/Kokoro-82M/onnx/model.onnx");
+    let model_path = crate::model_manager::model_dir("Kokoro-v1_0")
+        .join("model.onnx");
     if !model_path.exists() {
         eprintln!("Kokoro ONNX 模型未下载，跳过 TTS 推理测试");
         return;
@@ -81,30 +81,10 @@ fn test_tts_inference_pipeline() {
     let mut service = crate::tts::service::TtsService::new();
     service.load(&model_path, "cpu").unwrap();
 
-    // 英文
-    let samples = service.infer("hello", "af", 1.0).unwrap();
-    assert!(!samples.is_empty());
-    println!("TTS 英文推理成功: {} samples, 24kHz", samples.len());
-
-    // 中文（拼音回退 G2P，须产出实质音频而非报错/空）
+    // 中文（端到端直通，须产出实质音频而非报错/空）
     service.set_language("zh").unwrap();
-    let zh_samples = service.infer("你好世界", "zf_xiaobei", 1.0).unwrap();
+    let zh_samples = service.infer("你好世界", "zf_xiaobei").unwrap();
     assert!(!zh_samples.is_empty());
     println!("TTS 中文推理成功: {} samples, 24kHz", zh_samples.len());
 }
 
-#[test]
-fn test_asr_model_load() {
-    let model_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../models/qwen3-asr-0.6b-gguf/Qwen3-ASR-0.6B-Q8_0.gguf");
-    if !model_path.exists() {
-        eprintln!("Qwen3-ASR GGUF 模型未下载，跳过 ASR 加载测试");
-        return;
-    }
-
-    let mut engine = crate::inference::asr::AsrEngine::new();
-    let result = engine.load(&model_path, crate::inference::engine::Device::Cpu);
-    // ASR 引擎尚未接入 llama-cpp-2：当前必须如实返回错误，而非假装加载成功
-    assert!(result.is_err(), "ASR engine should report not-implemented");
-    assert!(!engine.is_loaded());
-}

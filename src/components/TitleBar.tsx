@@ -1,5 +1,5 @@
 import { Minus, Square, X } from "lucide-react";
-import { useAppStore } from "@/stores/app";
+import { useAppStore } from "@/stores";
 import { t } from "@/lib/i18n";
 
 export function TitleBar() {

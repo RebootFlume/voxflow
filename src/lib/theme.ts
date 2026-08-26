@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { useAppStore } from "@/stores/app";
+import { useAppStore } from "@/stores";
 
 /**
  * 同步 documentElement 的 .dark 与 --primary/--ring 等 CSS 变量。

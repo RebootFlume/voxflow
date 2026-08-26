@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { useAppStore } from "@/stores/app";
+import { useAppStore } from "@/stores";
 
 /**
  * 共享导出目录 hook：本地即时编辑 + 同步回 store（触发持久化）。

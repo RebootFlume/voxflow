@@ -5,7 +5,8 @@ fn test_tts_model_load_and_infer() {
     use std::path::Path;
     use voxflow_lib::tts::traits::TtsEngine;
 
-    let model_path = Path::new("D:/app/ai/workspace/voxflow/models/Kokoro-82M/onnx/model.onnx");
+    let model_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../models/kokoro-multi-lang-v1_0/model.onnx");
 
     if !model_path.exists() {
         eprintln!("Model not found: {:?}", model_path);
@@ -17,8 +18,8 @@ fn test_tts_model_load_and_infer() {
     // 创建 TTS 服务（配置驱动的统一引擎）
     let mut service = voxflow_lib::tts::service::TtsService::new();
 
-    // 加载模型
-    let result = service.load(model_path, "cpu");
+    // 加载模型（Kokoro E2E → sherpa-onnx 子进程）
+    let result = service.load(&model_path, "cpu");
 
     match result {
         Ok(()) => {
@@ -26,8 +27,8 @@ fn test_tts_model_load_and_infer() {
             eprintln!("  Model name: {}", service.name());
             eprintln!("  Is loaded: {}", service.is_loaded());
 
-            // 测试推理（英文）
-            match service.infer("Hello world", "af", 1.0) {
+            // 测试推理（中文，端到端直通）
+            match service.infer("今天下午三点开会", "45") {
                 Ok(samples) => {
                     eprintln!("✓ Inference successful");
                     eprintln!("  Output samples: {}", samples.len());

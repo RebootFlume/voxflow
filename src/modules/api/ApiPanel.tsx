@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { useAppStore } from "@/stores/app";
+import { useAppStore } from "@/stores";
 import { t } from "@/lib/i18n";
 import { sendToSidecar } from "@/lib/tauri";
 
@@ -162,8 +162,8 @@ export function ApiPanel() {
           <CardDescription>{t(locale, "api.endpoints.desc")}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <EndpointLight label="POST /v1/audio/transcriptions (ASR)" online={api.endpoints.asr} />
-          <EndpointLight label="POST /v1/audio/speech (TTS)" online={api.endpoints.tts} />
+          <EndpointLight label="POST /v1/audio/transcriptions (ASR)" online={api.endpoints?.asr ?? false} />
+          <EndpointLight label="POST /v1/audio/speech (TTS)" online={api.endpoints?.tts ?? false} />
         </CardContent>
       </Card>
     );

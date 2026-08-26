@@ -7,19 +7,6 @@ use crate::errors::AppError;
 /// TTS 统一结果
 pub type TtsResult<T> = Result<T, AppError>;
 
-/// 单次合成请求的管道上下文
-#[derive(Debug, Clone)]
-pub struct PipelineContext<'a> {
-    /// 合成文本
-    pub text: &'a str,
-    /// 目标语言（"zh"/"en"/"ja"…）
-    pub lang: &'a str,
-    /// 用户选定的音色名（可选；缺省用语言默认音色）
-    pub voice: Option<&'a str>,
-    /// 语速倍率（0.5–2.0）
-    pub rate: f64,
-}
-
 /// TTS 引擎抽象：所有后端（配置驱动的通用 ONNX 引擎、未来的网络后端等）实现此接口
 pub trait TtsEngine: Send + Sync {
     /// 引擎/当前模型名称（未加载时为空字符串）
@@ -34,9 +21,9 @@ pub trait TtsEngine: Send + Sync {
     /// 模型是否已加载
     fn is_loaded(&self) -> bool;
 
-    /// 按语言切换（轻量：换 voice embedding / G2P voice，不重载模型）
+    /// 按语言切换（轻量：换 voice embedding，不重载模型）
     fn set_language(&mut self, language: &str) -> TtsResult<()>;
 
-    /// 合成文本 → 24kHz 单声道 i16 PCM
-    fn infer(&mut self, text: &str, voice: &str, rate: f64) -> TtsResult<Vec<i16>>;
+    /// 端到端合成：纯文本 → 24kHz 单声道 i16 PCM（无音素 / 无语速 / 无时长调节）
+    fn infer(&mut self, text: &str, voice: &str) -> TtsResult<Vec<i16>>;
 }

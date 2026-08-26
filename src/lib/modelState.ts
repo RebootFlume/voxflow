@@ -1,11 +1,14 @@
 /**
  * 模型状态「判定」与「应用」的收敛层。
  *
- * 原来「这是 ASR 还是 TTS 模型」靠 `model !== store.tts.model` 这种脆弱对比猜测，
- * 现在统一依据 models.items[].kind（模型自身的类型元数据）判断；
- * 「哪个模型已加载」的公式也从 ModelRow / ModelSelector 两处重复收敛到这里。
+ * 状态域分离：
+ * - items[]：只管「下载」状态（not_downloaded / downloading / downloaded）
+ * - engines：只管「加载」状态（framework + model + status + error）
+ *
+ * 「是否已加载」统一依据 engines（status === "ready" 且 model 匹配），
+ * 不再用脆弱的 model 名对比，也不依赖 tts.model / asr.model 的「选中」值。
  */
-import { useAppStore } from "@/stores/app";
+import { useAppStore } from "@/stores";
 
 export type ModelKind = "asr" | "tts";
 
@@ -16,23 +19,24 @@ export function resolveModelKind(name: string): ModelKind | null {
   return item ? item.kind : null;
 }
 
-/** 统一的「是否已加载」判定（ModelRow 与 ModelSelector 共用同一份公式） */
-export function computeIsLoaded(
-  kind: ModelKind,
-  name: string,
-  ctx: { ttsModel: string; loadedModel: string | null; asrModel: string },
-): boolean {
-  if (kind === "tts") return ctx.ttsModel === name;
-  return ctx.loadedModel === name || ctx.asrModel === name;
+/** 统一的「是否已加载」判定：engines[kind].status === "ready" 且 model 匹配 */
+export function computeIsLoaded(kind: ModelKind, name: string): boolean {
+  const eng = useAppStore.getState().engines[kind];
+  return eng.status === "ready" && eng.model === name;
 }
 
-/** 将某个模型状态应用到对应模块（ASR / TTS 各自的状态字段，统一入口） */
-export function applyModelStatus(
+/** 引擎加载状态（直接读 engines） */
+export function getEngineStatus(kind: ModelKind): "idle" | "loading" | "ready" | "error" {
+  return useAppStore.getState().engines[kind].status;
+}
+
+/** 将引擎状态应用到 engines（替代旧的 applyModelStatus 写 ttsModelStatus/asr.modelStatus） */
+export function applyEngineStatus(
   kind: ModelKind | null,
   status: "idle" | "loading" | "ready" | "error",
+  error?: string | null,
 ): void {
   if (!kind) return;
   const s = useAppStore.getState();
-  if (kind === "tts") s.setTtsModelStatus(status);
-  else if (kind === "asr") s.updateAsr({ modelStatus: status });
+  s.setEngineStatus(kind, { status, error: error ?? null });
 }

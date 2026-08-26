@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { useAppStore, type RuntimeLogLevel } from "@/stores/app";
+import { useAppStore, type RuntimeLogLevel } from "@/stores";
 import { cn } from "@/lib/utils";
 import { t } from "@/lib/i18n";
 

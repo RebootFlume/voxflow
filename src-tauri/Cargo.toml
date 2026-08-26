@@ -25,7 +25,6 @@ tauri-plugin-global-shortcut = "2"
 rdev = "0.5"
 arboard = "3"
 enigo = "0.2"
-which = "7"
 
 # 推理引擎依赖
 hf-hub = { version = "1.0", features = ["blocking"] }  # Hugging Face 模型下载
@@ -38,3 +37,8 @@ base64 = "0.22"              # base64 编解码
 chrono = { version = "0.4", features = ["clock"] }
 ort = { version = "2.0.0-rc.13", features = ["directml"] }  # ONNX Runtime 1.28 + DirectML
 llama-cpp-2 = "0.1"         # llama.cpp GGUF 推理
+
+# llama-server 子进程 + HTTP 桥接（ASR）
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "multipart", "json", "rustls-tls"] }
+tungstenite = "0.24"
+log = "0.4"                 # 轻量日志（llama_server 子进程状态输出）

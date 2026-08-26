@@ -7,9 +7,9 @@ import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { useAppStore } from "@/stores/app";
+import { useAppStore } from "@/stores";
 import { t } from "@/lib/i18n";
-import { rustTranscribe } from "@/lib/tauri";
+import { rustTranscribeLlama } from "@/lib/tauri";
 import { useExportDir } from "@/lib/useExportDir";
 
 const FORMAT_KEYS = [
@@ -84,7 +84,7 @@ export function TranscribePanel() {
       store.updateTranscribeTask(task.filePath, { status: "transcribing", progress: 0, doneSec: 0, totalSec: 0 });
 
       try {
-        const result = await rustTranscribe(task.filePath);
+        const result = await rustTranscribeLlama(task.filePath);
         store.updateTranscribeTask(task.filePath, {
           status: "done",
           progress: 100,

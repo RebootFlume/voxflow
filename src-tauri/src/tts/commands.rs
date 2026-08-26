@@ -1,7 +1,8 @@
 //! TTS Tauri 命令桥接（前端 IPC）
 //!
 //! 从 lib.rs 抽出：`rust_load_tts_model` / `rust_synthesize` /
-//! `rust_set_tts_language` / `rust_list_tts_voices`。
+//! `rust_set_tts_language` / `rust_list_tts_voices` /
+//! `rust_list_e2e_tts_models` / `rust_switch_e2e_tts_model`。
 //! 引擎实例经 `State<AppState>` 注入（见 app_state.rs），不再用静态全局变量。
 
 use std::collections::{HashMap, HashSet};
@@ -9,11 +10,178 @@ use std::collections::{HashMap, HashSet};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::app_state::AppState;
+use crate::tts::engine::e2e_registry::{E2eTtsModel, E2eTtsModelInfo};
 use crate::tts::traits::TtsEngine;
 
+/// 列出所有可切换的纯 E2E TTS 模型（Kokoro/Matcha/ZipVoice/Pocket/Supertonic/Kitten）
+/// 返回模型元数据 + 本地是否已下载模型文件
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn rust_list_e2e_tts_models() -> serde_json::Value {
+    let infos: Vec<serde_json::Value> = E2eTtsModel::all()
+        .into_iter()
+        .map(|m| {
+            let info: E2eTtsModelInfo = m.into();
+            let dir = crate::model_manager::get_model_root().join(&info.default_dir);
+            let downloaded = dir.exists();
+            serde_json::json!({
+                "id": info.id,
+                "name": info.name,
+                "cli_prefix": info.cli_prefix,
+                "default_dir": info.default_dir,
+                "is_chinese_optimized": info.is_chinese_optimized,
+                "languages": info.languages,
+                "supports_speaker": info.supports_speaker,
+                "language_mode": info.language_mode,
+                "downloaded": downloaded,
+            })
+        })
+        .collect();
+    serde_json::json!({ "models": infos })
+}
+
+/// 切换 E2E TTS 模型（按 id，如 "kokoro-v1_1" / "matcha"）
+/// 先卸载当前，再加载新模型
+#[tauri::command]
+pub fn rust_switch_e2e_tts_model(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    model_id: String,
+    device: String,
+) -> Result<serde_json::Value, String> {
+    let m: E2eTtsModel = parse_model_id(&model_id)
+        .ok_or_else(|| format!("未知 E2E 模型 id '{model_id}'"))?;
+
+    // 模型根目录：统一数据根（get_model_root），无 workspace 回退
+    let model_root = crate::model_manager::get_model_root();
+    let model_path = model_root.join(m.default_model_dir());
+    if !model_path.exists() {
+        return Err(format!(
+            "模型 {} 未下载，请先下载: {}",
+            m.id(),
+            model_path.display()
+        ));
+    }
+
+    // 找到主模型文件（encoder.onnx / model.onnx 等）
+    let main_file = crate::model_manager::find_main_model_file(
+        &model_path,
+        &crate::model_manager::ModelFormat::Onnx,
+    )
+    .ok_or_else(|| format!("模型 {} 缺少 ONNX 文件", m.id()))?;
+
+    let result: Result<serde_json::Value, String> = {
+        let mut guard = state.tts.lock();
+        guard.load(&main_file, &device).map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({
+            "status": "loaded",
+            "model": guard.name(),
+            "device": device,
+        }))
+    };
+
+    match &result {
+        Ok(_) => {
+            let _ = app.emit(
+                "sidecar://event",
+                serde_json::json!({"status": "model_ready", "model": model_id, "device": device}),
+            );
+        }
+        Err(e) => {
+            let _ = app.emit(
+                "sidecar://event",
+                serde_json::json!({"status": "model_error", "model": model_id, "msg": e.to_string()}),
+            );
+        }
+    }
+    result
+}
+
+/// 卸载当前 TTS 模型（释放引擎，可随后删除模型）
+#[tauri::command]
+pub fn rust_unload_tts_model(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let mut guard = state.tts.lock();
+    guard.unload().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "status": "unloaded" }))
+}
+
+/// 设置语音克隆参数（参考音频 + 参考文本）
+/// 仅 ZipVoice / PocketTTS 等克隆模型支持
+#[tauri::command]
+pub fn rust_set_tts_clone_voice(
+    state: State<'_, AppState>,
+    audio_path: String,
+    reference_text: String,
+) -> Result<serde_json::Value, String> {
+    let audio = std::path::Path::new(&audio_path);
+    let mut guard = state.tts.lock();
+    let sherpa = guard
+        .as_mut_sherpa()
+        .ok_or("当前 TTS 模型不支持语音克隆")?;
+    sherpa
+        .set_clone_voice(audio, &reference_text)
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "status": "ok",
+        "reference_audio": audio_path,
+        "reference_text": reference_text,
+    }))
+}
+
+/// 清除语音克隆参数（回到预设音色模式）
+#[tauri::command]
+pub fn rust_clear_tts_clone_voice(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let mut guard = state.tts.lock();
+    if let Some(sherpa) = guard.as_mut_sherpa() {
+        sherpa.clear_clone_voice();
+    }
+    Ok(serde_json::json!({ "status": "ok" }))
+}
+
+/// 解析模型 ID：大小写不敏感，且支持前端展示名（如 "Kokoro-v1_1" / "Kokoro-v1_0"）
+fn parse_model_id(input: &str) -> Option<E2eTtsModel> {
+    let lower = input.to_lowercase();
+    // 1. 精确匹配 id
+    for m in E2eTtsModel::all() {
+        if m.id() == lower || m.id() == input {
+            return Some(m);
+        }
+    }
+    // 2. 归一化匹配：去掉 - 和 _（"kokoro-v1_0" → "kokorov10"）
+    let norm = |s: &str| s.to_lowercase().replace(['-', '_'], "");
+    let input_norm = norm(input);
+    for m in E2eTtsModel::all() {
+        if norm(m.id()) == input_norm {
+            return Some(m);
+        }
+    }
+    // 3. 族 + 版本匹配（Kokoro 系列展示名含版本号）
+    //    优先匹配更具体的族（Matcha / ZipVoice / Pocket / Supertonic / Kitten）
+    if lower.contains("kokoro") {
+        if lower.contains("v1_1") || lower.contains("v1-1") {
+            return Some(E2eTtsModel::KokoroV1_1);
+        }
+        if lower.contains("v1_0") || lower.contains("v1-0") {
+            return Some(E2eTtsModel::KokoroV1_0);
+        }
+        // 无版本号 → 英文版（v0_19）或默认 v1_0
+        return Some(E2eTtsModel::KokoroEn);
+    }
+    // 4. 族前缀匹配（最低兜底）
+    let prefix = lower.split(|c: char| !c.is_alphanumeric()).next().unwrap_or("");
+    E2eTtsModel::all()
+        .into_iter()
+        .find(|m| {
+            let fam = m.id().split('-').next().unwrap_or("");
+            lower.starts_with(fam) || prefix.starts_with(fam)
+        })
+}
+
 /// 加载 TTS 模型
-/// 支持传入模型名称（如 "Kokoro-82M"）或完整文件路径
-/// 优先在 modelRoot 下查找，失败后自动回退到 workspace/models（开发期镜像）
+/// 支持传入模型名称或完整文件路径
+/// 在 modelRoot 下查找模型（统一数据根，无 workspace 回退）
 #[tauri::command]
 pub fn rust_load_tts_model(
     app: AppHandle,
@@ -30,16 +198,7 @@ pub fn rust_load_tts_model(
         let found = crate::model_manager::find_main_model_file(
             &primary,
             &crate::model_manager::ModelFormat::Onnx,
-        )
-        .or_else(|| {
-            // 开发期回退：workspace/models 下的镜像
-            let fallback = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../models/Kokoro-82M/onnx");
-            crate::model_manager::find_main_model_file(
-                &fallback,
-                &crate::model_manager::ModelFormat::Onnx,
-            )
-        });
+        );
         match found {
             Some(f) => f,
             None => return Err(format!("model file not found for: {model_path}")),
@@ -73,13 +232,12 @@ pub fn rust_load_tts_model(
     result
 }
 
-/// TTS 语音合成并保存为 WAV 文件
+/// TTS 语音合成并保存为 WAV 文件（端到端：文本 → 波形，无音素/语速/时长参数）
 #[tauri::command]
 pub fn rust_synthesize(
     state: State<'_, AppState>,
     text: String,
     voice: String,
-    rate: f64,
     export_dir: String,
 ) -> Result<serde_json::Value, String> {
     if text.is_empty() {
@@ -91,7 +249,7 @@ pub fn rust_synthesize(
         if !guard.is_loaded() {
             return Err("TTS model not loaded. Please load a model first.".into());
         }
-        guard.infer(&text, &voice, rate).map_err(|e| e.to_string())?
+        guard.infer(&text, &voice).map_err(|e| e.to_string())?
     };
     if samples.is_empty() {
         return Err("合成音频为空".into());
@@ -139,8 +297,6 @@ pub fn rust_synthesize(
     Ok(serde_json::json!({
         "text": text,
         "voice": voice,
-        "rate": rate,
-        "duration": samples.len() as f64 / 24000.0,
         "saved_path": out_path.to_string_lossy(),
         "size": size_str,
     }))
@@ -162,6 +318,33 @@ pub fn rust_set_tts_language(
     Ok(serde_json::json!({ "language": lang }))
 }
 
+/// 查询当前 TTS 模型的说话人列表（供 Voice Settings 展示）
+#[tauri::command]
+pub fn rust_list_tts_speakers(
+    state: State<'_, AppState>,
+) -> serde_json::Value {
+    let guard = state.tts.lock();
+    let model_name = guard.name().to_string();
+    drop(guard);
+    let lower = model_name.to_lowercase();
+    let model_root = crate::model_manager::get_model_root();
+    for m in E2eTtsModel::all() {
+        if lower.contains(m.id()) || lower.contains(m.default_model_dir()) {
+            let speakers: Vec<serde_json::Value> = m
+                .speaker_list_from_dir(&model_root)
+                .iter()
+                .map(|(sid, name)| serde_json::json!({ "sid": sid, "name": name }))
+                .collect();
+            return serde_json::json!({
+                "model": model_name,
+                "num_speakers": m.num_speakers(),
+                "speakers": speakers,
+            });
+        }
+    }
+    serde_json::json!({ "model": model_name, "num_speakers": 0, "speakers": [] })
+}
+
 /// 扫描 voices 目录，按前缀分组为语言 → 音色列表（前端下拉数据源）
 #[tauri::command]
 pub fn rust_list_tts_voices() -> serde_json::Value {
@@ -180,7 +363,8 @@ pub fn rust_list_tts_voices() -> serde_json::Value {
         }
     };
     let mut dirs = vec![];
-    dirs.push(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../models/Kokoro-82M/voices"));
+    // 通用 ONNX 引擎模型的 voices 目录（旧 Kokoro-82M 布局已废弃，这里保留接口）
+    dirs.push(crate::model_manager::model_dir("Kokoro-82M").join("voices"));
     dirs.push(crate::model_manager::model_dir("Kokoro-82M").join("voices"));
     let classify = |name: &str| -> &'static str {
         if name.starts_with("zf_") || name.starts_with("zm_") {
@@ -227,4 +411,32 @@ pub fn rust_list_tts_voices() -> serde_json::Value {
         "voices_by_lang": voices_by_lang,
         "default_lang": default_lang,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_model_id_exact() {
+        assert_eq!(parse_model_id("kokoro-v1_0"), Some(E2eTtsModel::KokoroV1_0));
+        assert_eq!(parse_model_id("matcha"), Some(E2eTtsModel::Matcha));
+        assert_eq!(parse_model_id("supertonic"), Some(E2eTtsModel::Supertonic));
+    }
+
+    #[test]
+    fn test_parse_model_id_display_name() {
+        // 前端 ModelSelector 展示名（大小写 + 下划线）
+        assert_eq!(parse_model_id("Kokoro-v1_0"), Some(E2eTtsModel::KokoroV1_0));
+        assert_eq!(parse_model_id("Kokoro-v1_1"), Some(E2eTtsModel::KokoroV1_1));
+        assert_eq!(parse_model_id("Kokoro-en-v0_19"), Some(E2eTtsModel::KokoroEn));
+        assert_eq!(parse_model_id("ZipVoice-distill"), Some(E2eTtsModel::ZipVoice));
+        assert_eq!(parse_model_id("PocketTTS-int8"), Some(E2eTtsModel::PocketTts));
+        assert_eq!(parse_model_id("Kitten-nano-en"), Some(E2eTtsModel::Kitten));
+    }
+
+    #[test]
+    fn test_parse_model_id_unknown() {
+        assert_eq!(parse_model_id("bogus-model"), None);
+    }
 }

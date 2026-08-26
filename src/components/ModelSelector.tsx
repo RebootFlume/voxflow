@@ -1,4 +1,4 @@
-import { useAppStore, type ModelItemState, type ModelFramework } from "@/stores/app";
+import { useAppStore, type ModelItemState, type ModelFramework } from "@/stores";
 import { t } from "@/lib/i18n";
 import { Badge } from "@/components/ui/badge";
 import { computeIsLoaded } from "@/lib/modelState";
@@ -33,11 +33,7 @@ function FormatBadge({ format }: { format: ModelFramework }) {
 
 export function ModelSelector({ kind, selected, onSelect, formatFilter, downloadedOnly = false }: ModelSelectorProps) {
   const items = useAppStore((s) => s.models?.items ?? EMPTY_ITEMS);
-  const loadedModel = useAppStore((s) => s.models.loadedModel);
-  const asrModel = useAppStore((s) => s.asr.model);
-  const asrModelStatus = useAppStore((s) => s.asr.modelStatus);
-  const ttsModel = useAppStore((s) => s.tts.model);
-  const ttsModelStatus = useAppStore((s) => s.ttsModelStatus);
+  const engineStatus = useAppStore((s) => s.engines?.[kind]?.status ?? "idle");
 
   const locale = useAppStore((s) => s.locale);
 
@@ -48,8 +44,8 @@ export function ModelSelector({ kind, selected, onSelect, formatFilter, download
     if (formatFilter && i.format !== formatFilter) return false;
     // 只展示已下载的模型（可加载的）
     if (downloadedOnly) return i.state === "downloaded";
-    // 默认：已下载 或 当前选中
-    return i.state === "downloaded" || i.name === selected;
+    // 默认：已下载 或 当前选中（但选中但未下载的不显示，避免误导）
+    return i.state === "downloaded" || (i.name === selected && i.state !== "not_downloaded");
   });
 
   if (models.length === 0) {
@@ -65,8 +61,8 @@ export function ModelSelector({ kind, selected, onSelect, formatFilter, download
   return (
     <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))" }}>
       {models.map((m) => {
-        const isLoaded = computeIsLoaded(kind, m.name, { ttsModel, loadedModel, asrModel });
-        const status = kind === "tts" ? ttsModelStatus : asrModelStatus;
+        const isLoaded = computeIsLoaded(kind, m.name);
+        const status = engineStatus;
         const isSelected = m.name === selected;
         const statusLabel =
           isSelected && isLoaded

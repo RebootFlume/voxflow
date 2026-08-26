@@ -14,8 +14,6 @@ pub enum AppError {
     LoadFailed(String),
     /// 推理过程失败
     InferenceFailed(String),
-    /// G2P（文本 → 音素）失败
-    G2pFailed(String),
     /// 引擎未初始化
     NotInitialized,
     /// 输入格式错误
@@ -29,7 +27,6 @@ impl AppError {
             Self::ModelNotFound(_) => "model_not_found",
             Self::LoadFailed(_) => "load_failed",
             Self::InferenceFailed(_) => "inference_failed",
-            Self::G2pFailed(_) => "g2p_failed",
             Self::NotInitialized => "not_initialized",
             Self::InvalidInput(_) => "invalid_input",
         }
@@ -42,7 +39,6 @@ impl std::fmt::Display for AppError {
             Self::ModelNotFound(p) => write!(f, "model not found: {p}"),
             Self::LoadFailed(msg) => write!(f, "model load failed: {msg}"),
             Self::InferenceFailed(msg) => write!(f, "inference failed: {msg}"),
-            Self::G2pFailed(msg) => write!(f, "G2P failed: {msg}"),
             Self::NotInitialized => write!(f, "engine not initialized"),
             Self::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
         }

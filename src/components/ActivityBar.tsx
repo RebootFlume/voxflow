@@ -10,7 +10,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useAppStore, type Module } from "@/stores/app";
+import { useAppStore, type Module } from "@/stores";
 import {
   Tooltip,
   TooltipContent,
@@ -56,7 +56,7 @@ function ActivityButton({ item }: { item: ActivityItem }) {
           className={cn(
             "relative flex h-11 w-11 items-center justify-center rounded-md text-muted-foreground transition-colors",
             "hover:bg-accent hover:text-foreground",
-            active && "bg-accent text-foreground",
+            active && "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary",
           )}
         >
           {active && (
@@ -80,7 +80,7 @@ export function ActivityBar() {
   const toggleLabel = t(locale, collapsed ? "nav.expand" : "nav.collapse");
 
   return (
-    <TooltipProvider delayDuration={200}>
+    <TooltipProvider delayDuration={400}>
       <aside className="flex h-full w-12 shrink-0 flex-col items-center justify-between border-r bg-card py-2">
         <div className="flex flex-col items-center gap-1">
           {TOP_ITEMS.map((item) => (

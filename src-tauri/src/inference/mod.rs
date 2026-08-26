@@ -1,12 +1,13 @@
 #![allow(dead_code)]
 
-//! 推理引擎模块：ONNX Runtime (ort) + GGUF (llama.cpp) 双引擎架构
+//! 推理引擎模块：llama-server 子进程（GGUF）+ sherpa-onnx websocket（ONNX）
 //!
-//! 统一抽象层：所有引擎实现 `InferenceEngine` trait，
-//! 前端通过 Tauri invoke 调用，不经过 Python sidecar。
+//! - llama_server：Qwen3-ASR GGUF 推理（子进程 + HTTP）
+//! - sherpa_asr：SenseVoice / Paraformer 推理（websocket server 子进程）
 
 pub mod engine;
-pub mod asr;
+pub mod llama_server;
+pub mod sherpa_asr;
 pub mod errors;
 pub mod commands;
 
