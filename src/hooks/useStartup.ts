@@ -43,6 +43,10 @@ export function useStartupFallback() {
       if (!s.capabilities.ffmpeg) {
         void sendToSidecar({ action: "check_capabilities" });
       }
+      // 模型清单：启动时拉一次，保证 models.items 就绪（事件处理依赖它判定模型种类）
+      if (!s.models.items.length) {
+        void sendToSidecar({ action: "list_models" });
+      }
       // 导出目录：只在持久化值为空时请求系统默认路径
       if (!s.io.exportDir) {
         void sendToSidecar({ action: "get_default_export_dir" });

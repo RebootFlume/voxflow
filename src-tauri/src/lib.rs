@@ -38,14 +38,12 @@ fn set_hotkey(app: tauri::AppHandle, hotkey: String) -> Result<(), String> {
 /// 模型是否使用中：按注册表 kind（与前端 modelState.resolveModelKind 一致）判定对应引擎
 fn is_model_in_use(state: &AppState, name: &str) -> bool {
     match model_manager::find_model_info(name).map(|i| i.kind()) {
-        // ASR：查 sherpa（当前加载模型匹配）或 llama-server（运行中）
+        // ASR：查 registry 当前加载引擎是否匹配该模型（统一路由，未来 PyTorch 自动生效）
         Some("asr") => {
-            let sherpa = crate::inference::sherpa_asr::global_engine();
-            let sherpa_loaded = matches!(
-                sherpa.state(),
-                crate::inference::sherpa_asr::SherpaState::Ready
-            ) && sherpa.model() == name;
-            sherpa_loaded || crate::inference::llama_server::global_engine().is_loaded()
+            let r = crate::inference::registry::registry();
+            r.active_engine()
+                .map(|e| e.current_model() == name)
+                .unwrap_or(false)
         }
         Some("tts") => state.tts.lock().is_loaded(),
         _ => false, // 未知模型：无法判定，视为未使用
@@ -57,8 +55,11 @@ fn emit_error(app: &tauri::AppHandle, msg: String) {
 }
 
 /// 安全版本：所有 action 走 Rust 原生（UI 无感，协议与原 Python sidecar 一致）
+///
+/// async：Tauri 在 async 运行时执行（非主线程），load_model 等耗时 action
+/// （sherpa/llama 模型加载数秒）不再阻塞主线程 → 切换模型不卡 UI。
 #[tauri::command]
-fn send_to_sidecar_safe(
+async fn send_to_sidecar_safe(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     payload: serde_json::Value,
@@ -106,6 +107,15 @@ fn send_to_sidecar_safe(
             let normalized = model_manager::set_proxy(proxy);
             let _ = app.emit("sidecar://event", serde_json::json!({"status": "proxy_set", "proxy": normalized}));
             return Ok(serde_json::json!({"ok": true, "proxy": normalized}));
+        }
+        "check_capabilities" => {
+            // 能力检测：ffmpeg 是否可用（前端 TranscribePanel 依赖此标记决定支持格式）
+            let ffmpeg = audio::ffmpeg_decoder::ffmpeg_available();
+            let _ = app.emit("sidecar://event", serde_json::json!({
+                "status": "capabilities",
+                "ffmpeg": ffmpeg,
+            }));
+            return Ok(serde_json::json!({"ok": true, "ffmpeg": ffmpeg}));
         }
         "list_models" => {
             let kind = payload.get("kind").and_then(|v| v.as_str());
@@ -195,16 +205,16 @@ fn send_to_sidecar_safe(
                     return Ok(serde_json::json!({"status": "error", "msg": msg}));
                 }
             };
-            // 根据格式加载到对应引擎
+            // 根据格式加载到对应引擎（经 registry 统一路由 + ASR 互斥）
             match info.format() {
                 model_manager::ModelFormat::Gguf => {
-                    // GGUF → llama-server 子进程（ASR 主引擎）
-                    let engine = crate::inference::llama_server::global_engine();
-                    match engine.load() {
-                        Ok(()) => {
+                    // GGUF → llama-server（ASR 主引擎）
+                    let registry = crate::inference::registry::registry();
+                    match registry.load_model_with_device("gguf", &name, &device) {
+                        Ok((_, loaded_name)) => {
                             let _ = app.emit("sidecar://event", serde_json::json!({
                                 "status": "model_loaded",
-                                "model": name,
+                                "model": loaded_name,
                                 "device": device,
                             }));
                         }
@@ -220,12 +230,12 @@ fn send_to_sidecar_safe(
                 }
                 model_manager::ModelFormat::Onnx if info.kind() == "asr" => {
                     // ONNX + ASR → sherpa-onnx websocket server（低端设备引擎）
-                    let engine = crate::inference::sherpa_asr::global_engine();
-                    match engine.load(&name) {
-                        Ok(()) => {
+                    let registry = crate::inference::registry::registry();
+                    match registry.load_model_with_device("onnx", &name, &device) {
+                        Ok((_, loaded_name)) => {
                             let _ = app.emit("sidecar://event", serde_json::json!({
                                 "status": "model_loaded",
-                                "model": name,
+                                "model": loaded_name,
                                 "device": device,
                             }));
                         }
@@ -280,8 +290,14 @@ fn get_gpu_info() -> serde_json::Value {
 }
 
 /// 查询显存状态：总显存 + 已用 + 各推理框架占用（按 PID 过滤 nvidia-smi）
+/// 异步：powershell/nvidia-smi/目录遍历都是阻塞操作，放 spawn_blocking 避免卡 UI（转写等高负载时尤甚）
 #[tauri::command]
-fn get_vram_status() -> serde_json::Value {
+async fn get_vram_status() -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(|| get_vram_status_sync()).await.unwrap_or_default()
+}
+
+/// 同步实现（供 spawn_blocking 调用）
+fn get_vram_status_sync() -> serde_json::Value {
     let gpu = sidecar::detect_gpu();
     let total_mb = gpu.get("memoryMB").and_then(|v| v.as_u64()).unwrap_or(0);
 
@@ -303,8 +319,22 @@ fn get_vram_status() -> serde_json::Value {
         .unwrap_or(0);
 
     // 各框架进程显存（按 PID 查询；无权限时为 None → 回退到模型文件大小估算）
-    let llama_mb = vram_of_process("llama-server")
-        .or_else(|| pathbuf_size_mb(crate::model_manager::model_dir("Qwen3-ASR-0.6B")));
+    // llama：估算 = 当前加载的模型目录大小（切换 0.6B/1.7B 后自动跟随）
+    let llama_mb = vram_of_process("llama-server").or_else(|| {
+        let eng = crate::inference::llama_server::global_engine();
+        let p = eng.current_model_path();
+        // 取模型文件所在目录（含 mmproj），估算整个目录大小
+        p.parent().map(|d| dir_size_mb(d)).flatten()
+    })
+    // registry 兜底：若以上未命中，用注册表统一估算（未来 PyTorch 自动生效）
+    .or_else(|| {
+        let r = crate::inference::registry::registry();
+        if r.active_framework() == "gguf" {
+            r.active_vram_mb()
+        } else {
+            None
+        }
+    });
     let sherpa_mb = vram_of_process("sherpa-onnx-offline-websocket-server")
         .or_else(|| {
             // 当前加载的 sherpa 模型目录大小
@@ -314,6 +344,15 @@ fn get_vram_status() -> serde_json::Value {
                 None
             } else {
                 pathbuf_size_mb(crate::model_manager::model_dir(&model))
+            }
+        })
+        // registry 兜底：若以上未命中，用注册表统一估算（未来 PyTorch 自动生效）
+        .or_else(|| {
+            let r = crate::inference::registry::registry();
+            if r.active_framework() == "onnx" {
+                r.active_vram_mb()
+            } else {
+                None
             }
         });
 
@@ -400,10 +439,11 @@ fn pathbuf_size_mb(dir: std::path::PathBuf) -> Option<u64> {
 
 /// Rust 原生音频解码（不依赖 Python）
 /// 输入：文件路径，输出：16kHz mono float32 samples + 时长
+/// 多格式：WAV 走 hound，其他走 ffmpeg 子进程
 #[tauri::command]
 fn decode_audio_file(path: String) -> Result<serde_json::Value, String> {
     let data = std::fs::read(&path).map_err(|e| format!("读取文件失败: {e}"))?;
-    let (samples, rate) = audio::decode_audio(&data)?;
+    let (samples, rate) = audio::decode_any(&data, std::path::Path::new(&path))?;
     let duration = samples.len() as f64 / rate as f64;
     Ok(serde_json::json!({
         "samples": samples,
@@ -450,10 +490,72 @@ fn rust_unload_sherpa_asr() -> Result<serde_json::Value, String> {
 
 // ─── llama-server 子进程 + HTTP 命令 ──────────────────────────────────────
 
-/// 启动 llama-server 子进程（启动后才使用 ASR）
+/// 启动 llama-server 子进程（启动后才使用 ASR）。model 指定模型名（Qwen3-ASR-0.6B / Qwen3-ASR-1.7B）
+///
+/// async + 后台线程：模型加载（子进程启动 + 健康检查等待）耗时数秒，
+/// 同步执行会阻塞 Tauri 主线程导致 UI 冻结。改为后台线程加载 + 事件回传：
+///   - 立即返回 {"ok": true}（前端先显示 loading）
+///   - 加载完成 emit `model_ready`，失败 emit `model_error`（前端已监听）
 #[tauri::command]
-fn rust_start_llama_server() -> Result<serde_json::Value, String> {
-    inference::commands::start_llama_server()
+async fn rust_start_llama_server(
+    app: tauri::AppHandle,
+    model: Option<String>,
+    device: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let model = model.unwrap_or_else(|| "Qwen3-ASR-0.6B".to_string());
+    let device = device.unwrap_or_else(|| "cuda".to_string());
+    let device2 = device.clone();
+    // 通知前端开始加载（UI 立即进入 loading）
+    let _ = app.emit(
+        "sidecar://event",
+        serde_json::json!({ "status": "model_loading", "model": model }),
+    );
+
+    // 后台线程加载（阻塞操作不占主线程）
+    let app2 = app.clone();
+    let model2 = model.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let load_start = std::time::Instant::now();
+        // 阶段回调：卸载 → 启动 → 等待就绪，实时 emit 到前端驱动进度条
+        let mut on_stage = |stage: &str| {
+            let _ = app2.emit(
+                "sidecar://event",
+                serde_json::json!({
+                    "status": "model_progress",
+                    "model": model2,
+                    "stage": stage,
+                }),
+            );
+        };
+        let result = inference::commands::start_llama_server_with_stage(
+            Some(&model2),
+            &device2,
+            &mut on_stage,
+        );
+        match result {
+            Ok(v) => {
+                let _ = app2.emit(
+                    "sidecar://event",
+                    serde_json::json!({
+                        "status": "model_ready",
+                        "model": model2,
+                        "device": device2,
+                        "detail": v,
+                        "load_ms": load_start.elapsed().as_millis(),
+                    }),
+                );
+            }
+            Err(e) => {
+                let _ = app2.emit(
+                    "sidecar://event",
+                    serde_json::json!({ "status": "model_error", "model": model2, "msg": e }),
+                );
+            }
+        }
+    });
+
+    // 立即返回（不等待加载完成）
+    Ok(serde_json::json!({ "ok": true, "loading": true, "model": model }))
 }
 
 /// 停止 llama-server 子进程
@@ -468,10 +570,39 @@ fn rust_llama_server_status() -> serde_json::Value {
     inference::commands::llama_server_status()
 }
 
-/// 通过 llama-server 转写音频文件
+/// 通过 llama-server 转写音频文件（支持多格式解码 + 长音频分批 + 进度 + 导出）
 #[tauri::command]
-fn rust_transcribe_llama(file_path: String) -> Result<serde_json::Value, String> {
-    inference::commands::transcribe_file_via_llama_server(&file_path)
+async fn rust_transcribe_llama(
+    app: tauri::AppHandle,
+    file_path: String,
+    export_dir: Option<String>,
+    export_format: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let app2 = app.clone();
+    let fp2 = file_path.clone();
+    // 后台线程转写：长音频分批时每段完成后 emit 进度事件（不占主线程）
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut on_progress = |done_sec: f64, total_sec: f64| {
+            let _ = app2.emit(
+                "sidecar://event",
+                serde_json::json!({
+                    "status": "transcribe_progress",
+                    "path": fp2,
+                    "progress": ((done_sec / total_sec.max(1.0)) * 100.0).round() as u32,
+                    "done_sec": done_sec,
+                    "total_sec": total_sec,
+                }),
+            );
+        };
+        inference::commands::transcribe_file_with_progress(
+            &file_path,
+            export_dir.as_deref(),
+            export_format.as_deref(),
+            &mut on_progress,
+        )
+    })
+    .await
+    .map_err(|e| format!("转写线程失败: {e}"))?
 }
 
 /// 测试 TTS 模型加载（打印输入输出 tensor 名称）

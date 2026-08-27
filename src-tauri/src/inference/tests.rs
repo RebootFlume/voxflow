@@ -88,3 +88,32 @@ fn test_tts_inference_pipeline() {
     println!("TTS 中文推理成功: {} samples, 24kHz", zh_samples.len());
 }
 
+// ─── registry 路由 / 互斥测试 ──────────────────────────────────────────────
+
+#[test]
+fn test_registry_engine_frameworks() {
+    use crate::inference::engine::AsrEngine;
+    let r = crate::inference::registry::registry();
+
+    // 两个框架都注册了
+    assert!(r.engine("gguf").is_some());
+    assert!(r.engine("onnx").is_some());
+    assert!(r.engine("pytorch").is_none(), "PyTorch 尚未注册");
+
+    // adapter 的 framework 标识正确
+    assert_eq!(r.engine("gguf").unwrap().framework(), "gguf");
+    assert_eq!(r.engine("onnx").unwrap().framework(), "onnx");
+}
+
+#[test]
+fn test_registry_load_model_not_downloaded() {
+    // 未下载模型 → 加载应报错（不 panic），证明路由链路通
+    let r = crate::inference::registry::registry();
+    let result = r.load_model("gguf", "Nonexistent-Model");
+    assert!(result.is_err(), "未知模型应报错，实际: {result:?}");
+    let result = r.load_model("onnx", "Nonexistent-Model");
+    assert!(result.is_err(), "未知模型应报错，实际: {result:?}");
+    let result = r.load_model("pytorch", "Qwen3-TTS");
+    assert!(result.is_err(), "未注册框架应报错");
+}
+

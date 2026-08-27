@@ -5,6 +5,12 @@ import { computeIsLoaded } from "@/lib/modelState";
 
 const EMPTY_ITEMS: ModelItemState[] = [];
 
+/** 模型大小显示：已下载用真实磁盘占用，未下载用清单预估值 */
+function sizeLabel(m: ModelItemState): string {
+  const gb = m.sizeOnDiskGb ?? m.sizeGb;
+  return `${gb.toFixed(gb >= 10 ? 0 : 2)} GB`;
+}
+
 interface ModelSelectorProps {
   kind: "asr" | "tts";
   selected: string;
@@ -104,7 +110,7 @@ export function ModelSelector({ kind, selected, onSelect, formatFilter, download
                 <FormatBadge format={m.format} />
               </div>
               <div className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground pl-6">
-                <span>{m.sizeGb} GB</span>
+                <span>{sizeLabel(m)}</span>
                 {statusLabel && (
                   <span
                     className={

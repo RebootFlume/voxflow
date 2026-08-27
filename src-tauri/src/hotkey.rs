@@ -66,22 +66,25 @@ fn start_capture_worker(app: AppHandle) {
                             let _ = app2.emit("asr://status", "idle");
                             continue;
                         }
-                        // 转写：根据当前加载的 ASR 引擎选择 llama 或 sherpa
-                        // 优先 sherpa（用户手动加载的低端引擎），否则 llama-server（默认）
-                        let sherpa = crate::inference::sherpa_asr::global_engine();
-                        let use_sherpa = matches!(sherpa.state(), crate::inference::sherpa_asr::SherpaState::Ready);
-                        let result: Result<String, String> = if use_sherpa {
-                            sherpa.transcribe(&samples, 16_000)
-                        } else {
-                            // llama-server 常驻，只发 HTTP；首次自动拉起（幂等）
-                            let engine = crate::inference::llama_server::global_engine();
-                            match engine.load() {
-                                Err(e) => Err(format!("引擎启动失败: {e}")),
-                                Ok(()) => engine
-                                    .transcribe(&samples, 16_000)
-                                    .map_err(|e| e.to_string()),
-                            }
-                        };
+                        // 转写：经 registry 选择当前已加载的 ASR 引擎
+                        // （llama-server / sherpa，未来 PyTorch 自动生效）
+                        let registry = crate::inference::registry::registry();
+                        let result: Result<String, String> =
+                            match registry.active_engine() {
+                                Some(engine) => engine.transcribe(&samples, 16_000),
+                                None => {
+                                    // 无已加载引擎：自动拉起默认 llama-server（幂等）
+                                    let engine = crate::inference::llama_server::global_engine();
+                                    match engine.load() {
+                                        Err(e) => Err(format!("引擎启动失败: {e}")),
+                                        Ok(()) => engine
+                                            .transcribe(&samples, 16_000)
+                                            .map_err(|e| e.to_string()),
+                                    }
+                                }
+                            };
+                        // 判断用的引擎名（前端展示）
+                        let engine_name = registry.active_framework();
                         match result {
                             Ok(text) => {
                                 // 上屏：写剪贴板 + Ctrl+V 粘贴到鼠标光标处
@@ -96,7 +99,7 @@ fn start_capture_worker(app: AppHandle) {
                                 let _ = app2.emit("sidecar://event", serde_json::json!({
                                     "status": "recognized",
                                     "text": text,
-                                    "engine": if use_sherpa { "sherpa" } else { "llama" },
+                                    "engine": engine_name,
                                 }));
                             }
                             Err(e) => {

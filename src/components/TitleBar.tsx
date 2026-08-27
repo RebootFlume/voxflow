@@ -23,8 +23,14 @@ export function TitleBar() {
       data-tauri-drag-region
       className="flex h-9 shrink-0 items-center justify-between border-b bg-background select-none"
     >
-      {/* 左侧：拖动区域 + 标题 */}
+      {/* 左侧：应用图标 + 拖动区域 + 标题 */}
       <div data-tauri-drag-region className="flex items-center gap-2 pl-3">
+        <img
+          src="/voxflow-icon.png"
+          alt="VoxFlow"
+          className="h-4 w-4 rounded-[4px]"
+          draggable={false}
+        />
         <span className="text-xs font-semibold tracking-tight text-muted-foreground">VoxFlow</span>
       </div>
 

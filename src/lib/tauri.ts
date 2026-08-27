@@ -49,9 +49,9 @@ export function rustUnloadSherpaAsr(): Promise<Record<string, unknown>> {
 // llama-server 子进程桥接（ASR 主力路线）
 // ============================================================
 
-/** 启动 llama-server 子进程（常驻，供 ASR 转写） */
-export function rustStartLlamaServer(): Promise<Record<string, unknown>> {
-  return invoke("rust_start_llama_server");
+/** 启动 llama-server 子进程（常驻，供 ASR 转写）。model 指定模型名（0.6B / 1.7B），device: cuda / cpu */
+export function rustStartLlamaServer(model?: string, device?: string): Promise<Record<string, unknown>> {
+  return invoke("rust_start_llama_server", { model: model ?? null, device: device ?? "cuda" });
 }
 
 /** 停止 llama-server 子进程 */
@@ -64,9 +64,13 @@ export function rustLlamaServerStatus(): Promise<{ loaded: boolean; model: strin
   return invoke("rust_llama_server_status");
 }
 
-/** 通过 llama-server 转写音频文件（主力 ASR 入口） */
-export function rustTranscribeLlama(filePath: string): Promise<{ text: string; duration: number; model: string }> {
-  return invoke("rust_transcribe_llama", { filePath });
+/** 通过 llama-server 转写音频文件（主力 ASR 入口，支持导出） */
+export function rustTranscribeLlama(
+  filePath: string,
+  exportDir?: string,
+  exportFormat?: string,
+): Promise<{ text: string; duration: number; model: string; saved_path?: string }> {
+  return invoke("rust_transcribe_llama", { filePath, exportDir, exportFormat });
 }
 
 /** Rust 引擎：加载 TTS 模型 */

@@ -13,12 +13,32 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   </React.StrictMode>,
 );
 
-// 异步初始化：读取 config.json + history + 下发 sidecar 配置 + 恢复模型
+// 异步初始化：先拉起模型（不阻塞），再异步补全 config/history/logs
 (async () => {
+  // ① 第一步：立即触发 ASR 加载（zustand persist 同步读 localStorage，asr.model 立即可得）
+  //    —— 让启动 Splash 第一时间显示加载中，而非等 initPersistence 的 3 次 IPC 往返
+  const s0 = useAppStore.getState();
+  if (!s0.useRustEngine) {
+    s0.setUseRustEngine(true);
+    s0.addLog("[init] auto-enable Rust engine (migrated from Python)", "info");
+  }
+  const asr0 = s0.asr;
+  // ASR：走 llama-server 子进程（GGUF 路线），启动时自动拉起常驻服务
+  // （TTS 模型按需加载：用户切换到 TTS 页或第一次合成时才加载，避免启动占用 VRAM）
+  if (asr0.model) {
+    void loadAsrModel(asr0.model, asr0.device).catch(() => {});
+  } else {
+    // 空启动：配置无默认模型（首次安装）→ 不自动加载任何模型，避免加载不存在的默认模型
+    // 由 StartupSplash 展示「未检测到模型」并自动进入主界面，引导用户到模型页下载
+    useAppStore.getState().addLog("[init] no persisted model, booting empty (download in Models panel)", "info");
+  }
+
+  // ② 第二步：异步补全持久化（config.json 迁移 + history + runtime logs）
   await initPersistence();
   useAppStore.getState().addLog("🚀 VoxFlow 启动", "info");
 
-  const { asr, models } = useAppStore.getState();
+  // ③ 第三步：下发 sidecar 配置（镜像/代理）
+  const { models } = useAppStore.getState();
   if (models.mirror || models.proxy !== undefined) {
     const endpoint =
       models.mirror === "cn" ? "https://hf-mirror.com" : models.mirror && models.mirror !== "official" ? models.mirror : "";
@@ -28,22 +48,5 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
       mirror_endpoint: endpoint,
       proxy: models.proxy ?? "",
     }).catch(() => {});
-  }
-
-  // 恢复上次的模型：直接走 Rust 原生加载（不再经过已废弃的 sidecar set_model）
-  // 旧 config 的 useRustEngine 可能是 false（Python 时代遗留），这里自动纠偏为 true 并尝试加载；
-  // asr.tts 均会经历 loading → ready/error，并在 modelLoader 里记 addLog，失败原因可在「历史-运行日志」查看
-  const st0 = useAppStore.getState();
-  if (!st0.useRustEngine) {
-    st0.setUseRustEngine(true);
-    st0.addLog("[init] auto-enable Rust engine (migrated from Python)", "info");
-  }
-  // ASR：走 llama-server 子进程（GGUF 路线），启动时自动拉起常驻服务
-  // （TTS 模型按需加载：用户切换到 TTS 页或第一次合成时才加载，避免启动占用 VRAM）
-  if (asr.model) {
-    void loadAsrModel(asr.model, asr.device).catch(() => {});
-  } else {
-    // 无持久化模型时，默认拉起 llama-server
-    void loadAsrModel("Qwen3-ASR-0.6B", "cuda").catch(() => {});
   }
 })();

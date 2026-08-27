@@ -1,18 +1,29 @@
+# 依赖
 node_modules/
 dist/
 dist-ssr/
-*.local
-.vscode/*
-!.vscode/extensions.json
-.idea
-.DS_Store
-*.sw?
 
+# 构建产物
 src-tauri/target/
 src-tauri/gen/
 
+# 本地模型 / 二进制库（体积大，不提交）
 models/
 libs/
 
+# 日志
+*.log
+src-tauri/log.txt
+log.txt
+
+# 临时 / 系统
+*.local
+.DS_Store
+*.sw?
+.idea
+.vscode/*
+!.vscode/extensions.json
+
+# 音频
 *.wav
 nul

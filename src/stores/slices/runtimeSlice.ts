@@ -1,6 +1,5 @@
 import type { HistoryRecord, RuntimeLog, RuntimeLogLevel } from "../types";
 
-let NEXT_LOG_ID = 1;
 const nowTs = () => {
   const d = new Date();
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
@@ -20,7 +19,9 @@ export const createRuntimeSlice = (set: (partial: Partial<RuntimeSlice> | ((s: R
   history: { records: [] },
   addLog: (msg, level = "info") =>
     set((s) => {
-      const next = [...s.runtimeLogs, { id: NEXT_LOG_ID++, ts: nowTs(), level, msg }];
+      // id 基于现有日志的最大 id + 1（避免持久化加载后与旧日志 id 冲突）
+      const maxId = s.runtimeLogs.reduce((m, l) => Math.max(m, l.id), 0);
+      const next = [...s.runtimeLogs, { id: maxId + 1, ts: nowTs(), level, msg }];
       return { runtimeLogs: next.length > 300 ? next.slice(-300) : next };
     }),
   clearLogs: () => set({ runtimeLogs: [] }),

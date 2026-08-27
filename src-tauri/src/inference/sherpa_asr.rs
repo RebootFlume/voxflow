@@ -92,7 +92,8 @@ impl SherpaAsrEngine {
     }
 
     /// 加载模型：启动 websocket server 子进程
-    pub fn load(&self, model_name: &str) -> Result<(), String> {
+    /// `device`: "cuda" → --provider=cuda；"cpu" → --provider=cpu
+    pub fn load(&self, model_name: &str, device: &str) -> Result<(), String> {
         let mut inner = self.inner.lock();
         if inner.state == SherpaState::Ready && inner.model == model_name {
             return Ok(()); // 幂等：已加载同一模型
@@ -131,7 +132,11 @@ impl SherpaAsrEngine {
             cmd.arg(format!("--paraformer={}", main_file.display()));
         }
         cmd.arg(format!("--tokens={}", tokens.display()))
-            .arg("--provider=cuda")
+            // 设备生效：cpu → --provider=cpu；其他（cuda 等）→ --provider=cuda
+            .arg(match device.to_ascii_lowercase().trim() {
+                "cpu" => "--provider=cpu",
+                _ => "--provider=cuda",
+            })
             .arg("--port=9002")
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -246,6 +251,89 @@ pub fn global_engine() -> Arc<SherpaAsrEngine> {
     static ENGINE: once_cell::sync::Lazy<Arc<SherpaAsrEngine>> =
         once_cell::sync::Lazy::new(|| Arc::new(SherpaAsrEngine::new()));
     ENGINE.clone()
+}
+
+// ─── AsrEngine trait 适配器（注册到 registry）───────────────────────────────
+
+/// sherpa-onnx 的 AsrEngine 适配：包装现有全局单例，供 registry 统一路由。
+/// 与 LlamaAsrAdapter 同模式：新增 PyTorch 引擎时照此写 adapter。
+pub struct SherpaAsrAdapter {
+    engine: Arc<SherpaAsrEngine>,
+}
+
+impl SherpaAsrAdapter {
+    pub fn new() -> Self {
+        Self {
+            engine: global_engine(),
+        }
+    }
+}
+
+impl Default for SherpaAsrAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl super::engine::AsrEngine for SherpaAsrAdapter {
+    fn framework(&self) -> &'static str {
+        "onnx"
+    }
+
+    fn load_model(&self, name: &str) -> Result<(), String> {
+        self.engine.load(name, "cuda")
+    }
+
+    fn load_model_with_device(&self, name: &str, device: &str) -> Result<(), String> {
+        self.engine.load(name, device)
+    }
+
+    fn unload(&self) -> Result<(), String> {
+        self.engine.unload();
+        Ok(())
+    }
+
+    fn is_loaded(&self) -> bool {
+        matches!(
+            self.engine.state(),
+            crate::inference::sherpa_asr::SherpaState::Ready
+        )
+    }
+
+    fn current_model(&self) -> String {
+        self.engine.model()
+    }
+
+    fn transcribe(&self, samples: &[f32], sample_rate: u32) -> Result<String, String> {
+        self.engine.transcribe(samples, sample_rate)
+    }
+
+    fn vram_estimate_mb(&self) -> Option<u64> {
+        let model = self.engine.model();
+        if model.is_empty() {
+            return None;
+        }
+        let dir = crate::model_manager::model_dir(&model);
+        let mut total: u64 = 0;
+        fn walk(d: &std::path::Path, total: &mut u64) {
+            if let Ok(rd) = std::fs::read_dir(d) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        walk(&p, total);
+                    } else if let Ok(md) = e.metadata() {
+                        *total += md.len();
+                    }
+                }
+            }
+        }
+        walk(&dir, &mut total);
+        if total > 0 {
+            Some(total / (1024 * 1024))
+        } else {
+            None
+        }
+    }
 }
 
 // ── 测试 ──

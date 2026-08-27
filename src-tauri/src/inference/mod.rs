@@ -8,8 +8,10 @@
 pub mod engine;
 pub mod llama_server;
 pub mod sherpa_asr;
+pub mod registry;
 pub mod errors;
 pub mod commands;
+pub mod transcribe_chunks;
 
 #[cfg(test)]
 mod tests;

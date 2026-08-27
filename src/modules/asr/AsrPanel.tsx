@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
+import { RotateCw } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -10,7 +11,6 @@ import { VolumeWave } from "@/components/VolumeWave";
 import { t } from "@/lib/i18n";
 import { sendToSidecar } from "@/lib/tauri";
 import { loadAsrModel } from "@/lib/modelLoader";
-import { rustGetVramStatus } from "@/lib/tauri";
 import { TranscribePanel } from "./TranscribePanel";
 
 
@@ -67,25 +67,8 @@ function HotkeyRecorder({ value, onChange }: { value: string; onChange: (v: stri
 function VramMonitorCard() {
   const locale = useAppStore((s) => s.locale);
   const asr = useAppStore((s) => s.asr);
-  const [vram, setVram] = useState<{ total: number; used: number; llama: number | null; sherpa: number | null } | null>(null);
-
-  useEffect(() => {
-    let alive = true;
-    const poll = () => {
-      rustGetVramStatus().then((r) => {
-        if (!alive) return;
-        setVram({
-          total: r.total_mb ?? 0,
-          used: r.used_mb ?? 0,
-          llama: r.frameworks?.llama?.mb ?? null,
-          sherpa: r.frameworks?.sherpa?.mb ?? null,
-        });
-      }).catch(() => {});
-    };
-    poll();
-    const timer = window.setInterval(poll, 3000);
-    return () => { alive = false; window.clearInterval(timer); };
-  }, []);
+  // 读全局轮询结果（useVramPoller 每 3s 更新 store，不随本组件生命周期启停）
+  const vram = useAppStore((s) => s.vram);
 
   const pct = vram && vram.total > 0 ? Math.round((vram.used / vram.total) * 100) : 0;
 
@@ -152,6 +135,9 @@ export function AsrPanel() {
   const updateAsr = useAppStore((s) => s.updateAsr);
   const locale = useAppStore((s) => s.locale);
   const gpu = useAppStore((s) => s.gpu);
+  // 引擎加载状态 + 实际加载设备（判断「设备待应用」）
+  const asrEngineReady = useAppStore((s) => s.engines.asr.status === "ready");
+  const loadedDevice = useAppStore((s) => s.models.loadedDevice);
 
   if (sub === "hotkey") {
     return (
@@ -195,7 +181,9 @@ export function AsrPanel() {
             <Select
               value={asr.device}
               onValueChange={(device) => {
-                void loadAsrModel(asr.model, device);
+                // 切换设备不自动重载（避免闪屏 + 无谓的进程重启）
+                // 只保存选中设备，出现「应用并重载」按钮，用户确认后才重载
+                useAppStore.getState().updateAsr({ device });
               }}
             >
               <SelectTrigger className="w-64">
@@ -208,6 +196,26 @@ export function AsrPanel() {
                 </SelectItem>
               </SelectContent>
             </Select>
+            {/* 待应用提示 + 重载按钮：引擎已加载且选中设备 ≠ 实际加载设备时出现 */}
+            {asrEngineReady && asr.device !== loadedDevice && (
+              <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2">
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs text-amber-600 dark:text-amber-400">
+                    {t(locale, "asr.device.pending", { device: asr.device.toUpperCase() })}
+                  </p>
+                  <p className="mt-0.5 text-[11px] text-muted-foreground">
+                    {t(locale, "asr.device.pendingHint")}
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  onClick={() => void loadAsrModel(asr.model, asr.device)}
+                >
+                  <RotateCw className="mr-1.5 h-3.5 w-3.5" />
+                  {t(locale, "asr.device.apply")}
+                </Button>
+              </div>
+            )}
             <InputDeviceDisplay />
           </CardContent>
         </Card>

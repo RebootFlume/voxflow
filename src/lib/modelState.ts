@@ -12,11 +12,15 @@ import { useAppStore } from "@/stores";
 
 export type ModelKind = "asr" | "tts";
 
-/** 依据模型清单元数据判断模型种类（不再用名称对比猜测） */
+/** 依据模型清单元数据判断模型种类；清单未就绪时按名称兜底（避免事件被吞） */
 export function resolveModelKind(name: string): ModelKind | null {
   if (!name) return null;
   const item = useAppStore.getState().models.items.find((i) => i.name === name);
-  return item ? item.kind : null;
+  if (item) return item.kind;
+  // 兜底：清单未加载时按名称推断（E2E TTS 模型名特征，其余默认 ASR）
+  const lower = name.toLowerCase();
+  if (/kokoro|matcha|zipvoice|pocket|supertonic|kitten/.test(lower)) return "tts";
+  return "asr";
 }
 
 /** 统一的「是否已加载」判定：engines[kind].status === "ready" 且 model 匹配 */
@@ -38,5 +42,7 @@ export function applyEngineStatus(
 ): void {
   if (!kind) return;
   const s = useAppStore.getState();
-  s.setEngineStatus(kind, { status, error: error ?? null });
+  // ready / error / idle 时清掉加载阶段（stage 只在 loading 期间有意义）
+  const stage = status === "loading" ? s.engines[kind].stage : null;
+  s.setEngineStatus(kind, { status, stage, error: error ?? null });
 }

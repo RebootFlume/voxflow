@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { onSidecarEvent, sendToSidecar } from "@/lib/tauri";
 import { applyEngineStatus, resolveModelKind } from "@/lib/modelState";
-import { useAppStore } from "@/stores";
+import { useAppStore, type EngineState } from "@/stores";
 import { t } from "@/lib/i18n";
 
 /** 字节数 → 人类可读（GB/MB） */
@@ -63,7 +63,9 @@ export function useSidecarEvents() {
         status !== "tts_synthesizing" &&
         // 以下状态已有友好日志（case 里 addLog），跳过通用 JSON 日志避免重复
         status !== "model_loading" &&
+        status !== "model_progress" &&
         status !== "model_ready" &&
+        status !== "model_loaded" &&
         status !== "model_error" &&
         status !== "model_downloaded" &&
         status !== "model_download_cancelled" &&
@@ -135,9 +137,14 @@ export function useSidecarEvents() {
           );
           void sendToSidecar({ action: "list_models" });
           break;
-        case "model_ready": {
+        case "model_ready":
+        case "model_loaded": {
           const device = typeof payload.device === "string" ? payload.device : null;
-          store.addLog(`[model] ✅ ${model} 加载成功（${device || ""}）`, "success");
+          const loadMs = typeof payload.load_ms === "number" ? payload.load_ms : null;
+          store.addLog(
+            `[model] ✅ ${model} 加载成功（${device || ""}${loadMs != null ? `, ${loadMs}ms` : ""}）`,
+            "success",
+          );
           if (device) {
             store.setLoadedModel(model || store.models.loadedModel || "", device);
             const kind = resolveModelKind(model);
@@ -156,6 +163,18 @@ export function useSidecarEvents() {
           store.addLog(`[model] ⏳ 正在加载 ${model}...`, "info");
           applyEngineStatus(resolveModelKind(model), "loading");
           break;
+        case "model_progress": {
+          // 加载阶段进度：unload → loading → ready
+          const stage = typeof payload.stage === "string" ? payload.stage : "loading";
+          const kind = resolveModelKind(model);
+          if (kind) {
+            useAppStore.getState().setEngineStatus(kind, {
+              status: "loading",
+              stage: stage as EngineState["stage"],
+            });
+          }
+          break;
+        }
         case "model_not_downloaded":
           applyEngineStatus(resolveModelKind(model), "idle");
           break;

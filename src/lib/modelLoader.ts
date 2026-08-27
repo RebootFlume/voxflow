@@ -10,7 +10,7 @@
  * 状态写入点唯一：engines（modelsSlice），tts.model / asr.model 仅表示 UI 选中。
  */
 import { useAppStore } from "@/stores";
-import { rustLoadTtsModel, rustStartLlamaServer, rustStopLlamaServer, rustLlamaServerStatus, rustSwitchE2eTtsModel, rustUnloadTtsModel } from "@/lib/tauri";
+import { rustLoadTtsModel, rustStopLlamaServer, rustLlamaServerStatus, rustSwitchE2eTtsModel, rustUnloadTtsModel } from "@/lib/tauri";
 import type { EngineFramework } from "@/stores/types";
 
 /** 从模型名推断框架 */
@@ -38,21 +38,30 @@ export function frameworkFor(kind: "asr" | "tts", name: string): EngineFramework
 /** 加载 ASR 引擎（llama-server 子进程 / sherpa websocket server） */
 export function loadAsrModel(name: string, device: string): Promise<void> {
   const s = useAppStore.getState();
+  // 全局门禁：任一引擎加载中禁止再发起加载（防止快速切换并发）
+  if (s.engines.asr.status === "loading" || s.engines.tts.status === "loading") {
+    return Promise.resolve();
+  }
   const framework = frameworkFor("asr", name);
   s.setEngineStatus("asr", { framework, model: name, status: "loading", error: null });
   s.updateAsr({ model: name, device: device || "cuda", framework: framework === "sherpa" ? "onnx" : "gguf" });
 
   // sherpa ASR → sidecar load_model（lib.rs 按 kind=asr + Onnx 路由到 sherpa 引擎）
+  // llama ASR → rust_start_llama_server(model)（模型名决定加载 0.6B 还是 1.7B）
+  // 两者均为异步加载：invoke 返回 ≠ 加载完成。
+  //  - llama：Rust 后台线程加载 + emit model_ready/model_error（useSidecarEvents 处理）
+  //  - sherpa：sendToSidecar 同步等待加载完（但 emit model_loaded，前端也靠事件）
+  // 因此这里 invoke 成功只保留 loading 状态，最终 ready/error 由事件驱动。
   const op = framework === "sherpa"
     ? import("@/lib/tauri").then(({ sendToSidecar }) =>
         sendToSidecar({ action: "load_model", model: name, device }))
-    : rustStartLlamaServer();
+    : import("@/lib/tauri").then(({ rustStartLlamaServer }) =>
+        rustStartLlamaServer(name, device));
 
+  // invoke 成功：保持 loading（等待 model_ready / model_loaded 事件完成状态更新）
   return op.then(
     () => {
-      const st = useAppStore.getState();
-      st.setEngineStatus("asr", { status: "ready" });
-      st.updateAsr({ modelStatus: "ready" }); // 兼容旧 UI 徽章
+      // 状态保持 loading，由 useSidecarEvents 收到 model_ready 后置 ready
     },
     (e) => {
       const st = useAppStore.getState();
@@ -88,6 +97,10 @@ export function checkAsrServer(): Promise<boolean> {
 /** 加载 TTS 模型（model + device 一并写入，统一置 loading） */
 export function loadTtsModel(name: string, device: string): Promise<void> {
   const s = useAppStore.getState();
+  // 全局门禁：任一引擎加载中禁止再发起加载
+  if (s.engines.asr.status === "loading" || s.engines.tts.status === "loading") {
+    return Promise.resolve();
+  }
   const framework = frameworkFor("tts", name);
   s.setEngineStatus("tts", { framework, model: name, status: "loading", error: null });
   s.updateTts({ model: name, device });

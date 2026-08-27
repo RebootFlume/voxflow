@@ -20,8 +20,8 @@ const FORMAT_KEYS = [
   { value: "lrc", labelKey: "asr.transcribe.format.lrc" },
 ];
 
-// soundfile 原生支持的格式（不需要 FFmpeg）
-const NATIVE_FORMATS = new Set(["wav", "flac", "ogg"]);
+// hound 原生只支持 WAV（无外部依赖快速路径）
+const NATIVE_FORMATS = new Set(["wav"]);
 
 function getFileExt(path: string): string {
   const name = path.split(/[/\\]/).pop() ?? path;
@@ -84,13 +84,14 @@ export function TranscribePanel() {
       store.updateTranscribeTask(task.filePath, { status: "transcribing", progress: 0, doneSec: 0, totalSec: 0 });
 
       try {
-        const result = await rustTranscribeLlama(task.filePath);
+        const result = await rustTranscribeLlama(task.filePath, exportDir || undefined, format);
         store.updateTranscribeTask(task.filePath, {
           status: "done",
           progress: 100,
           result: result.text,
           doneSec: result.duration,
           totalSec: result.duration,
+          savedPath: result.saved_path,
         });
       } catch (e) {
         store.updateTranscribeTask(task.filePath, { status: "error", error: String(e) });

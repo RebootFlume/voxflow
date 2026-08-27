@@ -7,10 +7,12 @@ export interface EngineRegistry {
 }
 
 function idleEngine(): EngineState {
-  return { framework: null, model: null, status: "idle", error: null };
+  return { framework: null, model: null, status: "idle", stage: null, error: null };
 }
 
 export interface ModelsSlice {
+  /** 启动阶段：booting = 显示启动 Splash，ready = 主界面 */
+  startupPhase: "booting" | "ready";
   models: {
     modelRoot: string;
     mirror: string;
@@ -32,9 +34,12 @@ export interface ModelsSlice {
   /** 引擎操作 */
   setEngineStatus: (kind: "asr" | "tts", patch: Partial<EngineState>) => void;
   resetEngine: (kind: "asr" | "tts") => void;
+  /** 启动阶段控制 */
+  setStartupPhase: (phase: "booting" | "ready") => void;
 }
 
 export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: ModelsSlice) => Partial<ModelsSlice>)) => void): ModelsSlice => ({
+  startupPhase: "booting",
   models: { modelRoot: "", mirror: "", proxy: "", diskFreeGb: null, items: [], loadedModel: null, loadedDevice: null },
   engines: { asr: idleEngine(), tts: idleEngine() },
   setModelRootLocal: (modelRoot) => set((s) => ({ models: { ...s.models, modelRoot } })),
@@ -61,6 +66,7 @@ export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: Mod
             descriptionZh: String(m.description_zh ?? ""),
             descriptionEn: String(m.description_en ?? ""),
             available: m.available !== false,
+            cpu: (m.cpu === "slow" || m.cpu === "unsupported" ? m.cpu : "good") as ModelItemState["cpu"],
             quant: typeof m.quant === "string" ? m.quant : undefined,
             path: String(m.path ?? ""),
             dirExists: m.dir_exists === true,
@@ -130,4 +136,5 @@ export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: Mod
     set((s) => ({ engines: { ...s.engines, [kind]: { ...s.engines[kind], ...patch } } })),
   resetEngine: (kind) =>
     set((s) => ({ engines: { ...s.engines, [kind]: idleEngine() } })),
+  setStartupPhase: (startupPhase) => set({ startupPhase }),
 });

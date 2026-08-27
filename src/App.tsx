@@ -2,6 +2,8 @@ import { ActivityBar } from "@/components/ActivityBar";
 import { useThemeSync } from "@/lib/theme";
 import { Sidebar } from "@/components/Sidebar";
 import { FloatingBar } from "@/components/FloatingBar";
+import { ModelLoadingOverlay } from "@/components/ModelLoadingOverlay";
+import { StartupSplash } from "@/components/StartupSplash";
 import { TitleBar } from "@/components/TitleBar";
 import { AsrPanel } from "@/modules/asr/AsrPanel";
 import { TtsPanel } from "@/modules/tts/TtsPanel";
@@ -12,6 +14,7 @@ import { ModelsPanel } from "@/modules/models/ModelsPanel";
 import { useAppStore } from "@/stores";
 import { t } from "@/lib/i18n";
 import { useSidecarEvents } from "@/hooks/useSidecarEvents";
+import { useVramPoller } from "@/hooks/useVramPoller";
 import { useHotkeySync, useStartupFallback, useModelLoadTimeout, useStatusReconcile } from "@/hooks/useStartup";
 import { MODULE_ICONS, resolveHeading } from "@/config/modules";
 
@@ -24,6 +27,7 @@ function ModuleIcon() {
 export default function App() {
   useThemeSync();
   useSidecarEvents();
+  useVramPoller();
   useHotkeySync();
   useStartupFallback();
   useModelLoadTimeout();
@@ -62,6 +66,8 @@ export default function App() {
       <div className="flex shrink-0 items-center justify-center border-t bg-background/80 py-1.5">
         <FloatingBar />
       </div>
+      <ModelLoadingOverlay />
+      <StartupSplash />
     </div>
   );
 }

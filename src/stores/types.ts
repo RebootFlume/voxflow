@@ -47,6 +47,8 @@ export interface EngineState {
   framework: EngineFramework | null;
   model: string | null;
   status: "idle" | "loading" | "ready" | "error";
+  /** 加载阶段（loading 时的细分进度）：unload（卸载旧模型）→ loading（启动/等待）→ ready */
+  stage: "unload" | "loading" | "ready" | null;
   error: string | null;
 }
 
@@ -59,6 +61,8 @@ export interface ModelItemState {
   descriptionZh: string;
   descriptionEn: string;
   available: boolean;
+  /** CPU 模式体验分级：good（可用）/ slow（能跑但慢）/ unsupported（不支持 CPU） */
+  cpu?: "good" | "slow" | "unsupported";
   quant?: string;
   path: string;
   dirExists?: boolean;
