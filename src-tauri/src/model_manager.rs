@@ -897,11 +897,14 @@ fn download_github_release(
     let tmp_bz2 = dest.join("_download.tar.bz2");
     std::fs::write(&tmp_bz2, &buf).map_err(|e| format!("write tmp: {e}"))?;
     eprintln!("[download] extracting {} bytes to {}", buf.len(), dest.display());
-    let status = std::process::Command::new("tar")
-        .args(["xjf", tmp_bz2.to_str().unwrap_or("")])
-        .current_dir(dest)
-        .status()
-        .map_err(|e| format!("tar start failed: {e}"))?;
+    let status = {
+        let mut cmd = std::process::Command::new("tar");
+        crate::process_hidden::hide_console_window(&mut cmd);
+        cmd.args(["xjf", tmp_bz2.to_str().unwrap_or("")])
+            .current_dir(dest)
+            .status()
+            .map_err(|e| format!("tar start failed: {e}"))?
+    };
     let _ = std::fs::remove_file(&tmp_bz2);
     if !status.success() {
         return Err(format!("tar exit: {}", status.code().unwrap_or(-1)));

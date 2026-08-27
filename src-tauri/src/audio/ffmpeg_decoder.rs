@@ -28,7 +28,9 @@ pub fn ffmpeg_available() -> bool {
 /// 内部：ffmpeg 输出裸 PCM（s16le）到 stdout → 收集字节 → 转 float32。
 /// 返回 (samples, 16000)
 pub fn decode_with_ffmpeg(path: &std::path::Path) -> Result<(Vec<f32>, u32), String> {
-    let mut child = Command::new("ffmpeg")
+    let mut cmd = Command::new("ffmpeg");
+    crate::process_hidden::hide_console_window(&mut cmd);
+    let mut child = cmd
         .args(["-v", "error", "-i"])
         .arg(path)
         .args(["-f", "s16le", "-ac", "1", "-ar", "16000", "-"])

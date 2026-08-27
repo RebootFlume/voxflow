@@ -9,7 +9,9 @@ use serde_json::Value;
 
 /// Rust 直接检测 GPU：调 nvidia-smi（<100ms，零依赖）
 pub fn detect_gpu() -> Value {
-    let output = Command::new("nvidia-smi")
+    let mut cmd = Command::new("nvidia-smi");
+    crate::process_hidden::hide_console_window(&mut cmd);
+    let output = cmd
         .args(["--query-gpu=name,memory.total", "--format=csv,noheader,nounits"])
         .output();
     match output {

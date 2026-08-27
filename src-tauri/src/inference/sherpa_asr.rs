@@ -130,6 +130,8 @@ impl SherpaAsrEngine {
             .arg("--port=9002")
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        // 隐藏子进程控制台窗口（避免黑窗口闪过）
+        crate::process_hidden::hide_console_window(&mut cmd);
 
         inner.state = SherpaState::Loading;
         drop(inner);

@@ -159,20 +159,22 @@ pub fn download_runtime(
     let is_zip = pkg.url.ends_with(".zip");
     let status = if is_zip {
         // llama.cpp 官方包是 zip → Windows PowerShell Expand-Archive
-        std::process::Command::new("powershell")
-            .args([
-                "-NoProfile", "-Command",
-                &format!("Expand-Archive -Path '{}' -DestinationPath '{}' -Force", pkg_path.display(), tmp.display()),
-            ])
-            .status()
-            .map_err(|e| format!("powershell start failed: {e}"))?
+        let mut cmd = std::process::Command::new("powershell");
+        crate::process_hidden::hide_console_window(&mut cmd);
+        cmd.args([
+            "-NoProfile", "-Command",
+            &format!("Expand-Archive -Path '{}' -DestinationPath '{}' -Force", pkg_path.display(), tmp.display()),
+        ])
+        .status()
+        .map_err(|e| format!("powershell start failed: {e}"))?
     } else {
         // sherpa 官方包是 tar.bz2 → 系统 tar
-        std::process::Command::new("tar")
-            .args(["xjf", pkg_path.to_str().unwrap_or("")])
-            .current_dir(&tmp)
-            .status()
-            .map_err(|e| format!("tar start failed: {e}"))?
+        let mut cmd = std::process::Command::new("tar");
+        crate::process_hidden::hide_console_window(&mut cmd);
+        cmd.args(["xjf", pkg_path.to_str().unwrap_or("")])
+        .current_dir(&tmp)
+        .status()
+        .map_err(|e| format!("tar start failed: {e}"))?
     };
     let _ = std::fs::remove_file(&pkg_path);
     if !status.success() {

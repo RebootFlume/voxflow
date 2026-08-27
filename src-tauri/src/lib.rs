@@ -1,5 +1,6 @@
 #[allow(unused_imports)]
 pub mod audio;
+pub mod process_hidden;
 use std::process::Command;
 mod app_state;
 #[allow(unused_imports)]
@@ -302,7 +303,9 @@ fn get_vram_status_sync() -> serde_json::Value {
     let total_mb = gpu.get("memoryMB").and_then(|v| v.as_u64()).unwrap_or(0);
 
     // nvidia-smi 已用显存（总量，无需权限）
-    let used_mb = Command::new("nvidia-smi")
+    let mut smi_cmd = Command::new("nvidia-smi");
+    crate::process_hidden::hide_console_window(&mut smi_cmd);
+    let used_mb = smi_cmd
         .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
         .output()
         .ok()
@@ -376,7 +379,9 @@ fn vram_of_process(name: &str) -> Option<u64> {
     use std::process::Command;
     // 找进程 PID
     let ps_cmd = format!("Get-Process '{name}' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id");
-    let pid = Command::new("powershell")
+    let mut ps = Command::new("powershell");
+    crate::process_hidden::hide_console_window(&mut ps);
+    let pid = ps
         .args(["-NoProfile", "-Command", &ps_cmd])
         .output()
         .ok()
@@ -388,7 +393,9 @@ fn vram_of_process(name: &str) -> Option<u64> {
             }
         })?;
     // nvidia-smi 按 PID 查
-    let out = Command::new("nvidia-smi")
+    let mut smi = Command::new("nvidia-smi");
+    crate::process_hidden::hide_console_window(&mut smi);
+    let out = smi
         .args(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"])
         .output()
         .ok()?;
