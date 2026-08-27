@@ -11,11 +11,18 @@
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path $PSScriptRoot -Parent
-$sevenZip = "D:\app\7-Zip\7z.exe"
+$sevenZip = $null
+# 优先检测环境变量
+foreach ($p in @($env:SEVENZIP, $env:ProgramFiles + "\7-Zip\7z.exe", "${env:ProgramFiles(x86)}\7-Zip\7z.exe")) {
+    if ($p -and (Test-Path $p)) { $sevenZip = $p; break }
+}
+# 回退：PATH 里找
+if (-not $sevenZip) { $sevenZip = Get-Command 7z.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source }
+
 $out = "$root\dist-bundle\libs"
 
-if (-not (Test-Path $sevenZip)) {
-    Write-Error "7-Zip 未找到: $sevenZip（请安装或修改脚本路径）"
+if (-not $sevenZip) {
+    Write-Error "7-Zip 未找到（请安装 7-Zip 或设置 SEVENZIP 环境变量）"
 }
 if (-not (Test-Path "$root\libs")) {
     Write-Error "libs 目录不存在: $root\libs"
