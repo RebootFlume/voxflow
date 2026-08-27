@@ -48,16 +48,13 @@ impl Default for SherpaTtsEngine {
 
 impl SherpaTtsEngine {
     pub fn new() -> Self {
-        let proj = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."));
         // 模型根目录：统一数据根（get_model_root），无 workspace 回退
         let model_root = crate::model_manager::get_model_root();
         Self {
             model: None,
             model_root,
-            tts_exe: proj.join("libs/sherpa-onnx/sherpa-onnx-offline-tts.exe"),
+            tts_exe: crate::inference::runtime_paths::sherpa_runtime_dir()
+                .join("sherpa-onnx-offline-tts.exe"),
             sid: 0,
             provider: "cuda".to_string(),
             num_threads: 4,

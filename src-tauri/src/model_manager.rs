@@ -269,7 +269,7 @@ static CONFIG: once_cell::sync::Lazy<RwLock<RuntimeConfig>> =
 pub static ENV_SCOPE_LOCK: once_cell::sync::Lazy<Mutex<()>> =
     once_cell::sync::Lazy::new(|| Mutex::new(()));
 
-fn apply_proxy_env(proxy: &str) {
+pub fn apply_proxy_env(proxy: &str) {
     let p = proxy.trim();
     let keys = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"];
     if p.is_empty() {

@@ -12,7 +12,7 @@ fn sherpa_asr_paraformer_transcribe() {
     assert!(model_dir.join("model.int8.onnx").exists(), "Paraformer 模型未下载");
 
     // 加载（sherpa_asr 自动识别 Paraformer 参数）
-    engine.load(model).expect("Paraformer 加载失败");
+    engine.load(model, "cuda").expect("Paraformer 加载失败");
     eprintln!("[test] loaded: state={:?} model={}", engine.state(), engine.model());
 
     // 用测试音频转写

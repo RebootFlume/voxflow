@@ -12,6 +12,8 @@ pub mod registry;
 pub mod errors;
 pub mod commands;
 pub mod transcribe_chunks;
+pub mod runtime_paths;
+pub mod runtime_download;
 
 #[cfg(test)]
 mod tests;

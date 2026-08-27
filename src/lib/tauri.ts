@@ -166,3 +166,13 @@ export function rustTestTtsModel(): Promise<Record<string, unknown>> {
 export function decodeAudioFile(path: string): Promise<{ samples: number[]; sampleRate: number; duration: number }> {
   return invoke("decode_audio_file", { path });
 }
+
+/** 检测推理框架（libs）安装状态 */
+export function rustCheckRuntime(): Promise<{ root: string; packages: { framework: string; name: string; installed: boolean; dir: string }[] }> {
+  return invoke("check_runtime");
+}
+
+/** 下载 + 解压推理框架运行时（llama / sherpa） */
+export function rustDownloadRuntime(framework: string): Promise<{ ok: boolean; framework: string }> {
+  return invoke("download_runtime", { framework });
+}

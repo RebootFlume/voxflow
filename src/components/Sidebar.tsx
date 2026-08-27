@@ -12,6 +12,7 @@ const SUB_MENU_LABEL_KEYS: Record<string, string> = {
   records: "submenu.records",
   runtime: "submenu.runtime",
   settings: "submenu.settings",
+  framework: "submenu.framework",
   asr: "submenu.asr",
   tts: "submenu.tts",
   "voice-settings": "submenu.voice-settings",

@@ -7,7 +7,10 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "bundle": "powershell -ExecutionPolicy Bypass -File scripts/bundle.ps1",
+    "bundle:portable": "powershell -ExecutionPolicy Bypass -File scripts/bundle.ps1",
+    "libs:pack": "powershell -ExecutionPolicy Bypass -File scripts/pack-libs.ps1"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.3.0",

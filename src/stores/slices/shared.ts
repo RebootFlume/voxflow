@@ -5,6 +5,6 @@ export const DEFAULT_SUB_MENUS: Record<Module, string[]> = {
   tts: ["model-device", "voice-settings", "synthesize"],
   api: ["service", "endpoint-status", "console"],
   history: ["records", "runtime"],
-  models: ["settings", "asr", "tts"],
+  models: ["framework", "asr", "tts", "settings"],
   settings: ["general", "appearance", "about"],
 };

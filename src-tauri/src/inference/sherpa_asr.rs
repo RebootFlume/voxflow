@@ -8,7 +8,7 @@
 //! - 模型：SenseVoice（--sense-voice-model） / Paraformer（--paraformer）均支持
 
 use std::net::TcpStream;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -73,18 +73,8 @@ impl SherpaAsrEngine {
 
     /// 定位 websocket server 可执行文件
     fn server_exe() -> PathBuf {
-        let proj = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."));
-        // 1. 环境变量 2. libs/sherpa-onnx（统一运行时目录）
-        if let Ok(env_dir) = std::env::var("SHERPA_CPP_DIR") {
-            let p = PathBuf::from(env_dir).join(SHERPA_WS_EXE);
-            if p.exists() {
-                return p;
-            }
-        }
-        proj.join("libs/sherpa-onnx").join(SHERPA_WS_EXE)
+        // 运行时目录：环境变量 → exe 同级 libs（打包后）→ 项目 libs（开发时）
+        crate::inference::runtime_paths::sherpa_runtime_dir().join(SHERPA_WS_EXE)
     }
 
     fn server_exe_exists() -> bool {

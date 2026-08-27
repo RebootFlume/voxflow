@@ -26,6 +26,7 @@ export const HEADING_KEYS: Record<Module, string> = {
 // ---- Sub-menu heading maps (i18n keys for sub-page titles) ----
 
 export const MODELS_SUB_HEADING: Record<string, string> = {
+  framework: "submenu.framework",
   settings: "submenu.settings",
   asr: "submenu.asr",
   tts: "submenu.tts",
@@ -56,6 +57,7 @@ export const SUB_MENU_LABEL_KEYS: Record<string, string> = {
   records: "submenu.records",
   runtime: "submenu.runtime",
   settings: "submenu.settings",
+  framework: "submenu.framework",
   asr: "submenu.asr",
   tts: "submenu.tts",
   "voice-settings": "submenu.voice-settings",

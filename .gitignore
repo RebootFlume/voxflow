@@ -27,3 +27,4 @@ log.txt
 # 音频
 *.wav
 nul
+dist-bundle/

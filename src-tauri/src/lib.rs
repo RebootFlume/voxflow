@@ -605,6 +605,29 @@ async fn rust_transcribe_llama(
     .map_err(|e| format!("转写线程失败: {e}"))?
 }
 
+/// 检测推理框架（libs）安装状态
+#[tauri::command]
+fn check_runtime() -> serde_json::Value {
+    inference::runtime_download::runtime_status()
+}
+
+/// 下载 + 解压推理框架运行时（libs）到 exe 旁 libs/
+/// 复用模型下载机制（代理 env + reqwest + tar 解压），带进度事件
+#[tauri::command]
+async fn download_runtime(
+    app: tauri::AppHandle,
+    framework: String,
+) -> Result<serde_json::Value, String> {
+    let app2 = app.clone();
+    let fw2 = framework.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        inference::runtime_download::download_runtime(app2, &fw2)
+    })
+    .await
+    .map_err(|e| format!("运行时下载线程失败: {e}"))??;
+    Ok(serde_json::json!({ "ok": true, "framework": framework }))
+}
+
 /// 测试 TTS 模型加载（打印输入输出 tensor 名称）
 #[tauri::command]
 fn rust_test_tts_model(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
@@ -754,6 +777,8 @@ pub fn run() {
             rust_stop_llama_server,
             rust_llama_server_status,
             rust_transcribe_llama,
+            check_runtime,
+            download_runtime,
             tts::commands::rust_load_tts_model,
             tts::commands::rust_synthesize,
             tts::commands::rust_set_tts_language,

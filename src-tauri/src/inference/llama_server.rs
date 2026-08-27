@@ -116,28 +116,8 @@ fn llama_paths() -> (PathBuf, PathBuf) {
 
 /// 定位运行时 + 指定模型子目录（0.6B / 1.7B 通用）
 fn llama_paths_for(model_subdir: &str) -> (PathBuf, PathBuf) {
-    let proj = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
-
-    // 运行时目录优先级：
-    //   1. 环境变量 LLAMA_CPP_DIR（指向含 llama-server.exe 的目录）
-    //   2. 项目 libs/llama-cpp
-    //   3. 项目 libs（旧布局：llama-server.exe 直接放 libs/）
-    let runtime_candidates = vec![
-        std::env::var("LLAMA_CPP_DIR").ok().map(PathBuf::from),
-        Some(proj.join("libs/llama-cpp")),
-        Some(proj.join("libs")),
-    ];
-    let runtime = runtime_candidates
-        .into_iter()
-        .flatten()
-        .find(|d| {
-            d.join(if cfg!(windows) { "llama-server.exe" } else { "llama-server" })
-                .exists()
-        })
-        .unwrap_or_else(|| proj.join("libs/llama-cpp"));
+    // 运行时目录：环境变量 → exe 同级 libs（打包后）→ 项目 libs（开发时）
+    let runtime = crate::inference::runtime_paths::llama_runtime_dir();
 
     // 模型目录优先级（GGUF + mmproj 必须同时存在）:
     //   1. 环境变量 VOXFLOW_MODEL_ROOT/<模型目录>
