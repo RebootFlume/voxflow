@@ -14,8 +14,9 @@ use std::process::{Command, Stdio};
 
 /// 检测 ffmpeg 是否可用（PATH 或常见安装位置）
 pub fn ffmpeg_available() -> bool {
-    Command::new("ffmpeg")
-        .arg("-version")
+    let mut cmd = Command::new("ffmpeg");
+    crate::process_hidden::hide_console_window(&mut cmd);
+    cmd.arg("-version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()

@@ -44,11 +44,12 @@ if (-not (Test-Path $appExe)) {
 
 $bundleRoot = New-InstallDir "VoxFlow"
 Copy-Item $appExe "$bundleRoot\VoxFlow.exe" -Force
-# libs（推理引擎，与 exe 同级——runtime_paths 优先找这里）
-Copy-Item "$root\libs" "$bundleRoot\libs" -Recurse -Force
 
-# 便携模式数据目录占位（data\ 存在 → 便携数据根）
-New-Item "$bundleRoot\data" -ItemType Directory -Force | Out-Null
+# 便携标记：portable.txt 存在 → 数据根 = exe 旁 data\（便携模式）
+Set-Content -Path "$bundleRoot\portable.txt" -Value "VoxFlow portable mode" -Encoding UTF8
+
+# 便携模式：不打包 data/libs（单 exe 最小化），首次运行自动创建 data\（便携数据根）
+# libs 走「推理框架」页下载（用户按需），与数据根解耦
 
 $zip = "$out\VoxFlow-Portable-$ver.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }

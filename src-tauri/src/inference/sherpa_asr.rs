@@ -336,8 +336,12 @@ mod tests {
 
     #[test]
     fn test_server_exe_located() {
-        // 开发环境下 exe 应存在
-        assert!(SherpaAsrEngine::server_exe_exists(), "sherpa server exe 应存在");
+        // 验证解析逻辑：路径应指向 exe 旁 libs\sherpa-onnx
+        // （不再断言文件存在——开发环境 libs 是否复制取决于开发者，
+        //   统一逻辑：libs 永远在 exe 旁）
+        let dir = crate::inference::runtime_paths::sherpa_runtime_dir();
+        assert!(dir.to_string_lossy().contains("sherpa-onnx"));
+        assert!(!dir.as_os_str().is_empty());
     }
 
     #[test]

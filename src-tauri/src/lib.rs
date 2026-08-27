@@ -612,6 +612,21 @@ async fn rust_transcribe_llama(
     .map_err(|e| format!("转写线程失败: {e}"))?
 }
 
+/// 数据根信息（便携/安装判定 + 模型目录）——前端启动时覆盖 localStorage 旧值
+#[tauri::command]
+fn get_data_root_info(app: tauri::AppHandle) -> serde_json::Value {
+    let portable = crate::data_root::is_portable(&app);
+    let data_root = crate::data_root::get_data_root(&app);
+    // 模型根：优先已保存的用户选择，否则便携/安装各自默认（与 setup 一致）
+    let model_root = crate::data_root::read_saved_model_root_with(&app)
+        .unwrap_or_else(|| crate::data_root::default_model_root_with(&app));
+    serde_json::json!({
+        "portable": portable,
+        "data_root": data_root.display().to_string(),
+        "model_root": model_root.display().to_string(),
+    })
+}
+
 /// 检测推理框架（libs）安装状态
 #[tauri::command]
 fn check_runtime() -> serde_json::Value {
@@ -753,22 +768,14 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            // 统一数据根：便携模式（exe旁data\）或安装模式（AppData）
-            // 初始化模型根 = 数据根/models（替代前端 bootstrap 传 model_root）
-            let data_root = crate::data_root::get_data_root(app.handle());
-            let _ = model_manager::set_model_root(&data_root.join("models").to_string_lossy());
+            // 统一数据根：便携模式（exe旁data）或安装模式（AppData）
+            // 模型根优先级：config.json 已保存的用户选择 > 数据根/models（便携/安装各自默认）
+            let saved = crate::data_root::read_saved_model_root_with(app.handle());
+            let root = saved.unwrap_or_else(|| crate::data_root::default_model_root_with(app.handle()));
+            let _ = model_manager::set_model_root(&root.to_string_lossy());
 
             // 启动录音 worker + rdev 全局监听（幂等，热键链路依赖）
             hotkey::start_capslock_listener(app.handle().clone());
-            // 迁移旧布局模型目录（下载目录名 → 引擎目录名）
-            // 后台线程执行，避免磁盘扫描阻塞窗口显示（白屏 1-2s）
-            let app2 = app.handle().clone();
-            std::thread::Builder::new()
-                .name("legacy-dir-migrate".into())
-                .spawn(move || {
-                    model_manager::migrate_legacy_dirs(&app2);
-                })
-                .ok();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -785,6 +792,7 @@ pub fn run() {
             rust_llama_server_status,
             rust_transcribe_llama,
             check_runtime,
+            get_data_root_info,
             download_runtime,
             tts::commands::rust_load_tts_model,
             tts::commands::rust_synthesize,
@@ -802,6 +810,7 @@ pub fn run() {
             hf_download_multiple,
             persistence::read_data_file,
             persistence::write_data_file,
+            persistence::remove_data_file,
             persistence::get_data_dir
         ])
         .build(tauri::generate_context!())

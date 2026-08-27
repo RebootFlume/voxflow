@@ -503,23 +503,6 @@ pub fn is_downloading(name: &str) -> bool {
 /// 迁移旧布局：E2E 模型曾下载到展示名目录（如 models/Matcha-zh-baker），
 /// 现在引擎找引擎目录名（matcha-icefall-zh-baker）。应用启动时调用一次，
 /// 把旧目录完整迁移到新目录名，避免用户重新下载。
-pub fn migrate_legacy_dirs(app: &AppHandle) {
-    let root = get_model_root();
-    for info in REGISTRY {
-        let new_dir = resolve_download_dir(&root, info.name);
-        let old_dir = root.join(info.name);
-        if old_dir != new_dir && old_dir.is_dir() && !new_dir.exists() {
-            if is_complete(&old_dir) && std::fs::rename(&old_dir, &new_dir).is_ok() {
-                eprintln!("[model] migrated {} -> {}", old_dir.display(), new_dir.display());
-                let _ = app.emit(
-                    "sidecar://event",
-                    json!({"status": "model_downloaded", "model": info.name, "path": new_dir.display().to_string()}),
-                );
-            }
-        }
-    }
-}
-
 pub fn start_download(app: AppHandle, name: &str) -> Result<(), String> {
     let info = find_model(name)
         .ok_or_else(|| format!("unknown model: {name}"))?
@@ -897,18 +880,9 @@ fn download_github_release(
     let tmp_bz2 = dest.join("_download.tar.bz2");
     std::fs::write(&tmp_bz2, &buf).map_err(|e| format!("write tmp: {e}"))?;
     eprintln!("[download] extracting {} bytes to {}", buf.len(), dest.display());
-    let status = {
-        let mut cmd = std::process::Command::new("tar");
-        crate::process_hidden::hide_console_window(&mut cmd);
-        cmd.args(["xjf", tmp_bz2.to_str().unwrap_or("")])
-            .current_dir(dest)
-            .status()
-            .map_err(|e| format!("tar start failed: {e}"))?
-    };
+    // 解压：7z → bsdtar（System32 全路径）→ tar 回退（避免 GNU tar 把 D: 当远程主机）
+    crate::inference::runtime_download::extract_archive(&tmp_bz2, dest)?;
     let _ = std::fs::remove_file(&tmp_bz2);
-    if !status.success() {
-        return Err(format!("tar exit: {}", status.code().unwrap_or(-1)));
-    }
     // tar 解压后：把模型文件从子目录移到 dest 根
     // GitHub tarball 通常是 `sherpa-onnx-xxx/model.onnx` 格式
     // 需要移到 `dest/model.onnx`

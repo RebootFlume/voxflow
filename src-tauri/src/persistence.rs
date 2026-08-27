@@ -30,6 +30,15 @@ pub fn write_data_file(app: AppHandle, filename: String, content: String) -> Res
 }
 
 #[tauri::command]
+pub fn remove_data_file(app: AppHandle, filename: String) -> Result<(), String> {
+    let path = data_dir(&app)?.join(&filename);
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| format!("remove {}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub fn get_data_dir(app: AppHandle) -> Result<String, String> {
     data_dir(&app).map(|p| p.to_string_lossy().to_string())
 }

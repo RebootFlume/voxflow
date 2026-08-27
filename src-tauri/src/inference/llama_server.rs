@@ -54,6 +54,8 @@ pub struct LlamaServerConfig {
     pub temperature: f32,
     /// 是否禁用 web UI
     pub no_webui: bool,
+    /// mmproj 投影塔是否卸载到 GPU（cuda 时 true，cpu 时 false）
+    pub mmproj_offload: bool,
 }
 
 impl LlamaServerConfig {
@@ -70,6 +72,7 @@ impl LlamaServerConfig {
             parallel: 1,
             temperature: 0.0,
             no_webui: true,
+            mmproj_offload: true,
         }
     }
 }
@@ -95,6 +98,7 @@ fn llama_config_fallback() -> LlamaServerConfig {
         parallel: 1,
         temperature: 0.0,
         no_webui: true,
+        mmproj_offload: true,
     }
 }
 
@@ -271,6 +275,12 @@ impl LlamaServerEngine {
         cmd.arg("--temp").arg(cfg.temperature.to_string());
         if cfg.no_webui {
             cmd.arg("--no-webui");
+        }
+        // mmproj 投影塔：跟随设备配置（cuda → GPU，cpu → CPU）
+        if cfg.mmproj_offload {
+            cmd.arg("--mmproj-offload");
+        } else {
+            cmd.arg("--no-mmproj-offload");
         }
         // 隐藏子进程控制台窗口（仅 Windows）
         #[cfg(windows)]
@@ -650,6 +660,7 @@ fn llama_config_for_model(name: &str, device: &str) -> InferenceResult<LlamaServ
         parallel: 1,
         temperature: 0.0,
         no_webui: true,
+        mmproj_offload: device.to_ascii_lowercase().trim() != "cpu",
     })
 }
 

@@ -10,7 +10,8 @@
     "tauri": "tauri",
     "bundle": "powershell -ExecutionPolicy Bypass -File scripts/bundle.ps1",
     "bundle:portable": "powershell -ExecutionPolicy Bypass -File scripts/bundle.ps1",
-    "libs:pack": "powershell -ExecutionPolicy Bypass -File scripts/pack-libs.ps1"
+    "libs:pack": "powershell -ExecutionPolicy Bypass -File scripts/pack-libs.ps1",
+    "libs:dev": "powershell -ExecutionPolicy Bypass -File scripts/libs-dev.ps1"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.3.0",

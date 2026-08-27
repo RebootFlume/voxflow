@@ -5,7 +5,7 @@
 //!
 //! 下载复用模型下载的机制：代理 env + reqwest + tar 解压。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
@@ -53,7 +53,7 @@ pub const RUNTIME_PACKAGES: &[RuntimePkg] = &[
 
 /// libs 根目录（exe 旁 libs/，便携与安装共用）
 pub fn libs_root() -> PathBuf {
-    runtime_paths::app_dir().join("libs")
+    runtime_paths::libs_dir()
 }
 
 /// 某个框架的 libs 目录
@@ -61,9 +61,14 @@ fn pkg_dir(pkg: &RuntimePkg) -> PathBuf {
     libs_root().join(pkg.target_dir)
 }
 
-/// 检测框架是否已安装（marker 文件存在）
+/// 检测框架是否已安装（与推理启动共用同一路径解析：能找到启动 exe = 已下载）
 pub fn is_runtime_installed(pkg: &RuntimePkg) -> bool {
-    pkg_dir(pkg).join(pkg.marker).exists()
+    let dir = match pkg.framework {
+        "gguf" => runtime_paths::llama_runtime_dir(),
+        "onnx" => runtime_paths::sherpa_runtime_dir(),
+        _ => return false,
+    };
+    dir.join(pkg.marker).exists()
 }
 
 /// 检测所有框架状态，返回 JSON（供前端展示）
@@ -75,7 +80,7 @@ pub fn runtime_status() -> serde_json::Value {
                 "framework": p.framework,
                 "name": p.name,
                 "installed": is_runtime_installed(p),
-                "dir": pkg_dir(p).display().to_string(),
+                "dir": runtime_dir_for(p).display().to_string(),
             })
         })
         .collect();
@@ -84,6 +89,15 @@ pub fn runtime_status() -> serde_json::Value {
         "root": libs_root().display().to_string(),
         "packages": items,
     })
+}
+
+/// 某框架的运行时目录（与推理启动同一路径解析）
+pub fn runtime_dir_for(pkg: &RuntimePkg) -> PathBuf {
+    match pkg.framework {
+        "gguf" => runtime_paths::llama_runtime_dir(),
+        "onnx" => runtime_paths::sherpa_runtime_dir(),
+        _ => libs_root(),
+    }
 }
 
 /// 下载 + 解压一个框架到 libs/（带进度事件，可取消）
@@ -152,34 +166,15 @@ pub fn download_runtime(
         json!({ "status": "runtime_download_progress", "framework": pkg.framework, "progress": 100u32 }),
     );
 
-    // 2. 写临时压缩包 + 解压（按扩展名分流：tar.bz2 → tar；zip → Expand-Archive）
+    // 2. 写临时压缩包 + 解压
+    // 注意：PATH 里可能有 GNU tar（Git 自带），会把 "D:" 当远程主机导致失败。
+    // 因此优先用 7-Zip（若已安装），回退 Windows 自带 bsdtar（System32\tar.exe 全路径）。
     let pkg_path = tmp.join("_runtime.pkg");
     std::fs::write(&pkg_path, &buf).map_err(|e| format!("write tmp pkg: {e}"))?;
     eprintln!("[runtime] extracting {} bytes for {}", buf.len(), pkg.framework);
-    let is_zip = pkg.url.ends_with(".zip");
-    let status = if is_zip {
-        // llama.cpp 官方包是 zip → Windows PowerShell Expand-Archive
-        let mut cmd = std::process::Command::new("powershell");
-        crate::process_hidden::hide_console_window(&mut cmd);
-        cmd.args([
-            "-NoProfile", "-Command",
-            &format!("Expand-Archive -Path '{}' -DestinationPath '{}' -Force", pkg_path.display(), tmp.display()),
-        ])
-        .status()
-        .map_err(|e| format!("powershell start failed: {e}"))?
-    } else {
-        // sherpa 官方包是 tar.bz2 → 系统 tar
-        let mut cmd = std::process::Command::new("tar");
-        crate::process_hidden::hide_console_window(&mut cmd);
-        cmd.args(["xjf", pkg_path.to_str().unwrap_or("")])
-        .current_dir(&tmp)
-        .status()
-        .map_err(|e| format!("tar start failed: {e}"))?
-    };
+    let status = extract_archive(&pkg_path, &tmp);
     let _ = std::fs::remove_file(&pkg_path);
-    if !status.success() {
-        return Err(format!("解压退出码: {}", status.code().unwrap_or(-1)));
-    }
+    status.map_err(|e| format!("解压失败: {e}"))?;
 
     // 3. 把内层目录移到 libs/<target_dir>（压缩包内顶层目录可能叫 llama-cpp / sherpa-onnx）
     let src = tmp.join(pkg.inner_dir);
@@ -190,13 +185,18 @@ pub fn download_runtime(
         }
         std::fs::rename(&src, &dest).map_err(|e| format!("move to libs: {e}"))?;
     } else {
-        // 内层目录不存在 → 直接平铺解压的内容
+        // 内层目录不存在（官方 llama zip 直接平铺）→ 统一移到 libs/<target_dir>/ 下
+        let dest_dir = root.join(pkg.target_dir);
+        if dest_dir.exists() {
+            std::fs::remove_dir_all(&dest_dir).ok();
+        }
+        std::fs::create_dir_all(&dest_dir).map_err(|e| format!("create target dir: {e}"))?;
         let entries: Vec<_> = std::fs::read_dir(&tmp)
             .map_err(|e| format!("read_dir tmp: {e}"))?
             .filter_map(|e| e.ok())
             .collect();
         for e in entries {
-            let target = root.join(e.file_name());
+            let target = dest_dir.join(e.file_name());
             std::fs::rename(e.path(), &target).map_err(|e| format!("move: {e}"))?;
         }
     }
@@ -206,11 +206,79 @@ pub fn download_runtime(
         return Err(format!("解压完成但未找到 {}，包可能不完整", pkg.marker));
     }
 
+    // 试启动验证：spawn 引擎（无模型）+ /health 轮询，确认 exe + DLL 齐全
+    // （marker 文件存在 ≠ 能跑；缺 DLL 时 spawn 即失败/秒退）
+    match smoke_test_runtime(pkg) {
+        Ok(()) => {
+            eprintln!("[runtime] smoke test OK: {}", pkg.framework);
+        }
+        Err(e) => {
+            return Err(format!("试启动验证失败（可能 DLL 缺失）：{e}"));
+        }
+    }
+
     let _ = app.emit(
         "sidecar://event",
         json!({ "status": "runtime_installed", "framework": pkg.framework }),
     );
     Ok(())
+}
+
+/// 试启动验证框架（不带模型，纯起服务 + /health 轮询）
+/// - llama-server: 无 -m 也能起 HTTP 服务（加载 0 模型），/health 返回 OK
+/// - sherpa websocket server: 纯起监听端口，轮询端口可连即通过
+fn smoke_test_runtime(pkg: &RuntimePkg) -> Result<(), String> {
+    let dir = runtime_dir_for(pkg);
+    let exe = dir.join(pkg.marker);
+    if !exe.exists() {
+        return Err(format!("{} 不存在", exe.display()));
+    }
+    // 随机端口（避开默认 8931/9002 与已运行实例冲突）
+    let port = 20000 + (std::process::id() as u16 % 1000) + match pkg.framework {
+        "gguf" => 0,
+        "onnx" => 50,
+        _ => 100,
+    };
+    let mut cmd = std::process::Command::new(&exe);
+    crate::process_hidden::hide_console_window(&mut cmd);
+    if pkg.framework == "gguf" {
+        cmd.args(["--port", &port.to_string(), "--no-webui"]);
+    } else {
+        // sherpa websocket server：无模型启动（不带 --paraformer 等）
+        cmd.args(["--port", &port.to_string()]);
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = cmd.spawn().map_err(|e| format!("试启动失败: {e}"))?;
+
+    // 轮询 6 秒等就绪
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+    let mut ready = false;
+    while std::time::Instant::now() < deadline {
+        // 进程秒退（缺 DLL）→ 立即失败
+        if let Ok(Some(_)) = child.try_wait() {
+            break;
+        }
+        if let Ok(resp) = reqwest::blocking::Client::new()
+            .get(format!("http://127.0.0.1:{}/health", port))
+            .timeout(std::time::Duration::from_millis(800))
+            .send()
+        {
+            if resp.status().is_success() {
+                ready = true;
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    if ready {
+        Ok(())
+    } else {
+        Err(format!("6 秒内未就绪（端口 {port}），引擎可能缺失 DLL 或启动失败"))
+    }
 }
 
 /// 校验框架完整性（marker 存在 + 非空）
@@ -219,10 +287,67 @@ pub fn verify_runtime(framework: &str) -> bool {
         .iter()
         .find(|p| p.framework == framework)
         .map(|p| {
-            let d = pkg_dir(p);
+            let d = runtime_dir_for(p);
             d.join(p.marker).exists() && d.read_dir().map(|mut r| r.next().is_some()).unwrap_or(false)
         })
         .unwrap_or(false)
+}
+
+/// 解压压缩包（zip / tar.bz2 通用）
+/// 优先 7-Zip（常见安装位置），回退 Windows 自带 bsdtar（System32 全路径，避免 GNU tar 把 D: 当远程主机）
+pub fn extract_archive(pkg_path: &Path, dest: &Path) -> Result<(), String> {
+    // 1. 7-Zip（若已安装）
+    for exe in [
+        "C:\\Program Files\\7-Zip\\7z.exe",
+        "C:\\Program Files (x86)\\7-Zip\\7z.exe",
+        "D:\\app\\7-Zip\\7z.exe",
+    ] {
+        let p = std::path::Path::new(exe);
+        if p.exists() {
+            let mut cmd = std::process::Command::new(p);
+            crate::process_hidden::hide_console_window(&mut cmd);
+            let st = cmd
+                .args(["x", pkg_path.to_str().unwrap_or(""), "-y"])
+                .arg(format!("-o{}", dest.display()))
+                .status()
+                .map_err(|e| format!("7z start failed: {e}"))?;
+            if st.success() {
+                return Ok(());
+            }
+        }
+    }
+    // 2. Windows 自带 bsdtar（System32 全路径）
+    let bsdtar = std::path::Path::new(&std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into()))
+        .join("System32\\tar.exe");
+    if bsdtar.exists() {
+        let mut cmd = std::process::Command::new(&bsdtar);
+        crate::process_hidden::hide_console_window(&mut cmd);
+        let st = cmd
+            .arg("-xf")
+            .arg(pkg_path)
+            .arg("-C")
+            .arg(dest)
+            .status()
+            .map_err(|e| format!("bsdtar start failed: {e}"))?;
+        if st.success() {
+            return Ok(());
+        }
+    }
+    // 3. 回退：tar（PATH 里的，最后手段）
+    let mut cmd = std::process::Command::new("tar");
+    crate::process_hidden::hide_console_window(&mut cmd);
+    let st = cmd
+        .arg("-xf")
+        .arg(pkg_path)
+        .arg("-C")
+        .arg(dest)
+        .status()
+        .map_err(|e| format!("tar start failed: {e}"))?;
+    if st.success() {
+        Ok(())
+    } else {
+        Err(format!("所有解压器均失败（退出码: {}", st.code().unwrap_or(-1)))
+    }
 }
 
 #[cfg(test)]
@@ -244,5 +369,10 @@ mod tests {
         let s = runtime_status();
         assert_eq!(s["status"], "runtime_status");
         assert!(s["packages"].as_array().unwrap().len() >= 2);
+        // 调试：打印实际目录与安装状态
+        eprintln!("DEBUG libs_root: {}", libs_root().display());
+        for p in RUNTIME_PACKAGES {
+            eprintln!("DEBUG {} installed={} dir={}", p.framework, is_runtime_installed(p), pkg_dir(p).display());
+        }
     }
 }

@@ -172,6 +172,11 @@ export function rustCheckRuntime(): Promise<{ root: string; packages: { framewor
   return invoke("check_runtime");
 }
 
+/** 数据根信息（便携/安装判定 + 模型目录）——启动时覆盖 localStorage 旧值 */
+export function rustGetDataRootInfo(): Promise<{ portable: boolean; data_root: string; model_root: string }> {
+  return invoke("get_data_root_info");
+}
+
 /** 下载 + 解压推理框架运行时（llama / sherpa） */
 export function rustDownloadRuntime(framework: string): Promise<{ ok: boolean; framework: string }> {
   return invoke("download_runtime", { framework });

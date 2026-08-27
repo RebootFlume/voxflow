@@ -31,22 +31,13 @@ function flush() {
 
 // ---- config.json ----
 
+/** 读取配置文件并恢复到 store */
 export async function loadConfig() {
   try {
-    // config.json 是旧版本遗留产物（项目中已无写入逻辑），其 tts/asr/model 数据
-    // 可能与 zustand persist（localStorage）中的最新状态不一致，
-    // 因此不再从 config.json 覆盖 tts/asr 等运行时字段。
-    // zustand persist（name: "voxflow-config"）是配置的唯一真源。
-    //
-    // 仅当 localStorage 尚无持久化数据时（首次迁移），才从 config.json 迁移一次。
-    const hasPersistedData = localStorage.getItem("voxflow-config") !== null;
-    if (hasPersistedData) return;
-
     const data = await loadData("config.json");
     if (!data) return;
     const parsed = JSON.parse(data);
     const store = useAppStore.getState();
-    const legacyExportDir = parsed.transcribe?.exportDir;
     useAppStore.setState({
       asr: { ...store.asr, ...parsed.asr },
       tts: { ...store.tts, ...parsed.tts },
@@ -54,7 +45,7 @@ export async function loadConfig() {
       overlay: { ...store.overlay, ...parsed.overlay },
       theme: { ...store.theme, ...parsed.theme },
       locale: parsed.locale ?? store.locale,
-      io: { exportDir: parsed.io?.exportDir ?? legacyExportDir ?? store.io.exportDir },
+      io: { ...store.io, ...parsed.io },
       models: {
         ...store.models,
         modelRoot: parsed.models?.modelRoot ?? store.models.modelRoot,
@@ -63,6 +54,25 @@ export async function loadConfig() {
       },
       useRustEngine: parsed.useRustEngine ?? false,
     });
+  } catch {}
+}
+
+/** 保存当前配置到文件 */
+export async function saveConfig() {
+  try {
+    const state = useAppStore.getState();
+    const config = {
+      asr: { hotkey: state.asr.hotkey, model: state.asr.model, device: state.asr.device },
+      tts: state.tts,
+      api: { host: state.api.host, port: state.api.port, apiKey: state.api.apiKey },
+      io: { exportDir: state.io.exportDir },
+      overlay: state.overlay,
+      theme: state.theme,
+      locale: state.locale,
+      models: { modelRoot: state.models.modelRoot, mirror: state.models.mirror, proxy: state.models.proxy },
+      useRustEngine: state.useRustEngine,
+    };
+    await saveData("config.json", JSON.stringify(config, null, 2));
   } catch {}
 }
 
@@ -148,6 +158,17 @@ export async function initPersistence() {
   await loadConfig();
   await loadAllHistory();
   await loadRuntimeLogs();
+
+  // 监听配置变化 → 防抖保存
+  let configTimer: ReturnType<typeof setTimeout> | null = null;
+  const watchConfigKeys = ["asr", "tts", "api", "io", "overlay", "theme", "locale", "models", "useRustEngine"] as const;
+  useAppStore.subscribe((state, prev) => {
+    const changed = watchConfigKeys.some((k) => state[k] !== prev[k]);
+    if (changed) {
+      if (configTimer) clearTimeout(configTimer);
+      configTimer = setTimeout(() => saveConfig(), 500);
+    }
+  });
 
   // 监听历史变化 → 按天写文件
   useAppStore.subscribe((state, prev) => {
