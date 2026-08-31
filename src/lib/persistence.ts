@@ -1,5 +1,5 @@
+import { useAppStore, type HistoryRecord, type RuntimeLog, type RuntimeLogLevel } from "@/stores";
 import { invoke } from "@tauri-apps/api/core";
-import { useAppStore, type HistoryRecord } from "@/stores";
 
 // ---- 基础文件 I/O ----
 
@@ -76,27 +76,46 @@ export async function saveConfig() {
   } catch {}
 }
 
-// ---- 运行日志：logs/YYYY-MM-DD.json（每天一个文件，最近 300 条，持久化）----
+// ---- 运行日志：logs/YYYY-MM-DD.log（每天一个文件，最近 300 条，一行一条，纯文本）----
 
 function todayKey(): string {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-/** 保存运行日志到当天文件 */
-export function saveRuntimeLogs(logs: unknown[]) {
-  debouncedSave(`logs/${todayKey()}.json`, JSON.stringify(logs));
+/** 单条运行日志 → 一行文本（[时间] [级别] 内容，多行内容压成单行） */
+function logToLine(l: RuntimeLog): string {
+  const msg = l.msg.replace(/\r?\n/g, " ");
+  return `[${l.ts}] [${l.level}] ${msg}`;
+}
+
+/** 保存运行日志到当天文件（纯文本，一行一条） */
+export function saveRuntimeLogs(logs: RuntimeLog[]) {
+  debouncedSave(`logs/${todayKey()}.log`, logs.map(logToLine).join("\n"));
 }
 
 /** 加载当天运行日志 */
 export async function loadRuntimeLogs() {
   try {
-    const data = await loadData(`logs/${todayKey()}.json`);
-    if (!data) return;
-    const logs = JSON.parse(data);
-    if (Array.isArray(logs)) {
-      useAppStore.setState({ runtimeLogs: logs });
+    const data = await loadData(`logs/${todayKey()}.log`);
+    if (!data) {
+      // 兼容 0.2.0 的 JSON 旧格式
+      const old = await loadData(`logs/${todayKey()}.json`);
+      if (old) {
+        const logs = JSON.parse(old);
+        if (Array.isArray(logs)) useAppStore.setState({ runtimeLogs: logs });
+      }
+      return;
     }
+    const logs: RuntimeLog[] = data
+      .split(/\r?\n/)
+      .filter((line) => line.trim().length > 0)
+      .map((line, i) => {
+        const m = line.match(/^\[(.+?)\] \[(.+?)\] (.*)$/);
+        return m ? { id: i + 1, ts: m[1], level: m[2].toLowerCase() as RuntimeLogLevel, msg: m[3] } : null;
+      })
+      .filter((l): l is RuntimeLog => l !== null);
+    useAppStore.setState({ runtimeLogs: logs });
   } catch {}
 }
 
