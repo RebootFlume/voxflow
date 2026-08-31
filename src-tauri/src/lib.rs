@@ -20,8 +20,11 @@ pub mod sidecar;
 #[allow(unused_imports)]
 pub mod tray;
 pub mod tts;
+#[allow(unused_imports)]
+pub mod api_server;
 
 use tauri::Emitter;
+use tauri::Manager;
 
 use crate::app_state::AppState;
 use crate::tts::traits::TtsEngine;
@@ -275,6 +278,27 @@ async fn send_to_sidecar_safe(
                 }
             }
             return Ok(serde_json::json!({"ok": true}));
+        }
+        "start_api" => {
+            let host = payload.get("host").and_then(|v| v.as_str()).unwrap_or("127.0.0.1").to_string();
+            let port = payload.get("port").and_then(|v| v.as_u64()).unwrap_or(9870) as u16;
+            let api_key = payload.get("api_key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let cfg = crate::api_server::ApiConfig { host, port, api_key, tts: state.tts.clone() };
+            match crate::api_server::start(cfg) {
+                Ok(()) => {
+                    let _ = app.emit("sidecar://event", serde_json::json!({"status": "api_started", "port": port}));
+                    Ok(serde_json::json!({"ok": true}))
+                }
+                Err(e) => {
+                    emit_error(&app, e.clone());
+                    Ok(serde_json::json!({"status": "error", "msg": e}))
+                }
+            }
+        }
+        "stop_api" => {
+            crate::api_server::stop();
+            let _ = app.emit("sidecar://event", serde_json::json!({"status": "api_stopped"}));
+            Ok(serde_json::json!({"ok": true}))
         }
         // 其它 action（录音、转写等由前端直接调 Rust 命令，此处留空兜底）
         _ => Ok(serde_json::json!({"ok": true})),
@@ -776,6 +800,18 @@ pub fn run() {
 
             // 启动录音 worker + rdev 全局监听（幂等，热键链路依赖）
             hotkey::start_capslock_listener(app.handle().clone());
+
+            // ── System Tray + 关闭 → 隐藏 ──
+            crate::tray::init_tray(app.handle())?;
+            if let Some(window) = app.get_webview_window("main") {
+                let win = window.clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = win.hide();
+                    }
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

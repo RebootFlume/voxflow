@@ -42,3 +42,4 @@ llama-cpp-2 = "0.1"         # llama.cpp GGUF 推理
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "multipart", "json", "rustls-tls"] }
 tungstenite = "0.24"
 log = "0.4"                 # 轻量日志（llama_server 子进程状态输出）
+tiny_http = "0.12"

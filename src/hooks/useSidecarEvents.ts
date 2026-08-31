@@ -72,7 +72,9 @@ export function useSidecarEvents() {
         status !== "model_download_error" &&
         status !== "model_deleted" &&
         status !== "model_root_set" &&
-        status !== "model_download_started"
+        status !== "model_download_started" &&
+        status !== "api_started" &&
+        status !== "api_stopped"
       ) {
         const level = status.includes("error")
           ? "error"
@@ -279,9 +281,11 @@ export function useSidecarEvents() {
           break;
         }
         case "api_started":
+          store.addLog("[api] ✅ API 服务已启动", "success");
           store.updateApi({ enabled: true, endpoints: { asr: true, tts: true } });
           break;
         case "api_stopped":
+          store.addLog("[api] ⏹ API 服务已停止", "info");
           store.updateApi({ enabled: false, endpoints: { asr: false, tts: false } });
           break;
         case "audio_devices": {

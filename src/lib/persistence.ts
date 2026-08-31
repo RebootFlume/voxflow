@@ -76,17 +76,22 @@ export async function saveConfig() {
   } catch {}
 }
 
-// ---- 运行日志：logs/runtime.json（最近 300 条，持久化）----
+// ---- 运行日志：logs/YYYY-MM-DD.json（每天一个文件，最近 300 条，持久化）----
 
-/** 保存运行日志到文件 */
-export function saveRuntimeLogs(logs: unknown[]) {
-  debouncedSave("logs/runtime.json", JSON.stringify(logs));
+function todayKey(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-/** 加载运行日志 */
+/** 保存运行日志到当天文件 */
+export function saveRuntimeLogs(logs: unknown[]) {
+  debouncedSave(`logs/${todayKey()}.json`, JSON.stringify(logs));
+}
+
+/** 加载当天运行日志 */
 export async function loadRuntimeLogs() {
   try {
-    const data = await loadData("logs/runtime.json");
+    const data = await loadData(`logs/${todayKey()}.json`);
     if (!data) return;
     const logs = JSON.parse(data);
     if (Array.isArray(logs)) {
@@ -96,11 +101,6 @@ export async function loadRuntimeLogs() {
 }
 
 // ---- history/YYYY-MM-DD.json ----
-
-function todayKey(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
 
 function historyFile(date: string): string {
   return `history/${date}.json`;

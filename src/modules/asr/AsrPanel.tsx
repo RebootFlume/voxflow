@@ -284,30 +284,5 @@ export function AsrPanel() {
     return <TranscribePanel />;
   }
 
-  // status
-  return (
-    <div className="space-y-4">
-      <Card>
-        <CardHeader>
-          <CardTitle>{t(locale, "asr.status.title")}</CardTitle>
-          <CardDescription>{t(locale, "asr.status.desc")}</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex items-center gap-3">
-            <span className="text-sm text-muted-foreground">{t(locale, "asr.status.current")}</span>
-            <Badge
-              variant={asr.status === "recording" ? "default" : asr.status === "error" ? "destructive" : "secondary"}
-            >
-              {t(locale, STATUS_KEYS[asr.status])}
-            </Badge>
-            <span className="text-sm text-muted-foreground">
-              {t(locale, "asr.status.device")}
-              {asr.device.toUpperCase()}
-            </span>
-          </div>
-          <VolumeWave volume={asr.volume} active={asr.status === "recording"} />
-        </CardContent>
-      </Card>
-    </div>
-  );
+  return null;
 }

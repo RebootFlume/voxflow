@@ -36,7 +36,6 @@ export const ASR_SUB_HEADING: Record<string, string> = {
   hotkey: "submenu.hotkey",
   model: "submenu.model",
   transcribe: "submenu.transcribe",
-  status: "submenu.status",
 };
 
 export const TTS_SUB_HEADING: Record<string, string> = {
@@ -50,7 +49,6 @@ export const TTS_SUB_HEADING: Record<string, string> = {
 export const SUB_MENU_LABEL_KEYS: Record<string, string> = {
   hotkey: "submenu.hotkey",
   model: "submenu.model",
-  status: "submenu.status",
   service: "submenu.service",
   "endpoint-status": "submenu.endpoint-status",
   console: "submenu.console",

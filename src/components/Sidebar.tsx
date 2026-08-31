@@ -5,7 +5,6 @@ import { t } from "@/lib/i18n";
 const SUB_MENU_LABEL_KEYS: Record<string, string> = {
   hotkey: "submenu.hotkey",
   model: "submenu.model",
-  status: "submenu.status",
   service: "submenu.service",
   "endpoint-status": "submenu.endpoint-status",
   console: "submenu.console",
