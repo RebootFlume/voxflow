@@ -32,7 +32,7 @@ Pop-Location
 $nsis = Get-ChildItem "$root\src-tauri\target\release\bundle\nsis\*.exe" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if ($nsis) {
     if (-not (Test-Path $out)) { New-Item $out -ItemType Directory -Force | Out-Null }
-    $dest = "$out\VoxFlow-Setup-$ver.exe"
+    $dest = "$out\VoxFlow-Setup-v$ver.exe"
     Copy-Item $nsis.FullName $dest -Force
     Write-Host "安装版: $dest ($([math]::Round((Get-Item $dest).Length/1MB)) MB)" -ForegroundColor Green
 } else {
@@ -55,7 +55,7 @@ Set-Content -Path "$bundleRoot\portable.txt" -Value "VoxFlow portable mode" -Enc
 # 便携模式：不打包 data/libs（单 exe 最小化），首次运行自动创建 data\（便携数据根）
 # libs 走「推理框架」页下载（用户按需），与数据根解耦
 
-$zip = "$out\VoxFlow-Portable-$ver.zip"
+$zip = "$out\VoxFlow-Portable-v$ver.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path "$bundleRoot\*" -DestinationPath $zip -CompressionLevel Optimal
 Remove-Item $tmp -Recurse -Force
