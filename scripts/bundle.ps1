@@ -22,10 +22,14 @@ function New-InstallDir {
 # ---------- 1. 打安装版（NSIS） ----------
 Write-Host "`n=== [1/2] NSIS 安装版（Tauri build） ===" -ForegroundColor Cyan
 Push-Location "$root"
+# tauri build 会向 stderr 写 info 日志；PowerShell 5.1 在 ErrorActionPreference=Stop 下
+# 会把原生 stderr 当作终止错误，导致脚本中断 → 此段临时改为 Continue
+$ErrorActionPreference = "Continue"
 npm run tauri build 2>&1 | Write-Host
+$ErrorActionPreference = "Stop"
 Pop-Location
 
-$nsis = Get-ChildItem "$root\src-tauri\target\release\bundle\nsis\*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+$nsis = Get-ChildItem "$root\src-tauri\target\release\bundle\nsis\*.exe" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if ($nsis) {
     if (-not (Test-Path $out)) { New-Item $out -ItemType Directory -Force | Out-Null }
     $dest = "$out\VoxFlow-Setup-$ver.exe"

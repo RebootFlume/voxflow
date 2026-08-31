@@ -1,6 +1,6 @@
 [package]
 name = "voxflow"
-version = "0.1.0"
+version = "0.2.0"
 description = "VoxFlow — local Qwen3-ASR voice tool"
 authors = ["you"]
 edition = "2021"

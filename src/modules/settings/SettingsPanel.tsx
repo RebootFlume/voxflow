@@ -84,7 +84,7 @@ export function SettingsPanel() {
       <CardContent className="space-y-3">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium">VoxFlow</span>
-          <Badge variant="secondary">v0.1.0</Badge>
+          <Badge variant="secondary">v0.2.0</Badge>
         </div>
         <p className="text-sm text-muted-foreground">{t(locale, "about.desc")}</p>
       </CardContent>
