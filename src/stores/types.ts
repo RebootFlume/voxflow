@@ -71,6 +71,8 @@ export interface ModelItemState {
   mmprojPath?: string;
   percent?: number | null;
   file?: string | null;
+  /** 下载完成、解压中（GitHub tar 包阶段；无百分比，UI 显示"正在解压"） */
+  extracting?: boolean;
   downloadedBytes?: number;
   totalBytes?: number | null;
   sizeOnDiskGb?: number;

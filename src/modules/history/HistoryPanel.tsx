@@ -39,7 +39,7 @@ export function HistoryPanel() {
               {t(locale, "history.empty")}
             </div>
           ) : (
-            filtered.map((r) => (
+            [...filtered].reverse().map((r) => (
               <div key={r.id} className="group flex items-start justify-between gap-3 px-4 py-3">
                 <div className="min-w-0 space-y-1">
                   <p className="truncate text-sm">{r.text}</p>

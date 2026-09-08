@@ -7,6 +7,8 @@ export interface AsrSlice {
     device: string;
     framework: ModelFramework;
     modelStatus: "idle" | "loading" | "ready" | "error";
+    /** 最近一次加载请求号：事件按它丢弃旧请求的迟到终态 */
+    loadReqId: number;
     status: "idle" | "recording" | "recognizing" | "done" | "error";
     volume: number;
   };
@@ -18,7 +20,7 @@ export interface AsrSlice {
 }
 
 export const createAsrSlice = (set: (partial: Partial<AsrSlice> | ((s: AsrSlice) => Partial<AsrSlice>)) => void): AsrSlice => ({
-  asr: { hotkey: "CapsLock", model: "Qwen3-ASR-0.6B", device: "cpu", framework: "gguf", modelStatus: "idle", status: "idle", volume: 0 },
+  asr: { hotkey: "CapsLock", model: "Qwen3-ASR-0.6B", device: "cpu", framework: "gguf", modelStatus: "idle", loadReqId: 0, status: "idle", volume: 0 },
   transcribeTasks: [],
   updateAsr: (patch) => set((s) => ({ asr: { ...s.asr, ...patch } })),
   addTranscribeTask: (task) => {

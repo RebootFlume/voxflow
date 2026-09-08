@@ -10,86 +10,75 @@
  * 状态写入点唯一：engines（modelsSlice），tts.model / asr.model 仅表示 UI 选中。
  */
 import { useAppStore } from "@/stores";
-import { rustLoadTtsModel, rustStopLlamaServer, rustLlamaServerStatus, rustSwitchE2eTtsModel, rustUnloadTtsModel } from "@/lib/tauri";
+import { rustLoadAsr, rustGetStatus, rustUnloadAsr, rustLoadTtsModel, rustSwitchE2eTtsModel, rustUnloadTtsModel } from "@/lib/tauri";
 import type { EngineFramework } from "@/stores/types";
 
-/** 从模型名推断框架 */
-export function frameworkOfModel(name: string): EngineFramework {
-  const lower = name.toLowerCase();
-  if (lower.includes("sensevoice") || lower.includes("paraformer")) return "sherpa";
-  if (/^(kokoro|matcha|zipvoice|pocket|supertonic|kitten)/i.test(lower)) return "sherpa";
-  if (lower.includes("qwen3-asr") || lower.includes("qwen3")) return "llama";
-  return "torch";
+/**
+ * ASR 框架「展示」映射（仅 UI 标签用）。
+ * 注意：路由一律由 Rust 注册表决定（rust_load_asr 内部按模型 format 分流），
+ * 这里不再参与任何加载决策 —— 不按名字猜框架。
+ */
+function asrFrameworkForDisplay(name: string): EngineFramework {
+  const item = useAppStore.getState().models.items.find((i) => i.name === name);
+  if (item?.format === "onnx") return "sherpa";
+  return "llama";
 }
 
-/** 从 kind + 模型名推断框架 */
+/** 从 kind + 模型名推断框架（仅 TTS 用；ASR 已统一走 Rust 注册表） */
 export function frameworkFor(kind: "asr" | "tts", name: string): EngineFramework {
   if (kind === "asr") {
-    // ASR：GGUF → llama，ONNX（SenseVoice/Paraformer）→ sherpa
-    const item = useAppStore.getState().models.items.find((i) => i.name === name);
-    if (item?.format === "onnx") return "sherpa";
-    return "llama";
+    return asrFrameworkForDisplay(name);
   }
   // TTS：E2E 模型 → sherpa；其他 → torch
   if (/^(kokoro|matcha|zipvoice|pocket|supertonic|kitten)/i.test(name)) return "sherpa";
   return "torch";
 }
 
-/** 加载 ASR 引擎（llama-server 子进程 / sherpa websocket server） */
+/** 加载 ASR 引擎（统一入口：路由在 Rust，前端只传模型名+设备） */
 export function loadAsrModel(name: string, device: string): Promise<void> {
   const s = useAppStore.getState();
-  // 全局门禁：任一引擎加载中禁止再发起加载（防止快速切换并发）
-  if (s.engines.asr.status === "loading" || s.engines.tts.status === "loading") {
-    return Promise.resolve();
-  }
-  const framework = frameworkFor("asr", name);
-  s.setEngineStatus("asr", { framework, model: name, status: "loading", error: null });
-  s.updateAsr({ model: name, device: device || "cuda", framework: framework === "sherpa" ? "onnx" : "gguf" });
-
-  // sherpa ASR → sidecar load_model（lib.rs 按 kind=asr + Onnx 路由到 sherpa 引擎）
-  // llama ASR → rust_start_llama_server(model)（模型名决定加载 0.6B 还是 1.7B）
-  // 两者均为异步加载：invoke 返回 ≠ 加载完成。
-  //  - llama：Rust 后台线程加载 + emit model_ready/model_error（useSidecarEvents 处理）
-  //  - sherpa：sendToSidecar 同步等待加载完（但 emit model_loaded，前端也靠事件）
-  // 因此这里 invoke 成功只保留 loading 状态，最终 ready/error 由事件驱动。
-  const op = framework === "sherpa"
-    ? import("@/lib/tauri").then(({ sendToSidecar }) =>
-        sendToSidecar({ action: "load_model", model: name, device }))
-    : import("@/lib/tauri").then(({ rustStartLlamaServer }) =>
-        rustStartLlamaServer(name, device));
-
-  // invoke 成功：保持 loading（等待 model_ready / model_loaded 事件完成状态更新）
-  return op.then(
-    () => {
-      // 状态保持 loading，由 useSidecarEvents 收到 model_ready 后置 ready
+  // 乐观 loading（立即反馈）；框架仅用于展示
+  const fw = asrFrameworkForDisplay(name);
+  s.setEngineStatus("asr", { framework: fw, model: name, status: "loading", error: null });
+  s.updateAsr({
+    model: name,
+    device: device || "cuda",
+    framework: fw === "sherpa" ? "onnx" : "gguf",
+    modelStatus: "loading",
+  });
+  // rust_load_asr：立即返回 reqId（fire-and-forget，终态必达），
+  // 状态由 model_loading/progress/ready/error 事件驱动（带 reqId 丢弃迟到事件）
+  return rustLoadAsr(name, device).then(
+    (r) => {
+      const st = useAppStore.getState();
+      if (typeof r?.reqId === "number") {
+        st.updateAsr({ loadReqId: r.reqId });
+      }
     },
     (e) => {
       const st = useAppStore.getState();
       st.setEngineStatus("asr", { status: "error", error: String(e) });
-      st.updateAsr({ modelStatus: "error" }); // 兼容旧 UI 徽章
+      st.updateAsr({ modelStatus: "error", loadReqId: 0 }); // 兼容旧 UI 徽章
       st.addLog(`[model] ASR 加载失败: ${String(e)}`, "error");
     },
   );
 }
 
-/** 卸载 ASR 引擎（停止 llama-server / 杀 sherpa websocket server） */
+/** 卸载 ASR 引擎（llama/sherpa 统一走 Rust） */
 export function unloadAsrModel(): Promise<void> {
   const s = useAppStore.getState();
-  const framework = s.engines.asr.framework;
   s.resetEngine("asr");
-  const op = framework === "sherpa"
-    ? import("@/lib/tauri").then(({ rustUnloadSherpaAsr }) => rustUnloadSherpaAsr())
-    : rustStopLlamaServer();
-  return op.then(
-    () => useAppStore.getState().addLog(`[model] ⏹ ASR 引擎已卸载（${framework ?? "llama"}）`, "info"),
+  s.updateAsr({ modelStatus: "idle", loadReqId: 0 });
+  return rustUnloadAsr().then(
+    () => useAppStore.getState().addLog(`[model] ⏹ ASR 引擎已卸载`, "info"),
     () => {},
   );
 }
 
-/** 查询 llama-server 是否已就绪 */
+/** 查询真实引擎是否就绪（状态快照） */
 export function checkAsrServer(): Promise<boolean> {
-  return rustLlamaServerStatus().then(
-    (r) => Boolean(r.loaded),
+  return rustGetStatus().then(
+    (r) => Boolean((r.asr as { loaded?: boolean } | undefined)?.loaded),
     () => false,
   );
 }

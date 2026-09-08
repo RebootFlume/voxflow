@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { onSidecarEvent, sendToSidecar } from "@/lib/tauri";
-import { applyEngineStatus, resolveModelKind } from "@/lib/modelState";
+import { applyEngineStatus, applyAsrFrameworkFromRust, syncAsrFrameworkFromLoaded, resolveModelKind } from "@/lib/modelState";
 import { useAppStore, type EngineState } from "@/stores";
 import { t } from "@/lib/i18n";
 
@@ -25,6 +25,17 @@ export function useSidecarEvents() {
       const store = useAppStore.getState();
       const status = String(payload.status ?? "");
       const model = typeof payload.model === "string" ? payload.model : "";
+
+      // 旧请求的迟到事件（reqId 不匹配当前最新请求）→ 丢弃，避免旧终态覆盖新状态
+      const reqId = typeof payload.reqId === "number" ? payload.reqId : null;
+      if (reqId !== null && reqId !== useAppStore.getState().asr.loadReqId) {
+        return;
+      }
+
+      // 事件自带 kind（Rust 权威）优先，缺省按模型名解析（TTS 等旧事件）
+      const pk = payload.kind;
+      const kindOf = (modelName: string): "asr" | "tts" | null =>
+        pk === "asr" || pk === "tts" ? pk : resolveModelKind(modelName);
 
       // 识别完成后自动回 idle（2 秒后）
       if (status === "recognized") {
@@ -69,10 +80,16 @@ export function useSidecarEvents() {
         status !== "model_error" &&
         status !== "model_downloaded" &&
         status !== "model_download_cancelled" &&
+        status !== "model_download_extracting" &&
         status !== "model_download_error" &&
         status !== "model_deleted" &&
         status !== "model_root_set" &&
         status !== "model_download_started" &&
+        status !== "rust_log" &&
+        status !== "runtime_download_progress" &&
+        status !== "runtime_download_phase" &&
+        status !== "runtime_installed" &&
+        status !== "runtime_download_error" &&
         status !== "api_started" &&
         status !== "api_stopped"
       ) {
@@ -85,6 +102,42 @@ export function useSidecarEvents() {
       }
 
       switch (status) {
+        // ---- 推理框架下载（全局常住：切页/切窗口进度不丢）----
+        case "runtime_download_progress": {
+          const fw = typeof payload.framework === "string" ? payload.framework : "";
+          const pct = typeof payload.progress === "number" ? payload.progress : 0;
+          if (fw) {
+            const cur = useAppStore.getState().runtimeDownload;
+            const phase = cur?.framework === fw && cur?.phase ? cur.phase : "downloading";
+            useAppStore.getState().setRuntimeDownload(fw, pct, null, phase);
+          }
+          break;
+        }
+        case "runtime_download_phase": {
+          // 解压阶段等无百分比事件：保持 100%，切换状态文案（防 UI 假卡死）
+          const fw = typeof payload.framework === "string" ? payload.framework : "";
+          const phase = payload.phase === "extracting" ? "extracting" : "downloading";
+          if (fw) {
+            const cur = useAppStore.getState().runtimeDownload;
+            if (phase === "extracting") {
+              useAppStore.getState().setRuntimeDownload(fw, Math.max(cur?.pct ?? 100, 100), null, "extracting");
+            }
+          }
+          break;
+        }
+        case "runtime_installed": {
+          const fw = typeof payload.framework === "string" ? payload.framework : "";
+          useAppStore.getState().setRuntimeDownload(null, 0);
+          store.addLog(`[framework] ✅ ${fw} 下载完成`, "success");
+          break;
+        }
+        case "runtime_download_error": {
+          const fw = typeof payload.framework === "string" ? payload.framework : "";
+          const msg = typeof payload.msg === "string" ? payload.msg : "未知错误";
+          useAppStore.getState().setRuntimeDownload(null, 0, msg);
+          store.addLog(`[framework] ❌ ${fw} 下载失败: ${msg}`, "error");
+          break;
+        }
         case "models_state":
           store.applyModelsState(payload);
           // 清理无效的 tts.model：不在已下载列表（或未下载）时重置为空，避免显示「未下载的选中模型」
@@ -99,10 +152,21 @@ export function useSidecarEvents() {
                 st.setTtsModelStatus("idle");
               }
             }
+            // 清单晚到时，用已加载模型对齐 ASR 框架标签（启动自动加载早于清单的场景）
+            if (
+              st.engines.asr.model &&
+              (st.engines.asr.status === "ready" || st.engines.asr.status === "loading")
+            ) {
+              syncAsrFrameworkFromLoaded();
+            }
           }
           break;
         case "model_download_started":
           store.addLog(`[download] ⬇ 开始下载 ${model}...`, "info");
+          break;
+        case "model_download_extracting":
+          store.applyDownloadExtracting(model);
+          store.addLog(`[download] 📦 ${model} 下载完成，正在解压安装...`, "info");
           break;
         case "model_downloaded":
           store.applyDownloadDone(status, model);
@@ -149,7 +213,7 @@ export function useSidecarEvents() {
           );
           if (device) {
             store.setLoadedModel(model || store.models.loadedModel || "", device);
-            const kind = resolveModelKind(model);
+            const kind = kindOf(model);
             if (kind) {
               applyEngineStatus(kind, "ready");
             }
@@ -157,28 +221,44 @@ export function useSidecarEvents() {
               store.setTtsModelStatus("ready");
             } else if (kind === "asr") {
               store.updateAsr({ modelStatus: "ready", device: device as "cpu" | "cuda" });
+              // 框架标签对齐：事件权威 framework 优先，清单兜底
+              if (typeof payload.framework === "string") applyAsrFrameworkFromRust(payload.framework);
+              else syncAsrFrameworkFromLoaded();
             }
           }
           break;
         }
         case "model_loading":
           store.addLog(`[model] ⏳ 正在加载 ${model}...`, "info");
-          applyEngineStatus(resolveModelKind(model), "loading");
+          if (typeof payload.framework === "string") applyAsrFrameworkFromRust(payload.framework);
+          applyEngineStatus(kindOf(model), "loading");
           break;
         case "model_progress": {
-          // 加载阶段进度：unload → loading → ready
+          // 加载阶段进度：unload / loading / ready —— 逐条记入运行日志，体现完整切换流程
           const stage = typeof payload.stage === "string" ? payload.stage : "loading";
-          const kind = resolveModelKind(model);
+          const kind = kindOf(model);
           if (kind) {
             useAppStore.getState().setEngineStatus(kind, {
               status: "loading",
               stage: stage as EngineState["stage"],
             });
           }
+          const dev = typeof payload.device === "string" ? payload.device : "";
+          if (stage === "unload") {
+            store.addLog(`[model] 🛑 卸载旧引擎…`, "info");
+          } else if (stage.startsWith("unload:")) {
+            store.addLog(`[model] 🛑 卸载旧引擎: ${stage.slice("unload:".length)}`, "info");
+          } else if (stage === "loading") {
+            store.addLog(`[model] ⏳ 启动引擎中（${model}${dev ? `, ${dev}` : ""}）…`, "info");
+          } else if (stage === "ready") {
+            store.addLog(`[model] ✅ 引擎就绪（${model}）`, "success");
+          } else if (stage) {
+            store.addLog(`[model] 🔄 ${stage}`, "info");
+          }
           break;
         }
         case "model_not_downloaded":
-          applyEngineStatus(resolveModelKind(model), "idle");
+          applyEngineStatus(kindOf(model), "idle");
           break;
         case "model_error": {
           const errMsg =
@@ -188,7 +268,20 @@ export function useSidecarEvents() {
                 ? payload.error
                 : null;
           store.addLog(`[model] ❌ ${model} 加载失败: ${errMsg ?? "未知错误"}`, "error");
-          applyEngineStatus(resolveModelKind(model), "error", errMsg);
+          applyEngineStatus(kindOf(model), "error", errMsg);
+          break;
+        }
+        // ---- Rust 引擎侧日志（端口守卫/身份验证/引擎状态）----
+        case "rust_log": {
+          const lvl = String(payload.level ?? "info");
+          const msg = String(payload.msg ?? "");
+          if (!msg) break;
+          const tgt = String(payload.target ?? "");
+          const short = tgt.split("::").filter(Boolean).pop() || "rust";
+          store.addLog(
+            `[rust:${short}] ${msg}`,
+            lvl === "error" ? "error" : lvl === "warn" ? "warn" : "info",
+          );
           break;
         }
         // ---- 状态对账：后端真实状态快照，用于纠偏 ----
@@ -210,6 +303,11 @@ export function useSidecarEvents() {
                     modelStatus: "ready",
                     device: asrSnap.device as "cpu" | "cuda",
                   });
+                  // 快照带出真实加载模型 → 对齐框架标签
+                  if (asrSnap.model) {
+                    const item = useAppStore.getState().models.items.find((i) => i.name === asrSnap.model);
+                    if (item) applyAsrFrameworkFromRust(item.format === "onnx" ? "onnx" : "gguf");
+                  }
                 }
               } else if (!loaded && store.engines.asr.status === "ready") {
                 applyEngineStatus("asr", "idle");

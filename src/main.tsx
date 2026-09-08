@@ -73,15 +73,16 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     })
     .catch(() => {});
 
-  // ⑤ 下发 sidecar 配置（镜像/代理）
+  // ⑤ 下发 sidecar 配置（镜像/代理/HF token）
   const { models } = useAppStore.getState();
-  if (models.mirror || models.proxy !== undefined) {
+  if (models.mirror || models.proxy !== undefined || models.huggingfaceToken) {
     const endpoint =
       models.mirror === "cn" ? "https://hf-mirror.com" : models.mirror && models.mirror !== "official" ? models.mirror : "";
     void sendToSidecar({
       action: "bootstrap",
       mirror_endpoint: endpoint,
       proxy: models.proxy ?? "",
+      hf_token: models.huggingfaceToken ?? "",
     }).catch(() => {});
   }
 })();

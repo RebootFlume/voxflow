@@ -51,6 +51,8 @@ export async function loadConfig() {
         modelRoot: parsed.models?.modelRoot ?? store.models.modelRoot,
         mirror: parsed.models?.mirror ?? store.models.mirror,
         proxy: parsed.models?.proxy ?? store.models.proxy,
+        huggingfaceToken: typeof parsed.models?.huggingfaceToken === "string" ? parsed.models.huggingfaceToken : store.models.huggingfaceToken,
+        hasHfToken: typeof parsed.models?.huggingfaceToken === "string" ? parsed.models.huggingfaceToken.trim() !== "" : store.models.hasHfToken,
       },
       useRustEngine: parsed.useRustEngine ?? false,
     });
@@ -62,14 +64,14 @@ export async function saveConfig() {
   try {
     const state = useAppStore.getState();
     const config = {
-      asr: { hotkey: state.asr.hotkey, model: state.asr.model, device: state.asr.device },
+      asr: { hotkey: state.asr.hotkey, model: state.asr.model, device: state.asr.device, framework: state.asr.framework },
       tts: state.tts,
       api: { host: state.api.host, port: state.api.port, apiKey: state.api.apiKey },
       io: { exportDir: state.io.exportDir },
       overlay: state.overlay,
       theme: state.theme,
       locale: state.locale,
-      models: { modelRoot: state.models.modelRoot, mirror: state.models.mirror, proxy: state.models.proxy },
+      models: { modelRoot: state.models.modelRoot, mirror: state.models.mirror, proxy: state.models.proxy, huggingfaceToken: state.models.huggingfaceToken },
       useRustEngine: state.useRustEngine,
     };
     await saveData("config.json", JSON.stringify(config, null, 2));

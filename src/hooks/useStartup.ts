@@ -56,7 +56,7 @@ export function useStartupFallback() {
   }, []);
 }
 
-/** 模型加载超时兜底：loading 超过 60 秒未变 ready/error → 主动对账，让快照纠偏 */
+/** 模型加载超时兜底：loading 超过 20 秒未变 ready/error → 主动对账，让快照纠偏 */
 export function useModelLoadTimeout() {
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -67,9 +67,9 @@ export function useModelLoadTimeout() {
           const s = useAppStore.getState();
           if (s.asr.modelStatus === "loading") {
             s.addLog(t(s.locale, "log.modelLoadTimeout"), "error");
-            void sendToSidecar({ action: "get_status" }).catch(() => {});
+            void import("@/lib/tauri").then(({ rustGetStatus }) => rustGetStatus()).catch(() => {});
           }
-        }, 120_000);
+        }, 20_000);
       } else if (state.asr.modelStatus !== "loading" && prev.asr.modelStatus === "loading") {
         if (timer) {
           clearTimeout(timer);
@@ -88,7 +88,7 @@ export function useModelLoadTimeout() {
 export function useStatusReconcile() {
   useEffect(() => {
     const reconcile = () => {
-      void sendToSidecar({ action: "get_status" }).catch(() => {});
+      void import("@/lib/tauri").then(({ rustGetStatus }) => rustGetStatus()).catch(() => {});
     };
     const t = setTimeout(reconcile, 800);
     window.addEventListener("focus", reconcile);

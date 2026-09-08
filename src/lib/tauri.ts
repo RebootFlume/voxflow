@@ -45,6 +45,24 @@ export function rustUnloadSherpaAsr(): Promise<Record<string, unknown>> {
   return invoke("rust_unload_sherpa_asr");
 }
 
+/**
+ * 统一 ASR 加载入口（路由由 Rust 注册表决定，前端不做框架推断）。
+ * 返回 { reqId }；加载进度/结果由 sidecar://event（model_loading/progress/ready/error）驱动。
+ */
+export function rustLoadAsr(model: string, device?: string): Promise<{ ok: boolean; reqId: number; model: string }> {
+  return invoke("rust_load_asr", { model, device: device ?? "cuda" });
+}
+
+/** 查询真实引擎状态（自愈对账，会回发 status_snapshot 事件） */
+export function rustGetStatus(): Promise<Record<string, unknown>> {
+  return invoke("rust_get_status");
+}
+
+/** 卸载当前 ASR 引擎（llama/sherpa 统一） */
+export function rustUnloadAsr(): Promise<Record<string, unknown>> {
+  return invoke("rust_unload_asr");
+}
+
 // ============================================================
 // llama-server 子进程桥接（ASR 主力路线）
 // ============================================================
@@ -167,9 +185,23 @@ export function decodeAudioFile(path: string): Promise<{ samples: number[]; samp
   return invoke("decode_audio_file", { path });
 }
 
-/** 检测推理框架（libs）安装状态 */
-export function rustCheckRuntime(): Promise<{ root: string; packages: { framework: string; name: string; installed: boolean; dir: string }[] }> {
+/** 检测推理框架（libs）安装状态（三态：ready / incomplete / missing） */
+export function rustCheckRuntime(): Promise<{
+  root: string;
+  packages: { framework: string; name: string; installed: boolean; state: "ready" | "incomplete" | "missing"; missing: string[]; dir: string }[];
+}> {
   return invoke("check_runtime");
+}
+
+/** 两步验证：①文件检查（缺什么列清单）②试启动（DLL 链能否跑）——不触发下载 */
+export function rustVerifyRuntime(framework: string): Promise<{
+  state: "ready" | "incomplete" | "missing" | "error";
+  installed: boolean;
+  missing: string[];
+  error?: string;
+  dir: string;
+}> {
+  return invoke("rust_verify_runtime", { framework });
 }
 
 /** 数据根信息（便携/安装判定 + 模型目录）——启动时覆盖 localStorage 旧值 */

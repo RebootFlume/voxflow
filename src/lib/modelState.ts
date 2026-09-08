@@ -46,3 +46,24 @@ export function applyEngineStatus(
   const stage = status === "loading" ? s.engines[kind].stage : null;
   s.setEngineStatus(kind, { status, stage, error: error ?? null });
 }
+
+/** 依据 Rust 事件里的权威框架（注册表 format）对齐 ASR 模型页标签 */
+export function applyAsrFrameworkFromRust(fw: string): void {
+  if (fw !== "gguf" && fw !== "onnx") return;
+  const s = useAppStore.getState();
+  const engineFw = fw === "onnx" ? ("sherpa" as const) : ("llama" as const);
+  if (s.asr.framework !== fw || s.engines.asr.framework !== engineFw) {
+    s.updateAsr({ framework: fw });
+    s.setEngineStatus("asr", { framework: engineFw });
+  }
+}
+
+/** 依据「已加载/正在加载」的模型 + 清单元数据对齐框架标签（清单晚到时的兜底） */
+export function syncAsrFrameworkFromLoaded(): void {
+  const s = useAppStore.getState();
+  const name = s.engines.asr.model || s.asr.model;
+  if (!name) return;
+  const item = s.models.items.find((i) => i.name === name);
+  if (!item) return;
+  applyAsrFrameworkFromRust(item.format === "onnx" ? "onnx" : "gguf");
+}

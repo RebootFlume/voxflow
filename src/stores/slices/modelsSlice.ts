@@ -17,6 +17,9 @@ export interface ModelsSlice {
     modelRoot: string;
     mirror: string;
     proxy: string;
+    /** Hugging Face 下载 token（config.json 持久化；无 UI，用户手改文件） */
+    huggingfaceToken: string;
+    hasHfToken: boolean;
     diskFreeGb: number | null;
     items: ModelItemState[];
     loadedModel: string | null;
@@ -27,8 +30,10 @@ export interface ModelsSlice {
   setModelRootLocal: (p: string) => void;
   setMirror: (m: string) => void;
   setProxyLocal: (p: string) => void;
+  setHfTokenLocal: (t: string) => void;
   applyModelsState: (payload: Record<string, unknown>) => void;
   applyDownloadProgress: (payload: Record<string, unknown>) => void;
+  applyDownloadExtracting: (name: string) => void;
   applyDownloadDone: (status: string, model: string) => void;
   setLoadedModel: (model: string, device: string) => void;
   /** 引擎操作 */
@@ -40,11 +45,13 @@ export interface ModelsSlice {
 
 export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: ModelsSlice) => Partial<ModelsSlice>)) => void): ModelsSlice => ({
   startupPhase: "booting",
-  models: { modelRoot: "", mirror: "", proxy: "", diskFreeGb: null, items: [], loadedModel: null, loadedDevice: null },
+  models: { modelRoot: "", mirror: "", proxy: "", huggingfaceToken: "", hasHfToken: false, diskFreeGb: null, items: [], loadedModel: null, loadedDevice: null },
   engines: { asr: idleEngine(), tts: idleEngine() },
   setModelRootLocal: (modelRoot) => set((s) => ({ models: { ...s.models, modelRoot } })),
   setMirror: (mirror) => set((s) => ({ models: { ...s.models, mirror } })),
   setProxyLocal: (proxy) => set((s) => ({ models: { ...s.models, proxy } })),
+  setHfTokenLocal: (huggingfaceToken) =>
+    set((s) => ({ models: { ...s.models, huggingfaceToken, hasHfToken: huggingfaceToken.trim() !== "" } })),
 
   applyModelsState: (payload) => {
     const items = Array.isArray(payload.models) ? payload.models : [];
@@ -106,6 +113,19 @@ export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: Mod
     }));
   },
 
+  applyDownloadExtracting: (name) => {
+    set((s) => ({
+      models: {
+        ...s.models,
+        items: s.models.items.map((it) =>
+          it.name === name
+            ? { ...it, state: "downloading" as const, percent: 100, extracting: true }
+            : it,
+        ),
+      },
+    }));
+  },
+
   applyDownloadDone: (status, model) => {
     const ok = status === "model_downloaded";
     set((s) => ({
@@ -121,6 +141,7 @@ export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: Mod
                   : status === "model_download_cancelled"
                     ? ("not_downloaded" as const)
                     : it.state,
+                extracting: false,
                 cancelRequested: !ok,
               }
             : it,

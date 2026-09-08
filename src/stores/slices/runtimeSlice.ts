@@ -14,15 +14,24 @@ const nowTs = () => {
 export interface RuntimeSlice {
   runtimeLogs: RuntimeLog[];
   history: { records: HistoryRecord[] };
+  /** 推理框架下载进度/错误（全局常住：切页不丢）；phase: downloading=下, extracting=解压中 */
+  runtimeDownload: { framework: string | null; pct: number; phase: "downloading" | "extracting" | null; error: string | null };
   addLog: (msg: string, level?: RuntimeLogLevel) => void;
   clearLogs: () => void;
   addHistoryRecord: (text: string) => void;
   removeHistoryRecord: (id: number) => void;
+  setRuntimeDownload: (
+    framework: string | null,
+    pct: number,
+    error?: string | null,
+    phase?: "downloading" | "extracting" | null,
+  ) => void;
 }
 
 export const createRuntimeSlice = (set: (partial: Partial<RuntimeSlice> | ((s: RuntimeSlice) => Partial<RuntimeSlice>)) => void): RuntimeSlice => ({
   runtimeLogs: [],
   history: { records: [] },
+  runtimeDownload: { framework: null, pct: 0, phase: null, error: null },
   addLog: (msg, level = "info") =>
     set((s) => {
       // id 基于现有日志的最大 id + 1（避免持久化加载后与旧日志 id 冲突）
@@ -40,4 +49,6 @@ export const createRuntimeSlice = (set: (partial: Partial<RuntimeSlice> | ((s: R
     })),
   removeHistoryRecord: (id) =>
     set((s) => ({ history: { ...s.history, records: s.history.records.filter((r) => r.id !== id) } })),
+  setRuntimeDownload: (framework, pct, error = null, phase = null) =>
+    set({ runtimeDownload: { framework, pct, phase, error } }),
 });
