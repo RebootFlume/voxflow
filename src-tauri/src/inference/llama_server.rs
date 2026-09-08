@@ -11,10 +11,11 @@
 //!
 //! 重要：默认 ctx 大小会让 8GB 显存爆掉（→ 慢 500 倍），必须显式限制。
 
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use serde::Deserialize;
@@ -120,13 +121,12 @@ fn llama_paths() -> (PathBuf, PathBuf) {
 
 /// 定位运行时 + 指定模型子目录（0.6B / 1.7B 通用）
 fn llama_paths_for(model_subdir: &str) -> (PathBuf, PathBuf) {
-    // 运行时目录：环境变量 → exe 同级 libs（打包后）→ 项目 libs（开发时）
+    // 运行时目录：exe 同级 libs（llama_runtime_dir 统一解析）
     let runtime = crate::inference::runtime_paths::llama_runtime_dir();
 
-    // 模型目录优先级（GGUF + mmproj 必须同时存在）:
-    //   1. 环境变量 VOXFLOW_MODEL_ROOT/<模型目录>
-    //   2. modelRoot/<模型目录>（统一数据根，与 model_manager 一致）
-    //   3. modelRoot/<模型名>（旧目录名兼容）
+    // 模型目录（GGUF + mmproj 必须同时存在）: 统一走 model_manager 的 modelRoot（config.json）:
+    //   1. modelRoot/<模型目录>
+    //   2. modelRoot/<模型名>（旧目录名兼容）
     let model_root = crate::model_manager::get_model_root();
     let model_name = if model_subdir.contains("1.7") {
         "Qwen3-ASR-1.7B"
@@ -134,19 +134,15 @@ fn llama_paths_for(model_subdir: &str) -> (PathBuf, PathBuf) {
         "Qwen3-ASR-0.6B"
     };
     let gguf = format!("{model_name}-Q8_0.gguf");
-    let model = std::env::var("VOXFLOW_MODEL_ROOT")
-        .ok()
-        .map(|r| PathBuf::from(r).join(model_subdir))
-        .filter(|d| d.join(&gguf).exists())
-        .or_else(|| {
-            let d = model_root.join(model_subdir);
-            (d.join(&gguf).exists()).then_some(d)
-        })
-        .or_else(|| {
-            let d = model_root.join(model_name);
-            (d.join(&gguf).exists()).then_some(d)
-        })
-        .unwrap_or_else(|| model_root.join(model_subdir));
+    let model = {
+        let d = model_root.join(model_subdir);
+        (d.join(&gguf).exists()).then_some(d)
+    }
+    .or_else(|| {
+        let d = model_root.join(model_name);
+        (d.join(&gguf).exists()).then_some(d)
+    })
+    .unwrap_or_else(|| model_root.join(model_subdir));
     if !model.join(&gguf).exists() {
         // 回退：模型和运行时同目录（旧布局 / benchmarks）
         let legacy = runtime.join(&gguf);
@@ -170,6 +166,33 @@ impl LlamaServerConfig {
 
 /// llama-server 子进程 + HTTP 客户端封装
 ///
+/// 本进程成功 spawn 的 server 配置记录。
+/// 只有「本进程以相同配置启动过」的 server 才允许快速接管（running_matches）；
+/// 外部启动/上次崩溃残留的 server 无法验证其 -ngl 等加载参数 → 一律杀重启，
+/// 保证「切模型/切设备」真实生效，杜绝假成功。
+#[derive(Debug, Clone, PartialEq)]
+struct LaunchRec {
+    model_path: PathBuf,
+    mmproj_path: PathBuf,
+    n_gpu_layers: i32,
+}
+
+impl LaunchRec {
+    fn from_cfg(cfg: &LlamaServerConfig) -> Self {
+        Self {
+            model_path: cfg.model_path.clone(),
+            mmproj_path: cfg.mmproj_path.clone(),
+            n_gpu_layers: cfg.n_gpu_layers,
+        }
+    }
+
+    fn matches(&self, cfg: &LlamaServerConfig) -> bool {
+        paths_equal(&self.model_path, &cfg.model_path)
+            && paths_equal(&self.mmproj_path, &cfg.mmproj_path)
+            && self.n_gpu_layers == cfg.n_gpu_layers
+    }
+}
+
 /// 内部状态：
 /// - `child` Mutex 持有子进程句柄
 /// - `client` reqwest HTTP 客户端（多线程复用）
@@ -177,6 +200,8 @@ impl LlamaServerConfig {
 pub struct LlamaServerEngine {
     config: Mutex<LlamaServerConfig>,
     child: Mutex<Option<Child>>,
+    /// 本进程最后一次成功 spawn 的配置（用于接管身份验证）
+    launched: Mutex<Option<LaunchRec>>,
     /// 单线程 HTTP 客户端（Tauri 主线程同步调用）
     client: reqwest::blocking::Client,
 }
@@ -188,23 +213,86 @@ impl LlamaServerEngine {
     }
 
     pub fn with_config(config: LlamaServerConfig) -> Self {
+        // 禁用空闲连接复用（pool_idle_timeout=0）：llama-server 空闲后可能关闭
+        // keep-alive 连接，池化 client 复用 stale 连接会报 "error sending request" /
+        // /health 探测失败 → is_loaded 假阴性。本地回环新连接开销毫秒级，可靠优先。
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(60))
+            .pool_idle_timeout(Duration::ZERO)
             .build()
             .expect("reqwest client build");
         Self {
             config: Mutex::new(config),
             child: Mutex::new(None),
+            launched: Mutex::new(None),
             client,
         }
     }
 
-    /// 检查 8931 端口的 llama-server 是否已经在跑（外部启动场景）
-    fn is_external_running(&self) -> bool {
-        if let Ok(resp) = self.client.get(self.config.lock().health_url()).send() {
+    /// 端口探测：任何进程在监听即 true（不判所有权）——仅供端口层（占用/冲突判断）使用。
+    /// 绝不直接当作"已加载"：那是 is_loaded()（所有权+验证语义）的职责。
+    fn port_alive(&self, port: u16) -> bool {
+        let url = format!("http://127.0.0.1:{port}{HEALTH_PATH}");
+        if let Ok(resp) = self.client.get(&url).send() {
             return resp.status().is_success();
         }
         false
+    }
+
+    /// 查询端口上已运行 server 实际加载的模型路径（llama-server 的 GET /props → model_path）
+    fn running_model_path(&self, port: u16) -> Option<PathBuf> {
+        let url = format!("http://127.0.0.1:{port}/props");
+        let resp = self.client.get(&url).send().ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let v: serde_json::Value = resp.json().ok()?;
+        let p = v
+            .get("model_path")
+            .or_else(|| v.get("model"))
+            .and_then(|s| s.as_str())
+            .map(PathBuf::from)?;
+        p.is_file().then_some(p)
+    }
+
+    /// 查询已运行 server 的解码温度（/props.default_generation_settings.params.temperature）。
+    /// 用于识别"残留进程是默认采样（temp 0.8）→ ASR 输出随机/整句乱码"的情况。
+    fn running_temperature(&self, port: u16) -> Option<f32> {
+        let url = format!("http://127.0.0.1:{port}/props");
+        let resp = self.client.get(&url).send().ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let v: serde_json::Value = resp.json().ok()?;
+        let t = v
+            .get("default_generation_settings")?
+            .get("params")?
+            .get("temperature")?
+            .as_f64()?;
+        Some(t as f32)
+    }
+
+    /// 端口上的 server 是否「确实是目标模型 + 正确采样 + 本进程以相同配置启动过」。
+    /// 任一环节无法确认 → false → 走杀重启（保证切换真实生效）。
+    pub(crate) fn running_matches(&self, cfg: &LlamaServerConfig) -> bool {
+        if !self.port_alive(cfg.port) {
+            return false;
+        }
+        // 1. 模型身份必须一致
+        match self.running_model_path(cfg.port) {
+            Some(p) if paths_equal(&p, &cfg.model_path) => {}
+            _ => return false,
+        }
+        // 2. 采样参数必须一致（temp 0 = greedy；残留默认 temp 0.8 → ASR 随机）
+        match self.running_temperature(cfg.port) {
+            Some(t) if (t - cfg.temperature).abs() < 1e-4 => {}
+            _ => return false,
+        }
+        // 3. 必须是本进程以相同配置启动过的（-ngl / mmproj 无法从 /props 验证）
+        match &*self.launched.lock() {
+            Some(l) => l.matches(cfg),
+            None => false,
+        }
     }
 
     /// 启动子进程 + 等待健康检查通过
@@ -217,19 +305,56 @@ impl LlamaServerEngine {
     /// `on_stage`: 细粒度加载阶段回调（reading_model/loading_mmproj/initializing/model_loaded）
     pub fn load_with_config(
         &self,
-        cfg: LlamaServerConfig,
+        mut cfg: LlamaServerConfig,
         on_stage: &mut dyn FnMut(&str),
     ) -> InferenceResult<()> {
         // 0. 记录新配置（后续 transcribe / health 用新端口和路径）
         *self.config.lock() = cfg.clone();
-        // 1. 已加载就直接返回
-        if self.is_loaded() {
+
+        // 1. 已有 server 在跑：只有「模型 + 采样 + 本进程启动参数」全部验证一致才接管，
+        //    否则杀掉重启 —— 杜绝把残留的旧模型/默认采样进程当成目标模型（假成功/整句乱码）。
+        if self.running_matches(&cfg) {
+            log::info!(
+                "[llama-server] 已在运行且验证一致（模型/采样/启动参数），直接接管: {}",
+                cfg.model_path.display()
+            );
             return Ok(());
         }
-        // 1. 如果外部已启动，直接接管
-        if self.is_external_running() {
-            log::info!("[llama-server] 检测到已在运行，直接接管");
-            return Ok(());
+        if self.port_alive(cfg.port) {
+            let running = self.running_model_path(cfg.port);
+            log::warn!(
+                "[llama-server] 端口 {} 已有 server 但与目标不一致（运行: {}，目标: {}），清理后重启",
+                cfg.port,
+                running.map(|p| p.display().to_string()).unwrap_or_else(|| "未知".into()),
+                cfg.model_path.display(),
+            );
+            // 清掉本进程残留 child 句柄
+            if let Some(mut c) = self.child.lock().take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+            kill_port_owner(cfg.port);
+            wait_port_closed(cfg.port, Duration::from_secs(3));
+
+            // 外部进程（非本软件引擎，路径判定拒杀）仍占用 → 不杀，自动换空闲端口。
+            // 端口对本应用是私有内部值：选定即本会话使用，不回归默认、不反复扫描。
+            if self.port_alive(cfg.port) {
+                if let Some(p) = find_free_port(cfg.port + 1) {
+                    log::warn!(
+                        "[llama-server] 端口 {} 被外部进程占用（不误杀），改用空闲端口 {}",
+                        cfg.port,
+                        p
+                    );
+                    cfg.port = p;
+                    // 同步回 config：后续 health/转写/身份验证都用新端口
+                    *self.config.lock() = cfg.clone();
+                } else {
+                    return Err(InferenceError::LoadFailed(format!(
+                        "端口 {} 被外部进程占用且无空闲端口可用",
+                        cfg.port
+                    )));
+                }
+            }
         }
 
         // 2. 检查可执行文件
@@ -325,29 +450,39 @@ impl LlamaServerEngine {
 
         *self.child.lock() = Some(child);
 
-        // 4. 等待健康检查
+        // 4. 等待就绪：必须是「我们 spawn 的子进程还活着」且「端口在服务」
+        //    （只查端口会被外部进程抢先占口造成"假就绪"）
         let start = std::time::Instant::now();
         while start.elapsed() < READY_TIMEOUT {
             // 转发 stderr 解析出的细粒度阶段（读模型/加载投影/初始化）
             while let Ok(stage) = stage_rx.try_recv() {
                 on_stage(&stage);
             }
-            if self.is_external_running() {
-                log::info!(
-                    "[llama-server] 就绪，耗时 {}ms",
-                    start.elapsed().as_millis()
-                );
-                on_stage("ready");
-                return Ok(());
-            }
-            // 检查子进程是否提前退出
+            // 子进程提前退出？
             if let Some(c) = self.child.lock().as_mut() {
                 if let Ok(Some(_)) = c.try_wait() {
                     *self.child.lock() = None;
                     return Err(InferenceError::LoadFailed(
-                        "llama-server 启动后立即退出，请检查模型路径和 GPU".to_string(),
+                        "llama-server 启动后立即退出：可能端口被外部进程占用，或模型路径/GPU 问题".to_string(),
                     ));
                 }
+            }
+            // 端口在服务且子进程存活 → 真就绪
+            let child_alive = self
+                .child
+                .lock()
+                .as_mut()
+                .map(|c| c.try_wait().map(|s| s.is_none()).unwrap_or(true))
+                .unwrap_or(false);
+            if child_alive && self.port_alive(cfg.port) {
+                log::info!(
+                    "[llama-server] 就绪，耗时 {}ms",
+                    start.elapsed().as_millis()
+                );
+                // 记录本次成功启动的配置（后续 running_matches 身份验证用）
+                *self.launched.lock() = Some(LaunchRec::from_cfg(&cfg));
+                on_stage("ready");
+                return Ok(());
             }
             std::thread::sleep(POLL_INTERVAL);
         }
@@ -370,26 +505,67 @@ impl LlamaServerEngine {
             let _ = c.kill();
             let _ = c.wait();
         }
+        // 兜底：外部启动 / 上次崩溃残留的 llama-server 一并清掉，保证下次 load 干净。
+        let port = self.config.lock().port;
+        kill_port_owner(port);
+        wait_port_closed(port, Duration::from_secs(3));
+        *self.launched.lock() = None;
         Ok(())
     }
 
-    /// 子进程是否在运行
+    /// 引擎是否"已加载"（所有权语义）：
+    /// 仅当 ①本进程成功启动过（launched 记录）且 ②该端口仍在服务时返回 true。
+    /// 外部进程/用户自装的 llama-server 即使监听同一端口，也不被视为"我们的已加载引擎"。
     pub fn is_loaded(&self) -> bool {
-        // 优先查 HTTP 端口（外部已启动的 llama-server 也算已加载）
-        if self.is_external_running() {
-            return true;
+        // 本进程从未成功启动过 → 不是我们的引擎
+        let launched = self.launched.lock();
+        if launched.is_none() {
+            return false;
         }
-        // 兜底：查子进程句柄（id > 0 表示有效）
-        if let Some(c) = self.child.lock().as_mut() {
-            if c.id() > 0 {
-                // 确认子进程没有退出
-                if let Ok(Some(_)) = c.try_wait() {
-                    return false;
+        let port = self.config.lock().port;
+        // port_alive 用池化 client——已禁用空闲复用（每次新连接），不会再因 stale 假阴性。
+        // 端口是权威判据：只要 /health 响应 = 引擎在服务 = 已加载。
+        // child 句柄只作参考（可能过期误报），不否决端口结论。
+        let port_alive = self.port_alive(port);
+        let child_says_alive = match self.child.lock().as_mut() {
+            Some(c) => match c.try_wait() {
+                Ok(Some(_)) => false,   // 句柄说已退出（可能 stale，仅参考）
+                Ok(None) => true,
+                Err(e) => {
+                    log::warn!("[llama-server] is_loaded: child.try_wait() 错误: {e}");
+                    true
                 }
-                return true;
-            }
+            },
+            None => true, // 接管场景无 child 句柄
+        };
+        if !port_alive {
+            // 端口不通：深度诊断（引擎真死 vs 连接异常）
+            let tcp_ok = std::net::TcpStream::connect_timeout(
+                &format!("127.0.0.1:{port}").parse().unwrap_or_else(|_| "127.0.0.1:1".parse().unwrap()),
+                std::time::Duration::from_millis(500),
+            )
+            .is_ok();
+            let fresh_health = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_millis(1500))
+                .build()
+                .ok()
+                .and_then(|c| {
+                    c.get(format!("http://127.0.0.1:{port}{HEALTH_PATH}"))
+                        .send()
+                        .ok()
+                })
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            log::info!(
+                "[llama-server] is_loaded=false: port={port} pooled_health=false tcp={tcp_ok} fresh_health={fresh_health} child_alive={child_says_alive}"
+            );
+            return false;
         }
-        false
+        // 端口通：即使 child 句柄 stale 也视为已加载（接管/句柄过期场景的正确语义）
+        if !child_says_alive {
+            log::debug!("[llama-server] child 句柄已退出但端口 {port} 在服务 → 视为已加载");
+        }
+        true
     }
 
     /// 转写一段音频
@@ -405,24 +581,41 @@ impl LlamaServerEngine {
         let wav_bytes = encode_pcm_to_wav(samples, sample_rate)
             .map_err(|e| InferenceError::InferenceFailed(format!("编码 WAV 失败: {e}")))?;
 
-        // 2. 构造 multipart 表单（与 curl -F file=@xxx.wav 等价）
-        let form = reqwest::blocking::multipart::Form::new()
-            .text("response_format", "json")
-            .part(
-                "file",
-                reqwest::blocking::multipart::Part::bytes(wav_bytes)
-                    .file_name("audio.wav")
-                    .mime_str("audio/wav")
-                    .map_err(|e| InferenceError::InferenceFailed(e.to_string()))?,
-            );
+        // 构造 multipart 表单（辅助函数：失败重试时重建）
+        let build_form = |bytes: Vec<u8>| {
+            reqwest::blocking::multipart::Form::new()
+                .text("response_format", "json")
+                .part(
+                    "file",
+                    reqwest::blocking::multipart::Part::bytes(bytes)
+                        .file_name("audio.wav")
+                        .mime_str("audio/wav")
+                        .expect("mime 常量合法"),
+                )
+        };
 
-        // 3. 发送请求
-        let resp = self
-            .client
-            .post(self.config.lock().transcribe_url())
-            .multipart(form)
-            .send()
-            .map_err(|e| InferenceError::InferenceFailed(format!("HTTP 失败: {e}")))?;
+        // 2. 发送请求（失败自动重试一次：用全新 client 绕过连接池——
+        //    llama-server 空闲后可能关闭 keep-alive，复用池里的 stale 连接会报
+        //    "error sending request"，重建连接即恢复）
+        let url = self.config.lock().transcribe_url();
+        let resp = match self.client.post(&url).multipart(build_form(wav_bytes.clone())).send() {
+            Ok(r) => Ok(r),
+            Err(first_err) => {
+                log::warn!(
+                    "[llama-server] transcribe 首次请求失败（可能连接池 stale），用新连接重试: {url} — {first_err}"
+                );
+                let fresh = reqwest::blocking::Client::builder()
+                    .timeout(Duration::from_secs(120))
+                    .build()
+                    .map_err(|e| InferenceError::InferenceFailed(format!("重建 client 失败: {e}")))?;
+                fresh
+                    .post(&url)
+                    .multipart(build_form(wav_bytes))
+                    .send()
+                    .map_err(|e| InferenceError::InferenceFailed(format!("HTTP 失败: {e}")))
+            }
+        };
+        let resp = resp?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -445,6 +638,20 @@ impl LlamaServerEngine {
     /// 当前加载的模型文件路径（换模型后同步更新）
     pub fn current_model_path(&self) -> PathBuf {
         self.config.lock().model_path.clone()
+    }
+
+    /// 当前生效设备（cuda/cpu），供状态快照与前端展示
+    pub fn device_label(&self) -> &'static str {
+        if self.config.lock().n_gpu_layers > 0 {
+            "cuda"
+        } else {
+            "cpu"
+        }
+    }
+
+    /// 本进程当前使用的引擎端口（换口后返回实际端口；未启动时返回配置端口）
+    pub fn current_port(&self) -> u16 {
+        self.config.lock().port
     }
 }
 
@@ -483,8 +690,11 @@ impl InferenceEngine for LlamaServerEngine {
         LlamaServerEngine::is_loaded(self)
     }
 
-    fn model_name(&self) -> Option<&str> {
-        Some("Qwen3-ASR-0.6B-Q8_0 (via llama-server)")
+    fn model_name(&self) -> Option<String> {
+        // 从当前配置的真实模型文件取名，不再硬编码（此前无论加载什么都显示 0.6B）
+        let p = self.config.lock().model_path.clone();
+        let fname = p.file_name()?.to_string_lossy().into_owned();
+        Some(format!("{fname} (via llama-server)"))
     }
 
     fn device(&self) -> Device {
@@ -512,6 +722,122 @@ impl InferenceEngine for LlamaServerEngine {
 }
 
 // ─── 辅助函数 ──────────────────────────────────────────────────────────────
+
+/// 两个模型路径是否指向同一文件（Windows 大小写不敏感 + 分隔符归一）
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    let norm = |p: &Path| p.to_string_lossy().replace('\\', "/").to_lowercase();
+    norm(a) == norm(b)
+}
+
+/// 路径规范化（比较用）：Windows 大小写不敏感 + 分隔符归一
+fn norm_path(p: &std::path::Path) -> String {
+    p.to_string_lossy().replace('\\', "/").to_lowercase()
+}
+
+/// 该进程是否由本软件自己的 runtime（exe 旁 libs/）启动。
+/// 只清理"自己的引擎进程"（本实例启动或本软件历史会话残留），
+/// 绝不杀用户/第三方自装的 llama-server —— 即使它恰好监听同一端口。
+fn is_our_engine_exe(exe: &Path) -> bool {
+    let libs = crate::inference::runtime_paths::libs_dir();
+    let e = norm_path(exe);
+    let l = norm_path(&libs);
+    e.starts_with(&l)
+}
+
+/// 取进程可执行文件路径（PowerShell；仅 Windows 有效）
+fn process_exe_path(pid: u32) -> Option<PathBuf> {
+    let mut cmd = std::process::Command::new("powershell");
+    crate::process_hidden::hide_console_window(&mut cmd);
+    let out = cmd
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!("(Get-Process -Id {pid} -ErrorAction SilentlyContinue).Path"),
+        ])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(s))
+}
+
+/// 杀掉占用指定端口的「本软件引擎」进程（仅 Windows）。
+/// 判定依据 = 进程可执行文件是否在本软件 libs 目录下（路径归属），不是图像名：
+/// - 自己的引擎 / 历史会话残留 → 杀掉（防止死进程占着固定端口造成"端口通=假就绪"）
+/// - 用户或第三方自装的 llama-server / sherpa（路径不在本软件目录）→ 不杀
+/// - 无法读取路径的进程 → 保守不杀（宁可让后续走"端口被占"逻辑，也不误伤）
+pub(crate) fn kill_port_owner(port: u16) {
+    #[cfg(windows)]
+    {
+        let mut netstat_cmd = std::process::Command::new("netstat");
+        crate::process_hidden::hide_console_window(&mut netstat_cmd);
+        let out = netstat_cmd
+            .args(["-ano", "-p", "tcp"])
+            .output();
+        let Ok(out) = out else { return };
+        if !out.status.success() {
+            return;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let needle = format!(":{port}");
+        let mut pids: Vec<u32> = Vec::new();
+        for line in text.lines() {
+            if !line.contains(&needle) || !line.contains("LISTENING") {
+                continue;
+            }
+            if let Some(pid) = line.split_whitespace().next_back().and_then(|s| s.parse::<u32>().ok()) {
+                if !pids.contains(&pid) {
+                    pids.push(pid);
+                }
+            }
+        }
+        for pid in pids {
+            let exe = match process_exe_path(pid) {
+                Some(e) => e,
+                None => {
+                    log::warn!("[port-guard] 端口 {port} 的 PID={pid} 无法确认路径，保守跳过（不误杀）");
+                    continue;
+                }
+            };
+            if !is_our_engine_exe(&exe) {
+                log::warn!(
+                    "[port-guard] 端口 {port} 被外部进程占用（{}，非本软件引擎），不杀 —— 需要走换端口/报错逻辑",
+                    exe.display()
+                );
+                continue;
+            }
+            log::warn!("[port-guard] 清理本软件残留引擎 PID={pid}（{}）", exe.display());
+            let mut kill = std::process::Command::new("taskkill");
+            crate::process_hidden::hide_console_window(&mut kill);
+            let _ = kill
+                .args(["/PID", &pid.to_string(), "/F"])
+                .status();
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = port;
+    }
+}
+
+/// 从 start 起找第一个空闲端口（探测：无法建立 TCP 连接即视为空闲）
+pub(crate) fn find_free_port(start: u16) -> Option<u16> {
+    (start..start + 200).find(|p| TcpStream::connect(("127.0.0.1", *p)).is_err())
+}
+
+/// 等待端口完全释放（旧进程刚杀后，避免 bind 冲突）
+pub(crate) fn wait_port_closed(port: u16, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if TcpStream::connect(("127.0.0.1", port)).is_err() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    log::warn!("[llama-server] 等待端口 {port} 释放超时");
+}
 
 /// llama-server 转写响应（OpenAI 兼容）
 #[derive(Debug, Deserialize)]
@@ -572,11 +898,38 @@ use std::sync::OnceLock;
 /// 全局 llama-server 引擎（仅在需要时初始化）
 static LLAMA_ENGINE: OnceLock<Arc<LlamaServerEngine>> = OnceLock::new();
 
+/// 最近一次被「显式请求」加载的模型名（来自 load_asr_model_with_stage 的参数，
+/// 即用户在 UI 的当前选择）。热键兜底 / 文件转写兜底用它，避免硬编码 0.6B
+/// 造成「UI 显示 1.7B、后台实际跑 0.6B」。
+static LAST_REQUESTED: parking_lot::Mutex<Option<(String, String)>> =
+    parking_lot::Mutex::new(None);
+
 /// 获取全局引擎（懒加载）
 pub fn global_engine() -> Arc<LlamaServerEngine> {
     LLAMA_ENGINE
         .get_or_init(|| Arc::new(LlamaServerEngine::new()))
         .clone()
+}
+
+/// 获取"最近一次被请求"的 (模型, 设备)（注册表兜底用）
+pub fn last_requested_model() -> Option<(String, String)> {
+    LAST_REQUESTED.lock().clone()
+}
+
+/// 记录最近一次被请求的 (模型, 设备) —— 任意框架成功路由都应调用
+/// （registry.load_asr_by_name），否则兜底加载会退回默认 llama。
+pub fn record_last_requested(name: &str, device: &str) {
+    *LAST_REQUESTED.lock() = Some((name.to_string(), device.to_string()));
+}
+
+/// 加载「最近一次被请求的模型+设备」；无任何请求记录时用注册表默认（0.6B）。
+/// 供热键兜底 / 文件转写兜底调用：兜底行为与用户在 UI 的选择保持一致。
+/// 走 registry.load_requested_asr → 查注册表路由，保证与 UI 切换共用互斥逻辑，不绕过。
+pub fn load_requested() -> InferenceResult<String> {
+    crate::inference::registry::registry()
+        .load_requested_asr(&mut |_| {})
+        .map(|(_fw, name)| name)
+        .map_err(|e| InferenceError::LoadFailed(e))
 }
 
 /// 按模型名加载 ASR 引擎（llama-server）。
@@ -597,17 +950,29 @@ pub fn load_asr_model_with_stage(
     device: &str,
     on_stage: &mut dyn FnMut(&str),
 ) -> InferenceResult<String> {
+    *LAST_REQUESTED.lock() = Some((name.to_string(), device.to_string()));
     let engine = global_engine();
-    let cfg = llama_config_for_model(name, device)?;
+    let mut cfg = llama_config_for_model(name, device)?;
 
-    // 当前已加载同模型 → 直接返回
-    if engine.is_loaded() && engine.current_model_path() == cfg.model_path {
-        return Ok(engine.model_name().unwrap_or(name).to_string());
+    // 会话内端口延续：本进程因外部占用换过口后，后续加载沿用当前实际端口，
+    // 避免每次都回默认口探测而在同一进程内重复起第二台 server。
+    if cfg.port == DEFAULT_PORT {
+        let cur = engine.current_port();
+        if cur != DEFAULT_PORT && engine.is_loaded() {
+            cfg.port = cur;
+        }
     }
 
-    // 换模型：先卸载旧进程
+    // 已加载同模型（含采样/启动参数一致，以「真实运行的 server」为准）→ 直接返回
+    if engine.running_matches(&cfg) {
+        return Ok(engine.model_name().unwrap_or_else(|| name.to_string()));
+    }
+
+    // 换模型：先卸载旧进程（stage 带出旧模型名，便于日志追踪）
     if engine.is_loaded() {
-        on_stage("unload");
+        let old = engine.model_name().unwrap_or_default();
+        let stage = if old.is_empty() { "unload".to_string() } else { format!("unload:{old}") };
+        on_stage(&stage);
         let _ = engine.unload();
         on_stage("loading");
     } else {
@@ -616,7 +981,7 @@ pub fn load_asr_model_with_stage(
 
     engine.load_with_config(cfg, on_stage)?;
     on_stage("ready");
-    Ok(engine.model_name().unwrap_or(name).to_string())
+    Ok(engine.model_name().unwrap_or_else(|| name.to_string()))
 }
 
 /// 从注册表解析模型目录 + 模型/投影文件路径（不硬编码模型名）
@@ -753,7 +1118,7 @@ impl super::engine::AsrEngine for LlamaAsrAdapter {
     }
 
     fn current_model(&self) -> String {
-        self.engine.model_name().unwrap_or("").to_string()
+        self.engine.model_name().unwrap_or_default()
     }
 
     fn transcribe(&self, samples: &[f32], sample_rate: u32) -> Result<String, String> {

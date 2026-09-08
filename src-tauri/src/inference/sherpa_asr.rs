@@ -36,6 +36,7 @@ struct Inner {
     child: Option<Child>,
     port: u16,
     model: String,
+    device: String,
     state: SherpaState,
     model_dir: PathBuf,
 }
@@ -51,6 +52,7 @@ impl Default for SherpaAsrEngine {
                 child: None,
                 port: DEFAULT_PORT,
                 model: String::new(),
+                device: String::new(),
                 state: SherpaState::Uninitialized,
                 model_dir: PathBuf::new(),
             }),
@@ -71,10 +73,16 @@ impl SherpaAsrEngine {
         self.inner.lock().model.clone()
     }
 
-    /// 定位 websocket server 可执行文件
+    /// 当前加载设备（"cuda"/"cpu"，未加载为空）
+    pub fn device(&self) -> String {
+        self.inner.lock().device.clone()
+    }
+
+    /// 定位 websocket server 可执行文件（官方包结构：根/bin/sherpa-onnx-offline-websocket-server.exe）
     fn server_exe() -> PathBuf {
-        // 运行时目录：环境变量 → exe 同级 libs（打包后）→ 项目 libs（开发时）
-        crate::inference::runtime_paths::sherpa_runtime_dir().join(SHERPA_WS_EXE)
+        crate::inference::runtime_paths::sherpa_runtime_dir()
+            .join("bin")
+            .join(SHERPA_WS_EXE)
     }
 
     fn server_exe_exists() -> bool {
@@ -85,8 +93,12 @@ impl SherpaAsrEngine {
     /// `device`: "cuda" → --provider=cuda；"cpu" → --provider=cpu
     pub fn load(&self, model_name: &str, device: &str) -> Result<(), String> {
         let mut inner = self.inner.lock();
-        if inner.state == SherpaState::Ready && inner.model == model_name {
-            return Ok(()); // 幂等：已加载同一模型
+        // 幂等：已加载同一模型且同一设备
+        if inner.state == SherpaState::Ready
+            && inner.model == model_name
+            && inner.device == device.to_ascii_lowercase()
+        {
+            return Ok(());
         }
         // 先停旧进程
         self.unload_locked(&mut inner);
@@ -113,6 +125,25 @@ impl SherpaAsrEngine {
             return Err(format!("sherpa server 未找到: {}", exe.display()));
         }
 
+        // 清端口残留：死会话留下的孤儿 sherpa 服务器占着 9002 会让"端口通=就绪"假命中。
+        // 与 llama 侧同一套端口守卫，保证 spawn 出来的是唯一且真正就绪的进程。
+        crate::inference::llama_server::kill_port_owner(DEFAULT_PORT);
+        crate::inference::llama_server::wait_port_closed(DEFAULT_PORT, Duration::from_secs(3));
+        // 外部进程（非本软件引擎，路径判定拒杀）仍占用 → 不杀，自动换空闲端口
+        let port = if TcpStream::connect(("127.0.0.1", DEFAULT_PORT)).is_ok() {
+            match crate::inference::llama_server::find_free_port(DEFAULT_PORT + 1) {
+                Some(p) => {
+                    log::warn!("[sherpa] 端口 {DEFAULT_PORT} 被外部进程占用（不误杀），改用空闲端口 {p}");
+                    p
+                }
+                None => {
+                    return Err(format!("端口 {DEFAULT_PORT} 被外部进程占用且无空闲端口可用"));
+                }
+            }
+        } else {
+            DEFAULT_PORT
+        };
+
         // 参数：SenseVoice 用 --sense-voice-model，Paraformer 用 --paraformer
         let is_sense_voice = model_name.contains("SenseVoice") || main_file.to_string_lossy().contains("sense-voice");
         let mut cmd = Command::new(&exe);
@@ -127,7 +158,7 @@ impl SherpaAsrEngine {
                 "cpu" => "--provider=cpu",
                 _ => "--provider=cuda",
             })
-            .arg("--port=9002")
+            .arg(format!("--port={port}"))
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         // 隐藏子进程控制台窗口（避免黑窗口闪过）
@@ -138,30 +169,64 @@ impl SherpaAsrEngine {
         let child = cmd.spawn().map_err(|e| format!("sherpa server 启动失败: {e}"))?;
         let mut inner = self.inner.lock();
         inner.child = Some(child);
-        inner.port = DEFAULT_PORT;
+        inner.port = port;
         inner.model = model_name.to_string();
         inner.model_dir = model_dir;
 
-        // 等待端口就绪（最多 30s）
+        // 等待就绪（最多 30s）：必须是「我们 spawn 的子进程还活着」且「端口可连」，
+        // 防止外部 TCP 服务抢先占口造成的"假就绪"。
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            if TcpStream::connect(("127.0.0.1", inner.port)).is_ok() {
+            // 子进程提前退出 → 失败
+            if let Some(child) = inner.child.as_mut() {
+                if let Ok(Some(_)) = child.try_wait() {
+                    inner.state = SherpaState::Error("sherpa server 进程退出".into());
+                    return Err("sherpa server 启动失败：可能端口被外部进程占用，或运行库缺失".into());
+                }
+            }
+            // 端口可连 且 子进程存活 → 真就绪
+            let child_alive = inner
+                .child
+                .as_mut()
+                .map(|c| c.try_wait().map(|s| s.is_none()).unwrap_or(true))
+                .unwrap_or(false);
+            if child_alive && TcpStream::connect(("127.0.0.1", inner.port)).is_ok() {
                 inner.state = SherpaState::Ready;
+                inner.device = device.to_ascii_lowercase();
                 return Ok(());
             }
             if Instant::now() > deadline {
                 inner.state = SherpaState::Error("sherpa server 启动超时".into());
                 return Err("sherpa server 启动超时（30s）".into());
             }
-            // 检查子进程是否已退出
-            if let Some(child) = inner.child.as_mut() {
-                if let Ok(Some(_)) = child.try_wait() {
-                    inner.state = SherpaState::Error("sherpa server 进程退出".into());
-                    return Err("sherpa server 进程提前退出".into());
-                }
-            }
             std::thread::sleep(Duration::from_millis(500));
         }
+    }
+
+    /// 引擎是否"已加载"（所有权语义）：state==Ready 且引擎确实在服务。
+    /// child 句柄可能过期（多次加载后句柄指向旧进程 → try_wait 误报"已退出"，进程实际
+    /// 活着）——因此 child 说"死"时，用端口连接确认；端口仍通 → 视为加载中，不复位。
+    /// 只有 child 与端口都说死，才复位为未加载。
+    pub fn is_loaded(&self) -> bool {
+        let mut inner = self.inner.lock();
+        if inner.state != SherpaState::Ready {
+            return false;
+        }
+        if let Some(c) = inner.child.as_mut() {
+            if let Ok(Some(_)) = c.try_wait() {
+                // child 说已退出 → 用端口二次确认（句柄过期时端口仍通）
+                let port_alive = TcpStream::connect(("127.0.0.1", inner.port)).is_ok();
+                if !port_alive {
+                    // 真死了：复位状态，避免"假就绪"长期悬挂
+                    inner.model = String::new();
+                    inner.device = String::new();
+                    inner.state = SherpaState::Uninitialized;
+                    return false;
+                }
+                // 端口通 → 句柄过期误报，进程实际活着 → 仍算已加载
+            }
+        }
+        true
     }
 
     fn unload_locked(&self, inner: &mut Inner) {
@@ -169,7 +234,11 @@ impl SherpaAsrEngine {
             let _ = child.kill();
             let _ = child.wait();
         }
+        // 兜底：孤儿 sherpa 服务器一并清掉（含本进程外的残留）
+        crate::inference::llama_server::kill_port_owner(inner.port);
+        crate::inference::llama_server::wait_port_closed(inner.port, Duration::from_secs(3));
         inner.model = String::new();
+        inner.device = String::new();
         inner.state = SherpaState::Uninitialized;
     }
 
@@ -181,12 +250,10 @@ impl SherpaAsrEngine {
 
     /// 转写：samples 是 16k float32 单声道 PCM
     pub fn transcribe(&self, samples: &[f32], sample_rate: u32) -> Result<String, String> {
-        let inner = self.inner.lock();
-        if inner.state != SherpaState::Ready {
+        if !self.is_loaded() {
             return Err("sherpa ASR 未加载".into());
         }
-        let port = inner.port;
-        drop(inner);
+        let port = self.inner.lock().port;
 
         // 连接 websocket
         let url = format!("ws://127.0.0.1:{port}/asr");
@@ -280,16 +347,32 @@ impl super::engine::AsrEngine for SherpaAsrAdapter {
         self.engine.load(name, device)
     }
 
+    fn load_model_with_stage(
+        &self,
+        name: &str,
+        on_stage: &mut dyn FnMut(&str),
+    ) -> Result<(), String> {
+        on_stage("loading");
+        self.engine.load(name, "cuda")
+    }
+
+    fn load_model_with_stage_and_device(
+        &self,
+        name: &str,
+        device: &str,
+        on_stage: &mut dyn FnMut(&str),
+    ) -> Result<(), String> {
+        on_stage("loading");
+        self.engine.load(name, device)
+    }
+
     fn unload(&self) -> Result<(), String> {
         self.engine.unload();
         Ok(())
     }
 
     fn is_loaded(&self) -> bool {
-        matches!(
-            self.engine.state(),
-            crate::inference::sherpa_asr::SherpaState::Ready
-        )
+        self.engine.is_loaded()
     }
 
     fn current_model(&self) -> String {
