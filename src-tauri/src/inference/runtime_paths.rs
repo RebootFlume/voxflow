@@ -27,14 +27,7 @@ pub fn llama_runtime_dir() -> PathBuf {
 }
 
 /// sherpa-onnx 运行时目录（含 websocket server exe）
-/// 优先环境变量 SHERPA_CPP_DIR（测试/特殊部署），否则 exe 旁 libs/sherpa-onnx
 pub fn sherpa_runtime_dir() -> PathBuf {
-    if let Ok(env_dir) = std::env::var("SHERPA_CPP_DIR") {
-        let p = PathBuf::from(env_dir);
-        if !p.as_os_str().is_empty() {
-            return p;
-        }
-    }
     libs_dir().join("sherpa-onnx")
 }
 
