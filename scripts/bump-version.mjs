@@ -1,30 +1,40 @@
 #!/usr/bin/env node
 /**
- * 统一版本号脚本 —— 发版只需一处：npm run version:bump -- 0.4.0
+ * 版本号同步脚本 —— 事实源 = package.json 的 version 字段。
  *
- * 同步修改（四处必须一致，否则打包产物名/二进制版本/UI 显示会错位）：
- *   1. package.json      → vite 注入前端 UI 显示
- *   2. tauri.conf.json   → 打包脚本读取 → 产物文件名
- *   3. Cargo.toml        → Rust 二进制版本
- *   4. Cargo.lock        → 依赖锁文件里的 voxflow 版本
+ * 发版流程：
+ *   1. 编辑 package.json 的 "version"（唯一要改的地方）
+ *   2. 运行 npm run version:sync
+ *   3. npm run bundle 打包
  *
- * 用法: npm run version:bump -- 0.4.0
- * 校验: 只接受 x.y.z（semver，不带 v）
+ * 脚本把 package.json 的版本分发到（四处必须一致，否则产物名/二进制/UI 错位）：
+ *   1. tauri.conf.json   → 打包脚本读取 → 产物文件名
+ *   2. Cargo.toml        → Rust 二进制版本
+ *   3. Cargo.lock        → 依赖锁文件里的 voxflow 版本
+ *   （package.json 自身 → vite 注入前端 UI 显示，不需要分发）
+ *
+ * 可选：npm run version:sync -- 0.4.0 会先更新 package.json 再分发（等价于手动编辑）。
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const ver = process.argv[2];
+const pkgPath = path.join(root, "package.json");
+const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
 
-if (!ver) {
-  console.error("用法: npm run version:bump -- 0.4.0");
-  process.exit(1);
-}
-if (!/^\d+\.\d+\.\d+$/.test(ver)) {
-  console.error(`版本号格式应为 x.y.z（不带 v），收到: ${ver}`);
-  process.exit(1);
+let ver = pkg.version;
+const arg = process.argv[2];
+if (arg) {
+  if (!/^\d+\.\d+\.\d+$/.test(arg)) {
+    console.error(`版本号格式应为 x.y.z（不带 v），收到: ${arg}`);
+    process.exit(1);
+  }
+  if (arg !== ver) {
+    writeFileSync(pkgPath, JSON.stringify({ ...pkg, version: arg }, null, 2) + "\n", "utf-8");
+    console.log(`✓ package.json（事实源）→ ${arg}`);
+    ver = arg;
+  }
 }
 
 function patch(rel, regex, label) {
@@ -38,15 +48,11 @@ function patch(rel, regex, label) {
   console.log(`✓ ${label} (${rel}) → ${ver}`);
 }
 
-patch("package.json", /("version":\s*")[\d.]+(")/, "package.json");
 patch("src-tauri/tauri.conf.json", /("version":\s*")[\d.]+(")/, "tauri.conf.json");
 patch("src-tauri/Cargo.toml", /(^version\s*=\s*")[\d.]+(")/m, "Cargo.toml");
-
-// Cargo.lock: voxflow 包条目（只改第一个 name=voxflow 的 version）
 {
   const p = path.join(root, "src-tauri/Cargo.lock");
   const s = readFileSync(p, "utf-8");
-  // 找 "name = \"voxflow\"" 后紧跟的 version
   const re = /(name = "voxflow"\nversion = ")[\d.]+(")/;
   if (!re.test(s)) {
     console.error("✗ Cargo.lock: 未找到 voxflow 版本");
@@ -56,4 +62,4 @@ patch("src-tauri/Cargo.toml", /(^version\s*=\s*")[\d.]+(")/m, "Cargo.toml");
   console.log(`✓ Cargo.lock (voxflow) → ${ver}`);
 }
 
-console.log(`\n完成：版本号统一为 ${ver}。下一步：npm run bundle 打包。`);
+console.log(`\n完成：四处版本号统一为 ${ver}（事实源 package.json）。下一步：npm run bundle。`);
