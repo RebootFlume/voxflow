@@ -8,8 +8,10 @@ src-tauri/target/
 src-tauri/gen/
 
 # 本地模型 / 二进制库（体积大，不提交）
-models/
+# 注意：models/ 会误伤 src/modules/models/ 源码 → 必须 /models/ 限定根目录
+/models/
 libs/
+src-tauri/target/debug/libs/
 
 # 日志
 *.log
