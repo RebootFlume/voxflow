@@ -2,6 +2,7 @@
 pub mod audio;
 pub mod process_hidden;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 mod app_state;
 #[allow(unused_imports)]
 pub mod clipboard;
@@ -11,6 +12,7 @@ mod errors;
 #[allow(unused_imports)]
 pub mod hotkey;
 pub mod inference;
+mod log_bridge;
 pub mod model_manager;
 pub mod data_root;
 #[allow(unused_imports)]
@@ -82,6 +84,9 @@ async fn send_to_sidecar_safe(
             if let Some(proxy) = payload.get("proxy").and_then(|v| v.as_str()) {
                 model_manager::set_proxy(proxy);
             }
+            if let Some(token) = payload.get("hf_token").and_then(|v| v.as_str()) {
+                model_manager::set_token(token);
+            }
             model_manager::emit_models_state(&app);
             return Ok(serde_json::json!({"ok": true}));
         }
@@ -111,6 +116,13 @@ async fn send_to_sidecar_safe(
             let normalized = model_manager::set_proxy(proxy);
             let _ = app.emit("sidecar://event", serde_json::json!({"status": "proxy_set", "proxy": normalized}));
             return Ok(serde_json::json!({"ok": true, "proxy": normalized}));
+        }
+        "set_token" => {
+            // HF 下载 token：只接收存储，不回显（避免明文泄漏到日志/事件）
+            let token = payload.get("token").and_then(|v| v.as_str()).unwrap_or("");
+            let saved = model_manager::set_token(token);
+            let _ = app.emit("sidecar://event", serde_json::json!({"status": "token_set", "has_token": !saved.is_empty()}));
+            return Ok(serde_json::json!({"ok": true}));
         }
         "check_capabilities" => {
             // 能力检测：ffmpeg 是否可用（前端 TranscribePanel 依赖此标记决定支持格式）
@@ -345,27 +357,27 @@ fn get_vram_status_sync() -> serde_json::Value {
         })
         .unwrap_or(0);
 
-    // 各框架进程显存（按 PID 查询；无权限时为 None → 回退到模型文件大小估算）
-    // llama：估算 = 当前加载的模型目录大小（切换 0.6B/1.7B 后自动跟随）
-    let llama_mb = vram_of_process("llama-server").or_else(|| {
-        let eng = crate::inference::llama_server::global_engine();
-        let p = eng.current_model_path();
-        // 取模型文件所在目录（含 mmproj），估算整个目录大小
-        p.parent().map(|d| dir_size_mb(d)).flatten()
-    })
-    // registry 兜底：若以上未命中，用注册表统一估算（未来 PyTorch 自动生效）
-    .or_else(|| {
-        let r = crate::inference::registry::registry();
-        if r.active_framework() == "gguf" {
-            r.active_vram_mb()
-        } else {
-            None
-        }
-    });
+    // 各框架进程显存（按 PID 查询）。
+    // 关键：进程不存在（引擎已卸载/释放）时绝不能回退到"模型目录大小"估算——
+    // 那会在引擎死后假报占用。只有引擎 is_loaded()（子进程活着）却查不到
+    // nvidia-smi 明细（无权限）时，才用目录大小近似。
+    let llama_mb = vram_of_process("llama-server")
+        .or_else(|| {
+            let eng = crate::inference::llama_server::global_engine();
+            if !eng.is_loaded() {
+                return None; // 引擎已卸载：显存已释放，不再估算
+            }
+            // 引擎活着但查不到明细（无权限）→ 用模型目录大小近似
+            let p = eng.current_model_path();
+            p.parent().map(|d| dir_size_mb(d)).flatten()
+        })
+        .or_else(|| registry_vram_mb_if_active("gguf"));
     let sherpa_mb = vram_of_process("sherpa-onnx-offline-websocket-server")
         .or_else(|| {
-            // 当前加载的 sherpa 模型目录大小
             let eng = crate::inference::sherpa_asr::global_engine();
+            if !eng.is_loaded() {
+                return None; // 引擎已卸载：显存已释放，不再估算
+            }
             let model = eng.model();
             if model.is_empty() {
                 None
@@ -373,15 +385,7 @@ fn get_vram_status_sync() -> serde_json::Value {
                 pathbuf_size_mb(crate::model_manager::model_dir(&model))
             }
         })
-        // registry 兜底：若以上未命中，用注册表统一估算（未来 PyTorch 自动生效）
-        .or_else(|| {
-            let r = crate::inference::registry::registry();
-            if r.active_framework() == "onnx" {
-                r.active_vram_mb()
-            } else {
-                None
-            }
-        });
+        .or_else(|| registry_vram_mb_if_active("onnx"));
 
     serde_json::json!({
         "available": gpu.get("available").and_then(|v| v.as_bool()).unwrap_or(false),
@@ -395,6 +399,17 @@ fn get_vram_status_sync() -> serde_json::Value {
                 .unwrap_or_else(|| serde_json::json!(null)),
         },
     })
+}
+
+/// 指定框架在 registry 中 active 时的估算显存（registry 内部用 is_loaded 过滤，
+/// 引擎已卸载自动排除 → 安全）
+fn registry_vram_mb_if_active(framework: &'static str) -> Option<u64> {
+    let r = crate::inference::registry::registry();
+    if r.active_framework() == framework {
+        r.active_vram_mb()
+    } else {
+        None
+    }
 }
 
 /// 查询指定进程名的显存占用（MB）——按 PID 匹配 nvidia-smi
@@ -601,6 +616,134 @@ fn rust_llama_server_status() -> serde_json::Value {
     inference::commands::llama_server_status()
 }
 
+/// 统一 ASR 加载请求号：前端用它丢弃旧请求的迟到事件（只认最新 reqId）
+static NEXT_ASR_REQ: AtomicU64 = AtomicU64::new(0);
+
+/// 统一 ASR 模型加载入口（替代 rust_start_llama_server / sidecar load_model 的分叉）。
+///
+/// 设计要点（完整切换流程）：
+///   1. 路由依据 = 注册表里模型自身的 format/kind（registry.framework_for_model），不做名字推断；
+///   2. 互斥（llama/sherpa/未来 pytorch 同一时间只一个）由 registry.load_asr_by_name 统一强制；
+///   3. 每次请求必然产生且只产生一个终态事件（model_ready / model_error），
+///      全部带 reqId；即使加载线程卡死/panic，兜底也会补发 model_error —— 不会"卡 loading"；
+///   4. 立即返回 {reqId}，前端用它做新请求覆盖旧请求（迟到事件按 reqId 丢弃）。
+#[tauri::command]
+async fn rust_load_asr(
+    app: tauri::AppHandle,
+    model: String,
+    device: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let device = device.unwrap_or_else(|| "cuda".to_string());
+    let req = NEXT_ASR_REQ.fetch_add(1, Ordering::SeqCst) + 1;
+
+        // 注册表权威框架（事件带出，前端据此切换模型页标签，无需猜）
+        let fw_opt: Option<String> = crate::inference::registry::registry()
+            .framework_for_model(&model)
+            .ok()
+            .map(|f| f.to_string());
+
+    let _ = app.emit("sidecar://event", serde_json::json!({
+        "status": "model_loading", "reqId": req, "kind": "asr",
+        "model": model, "device": device, "framework": fw_opt,
+    }));
+
+    // 后台执行 + 终态兜底（fire-and-forget：立即返回，事件驱动状态）
+    let app2 = app.clone();
+    let model2 = model.clone();
+    let model_resp = model.clone();
+    let device2 = device.clone();
+    tauri::async_runtime::spawn(async move {
+        let started = std::time::Instant::now();
+        // 独立线程跑加载；主 async 任务用 recv_timeout 等终态，线程卡死也能兜底补发 error
+        let (tx, rx) = std::sync::mpsc::channel::<Result<(String, String), String>>();
+        std::thread::Builder::new()
+            .name("asr-load".into())
+            .spawn(move || {
+                let registry = crate::inference::registry::registry();
+                let mut on_stage = |s: &str| {
+                    let _ = app2.emit("sidecar://event", serde_json::json!({
+                        "status": "model_progress", "reqId": req, "kind": "asr",
+                        "model": model2, "device": device2, "stage": s,
+                    }));
+                };
+                // 注册表权威路由 + 互斥 + 引擎加载（含未知模型/非 ASR/缺框架的校验）
+                let r = registry
+                    .load_asr_by_name(&model2, &device2, &mut on_stage)
+                    .map(|(fw, name)| (fw.to_string(), name));
+                let _ = tx.send(r);
+            })
+            .ok();
+
+        // 等终态（240s 上限）：线程卡死/panic（channel 断开）都视为失败 → 终态必达
+        let result = rx.recv_timeout(std::time::Duration::from_secs(240));
+        let result: Result<(String, String), String> = match result {
+            Ok(Ok(pair)) => Ok(pair),
+            Ok(Err(e)) => Err(e),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // 兜底：卸载残留引擎，保证下次加载干净
+                let _ = crate::inference::registry::registry().unload_active();
+                Err("模型加载超时（240s），已中止并清理残留".into())
+            }
+            Err(_disconnected) => Err("加载线程异常退出".into()),
+        };
+
+        match result {
+            Ok((fw, name)) => {
+                let _ = app.emit("sidecar://event", serde_json::json!({
+                    "status": "model_ready", "reqId": req, "kind": "asr",
+                    "model": name, "device": device, "framework": fw,
+                    "load_ms": started.elapsed().as_millis(),
+                }));
+            }
+            Err(e) => {
+                let _ = app.emit("sidecar://event", serde_json::json!({
+                    "status": "model_error", "reqId": req, "kind": "asr",
+                    "model": model, "device": device, "msg": e,
+                }));
+            }
+        }
+    });
+
+    Ok(serde_json::json!({ "ok": true, "reqId": req, "model": model_resp, "loading": true }))
+}
+
+/// 真实引擎状态快照（自愈对账）：任何"卡 loading"调它 → status_snapshot 纠偏
+#[tauri::command]
+fn rust_get_status(app: tauri::AppHandle) -> serde_json::Value {
+    let llama = crate::inference::llama_server::global_engine();
+    let sherpa = crate::inference::sherpa_asr::global_engine();
+    let (loaded, model, device) = if llama.is_loaded() {
+        let name = llama
+            .current_model_path()
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        (true, name, llama.device_label().to_string())
+    } else if sherpa.is_loaded() {
+        (true, sherpa.model(), sherpa.device())
+    } else {
+        (false, String::new(), String::new())
+    };
+    let snap = serde_json::json!({
+        "status": "status_snapshot",
+        "asr": { "loaded": loaded, "model": model, "device": device },
+        "recording": false,
+    });
+    let _ = app.emit("sidecar://event", snap.clone());
+    snap
+}
+
+/// 卸载当前 ASR 引擎（llama/sherpa 都清理），供前端「卸载」操作
+#[tauri::command]
+fn rust_unload_asr() -> Result<serde_json::Value, String> {
+    crate::inference::registry::registry().unload_active()?;
+    // 双保险：即使 active 判定异常，也把两个引擎都停掉
+    let _ = crate::inference::llama_server::global_engine().unload();
+    crate::inference::sherpa_asr::global_engine().unload();
+    Ok(serde_json::json!({ "ok": true, "loaded": false }))
+}
+
+
 /// 通过 llama-server 转写音频文件（支持多格式解码 + 长音频分批 + 进度 + 导出）
 #[tauri::command]
 async fn rust_transcribe_llama(
@@ -657,6 +800,12 @@ fn check_runtime() -> serde_json::Value {
     inference::runtime_download::runtime_status()
 }
 
+/// 两步验证：① 文件检查（缺什么列清单）② 试启动（DLL 链能否真跑）——不触发下载
+#[tauri::command]
+fn rust_verify_runtime(framework: String) -> serde_json::Value {
+    inference::runtime_download::verify_runtime_full(&framework)
+}
+
 /// 下载 + 解压推理框架运行时（libs）到 exe 旁 libs/
 /// 复用模型下载机制（代理 env + reqwest + tar 解压），带进度事件
 #[tauri::command]
@@ -666,11 +815,23 @@ async fn download_runtime(
 ) -> Result<serde_json::Value, String> {
     let app2 = app.clone();
     let fw2 = framework.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        inference::runtime_download::download_runtime(app2, &fw2)
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        inference::runtime_download::download_runtime(&app2, &fw2)
     })
     .await
-    .map_err(|e| format!("运行时下载线程失败: {e}"))??;
+    .map_err(|e| format!("运行时下载线程失败: {e}"))?;
+    if let Err(e) = &result {
+        // 失败也发事件：全局清除下载态 + 记日志（面板不在时也不卡住）
+        let _ = app.emit(
+            "sidecar://event",
+            serde_json::json!({
+                "status": "runtime_download_error",
+                "framework": framework,
+                "msg": e,
+            }),
+        );
+    }
+    result?;
     Ok(serde_json::json!({ "ok": true, "framework": framework }))
 }
 
@@ -700,7 +861,7 @@ fn hf_download_file(
     cache_dir: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let mut config = download::DownloadConfig::new(&model_id, &filename)
-        .with_env_token();
+        .with_config_token();
 
     if let Some(t) = token {
         config = config.with_token(t);
@@ -732,7 +893,7 @@ fn hf_download_as_string(
     token: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let mut config = download::DownloadConfig::new(&model_id, &filename)
-        .with_env_token();
+        .with_config_token();
 
     if let Some(t) = token {
         config = config.with_token(t);
@@ -760,7 +921,7 @@ fn hf_download_multiple(
     token: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let mut config = download::DownloadConfig::new(&model_id, "")
-        .with_env_token();
+        .with_config_token();
 
     if let Some(t) = token {
         config = config.with_token(t);
@@ -787,11 +948,15 @@ fn hf_download_multiple(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    log_bridge::install();
     tauri::Builder::default()
         .manage(AppState::new())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // Rust log:: 记录 → 前端运行日志（引擎层端口守卫/身份验证等细节可见）
+            log_bridge::start_emitter(app.handle().clone());
+
             // 统一数据根：便携模式（exe旁data）或安装模式（AppData）
             // 模型根优先级：config.json 已保存的用户选择 > 数据根/models（便携/安装各自默认）
             let saved = crate::data_root::read_saved_model_root_with(app.handle());
@@ -826,8 +991,12 @@ pub fn run() {
             rust_start_llama_server,
             rust_stop_llama_server,
             rust_llama_server_status,
+            rust_load_asr,
+            rust_get_status,
+            rust_unload_asr,
             rust_transcribe_llama,
             check_runtime,
+            rust_verify_runtime,
             get_data_root_info,
             download_runtime,
             tts::commands::rust_load_tts_model,

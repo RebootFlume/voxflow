@@ -3,7 +3,7 @@
 //! llama-server 子进程命令（ASR 主力路线）。
 //! 旧 AsrEngine（llama-cpp-2 占位）已移除，ASR 走 llama-server / sherpa 子进程。
 
-use super::llama_server::{global_engine, LlamaAsrAdapter};
+use super::llama_server::global_engine;
 use super::engine::InferenceEngine;
 use super::transcribe_chunks::transcribe_long;
 use super::super::audio;
@@ -50,7 +50,7 @@ pub fn llama_server_status() -> serde_json::Value {
     let engine = global_engine();
     serde_json::json!({
         "loaded": engine.is_loaded(),
-        "model": engine.model_name().unwrap_or(""),
+        "model": engine.model_name().unwrap_or_default(),
     })
 }
 
@@ -88,13 +88,20 @@ pub fn transcribe_file_with_progress(
     }
     let duration = samples.len() as f64 / sample_rate as f64;
 
-    // 2. 启动子进程（如未运行）
-    let engine = global_engine();
-    engine.load().map_err(|e| e.to_string())?;
+    // 2. 引擎就绪：复用当前已加载引擎（任意框架）；无则按用户上次选择加载
+    let registry = crate::inference::registry::registry();
+    let engine = match registry.active_engine() {
+        Some(e) => e,
+        None => {
+            registry.load_requested_asr(&mut |_| {})?;
+            registry
+                .active_engine()
+                .ok_or_else(|| "ASR 引擎加载失败".to_string())?
+        }
+    };
 
     // 3. 转写：长音频自动分批（≤60s 单次，>60s 滑动窗口 60s+4s 重叠）
-    let adapter = LlamaAsrAdapter::new();
-    let text = transcribe_long(&adapter, &samples, sample_rate, on_progress)
+    let text = transcribe_long(engine.as_ref(), &samples, sample_rate, on_progress)
         .map_err(|e| e.to_string())?;
 
     // 4. 导出（txt/srt/vtt/json/lrc）——可选，指定导出目录才写文件
@@ -105,7 +112,7 @@ pub fn transcribe_file_with_progress(
     Ok(serde_json::json!({
         "text": text,
         "duration": (duration * 100.0).round() / 100.0,
-        "model": engine.model_name().unwrap_or(""),
+        "model": engine.current_model(),
         "saved_path": saved_path,
     }))
 }

@@ -3,7 +3,7 @@
 //! 提供同步方式从 Hugging Face Hub 下载模型文件。
 //! 代理：环境变量（HTTP_PROXY/HTTPS_PROXY/NO_PROXY，reqwest system-proxy 自动读取）
 //! 镜像：HFClientBuilder::endpoint() / HF_ENDPOINT
-//! Token：HF_TOKEN / HF_TOKEN_PATH / $HF_HOME/token（resolve_token 自动检索）
+//! Token：仅来自 config.json（huggingfaceToken），无环境变量路径
 //! 并发安全：写入环境变量 + 创建 HFClient 的整段受 ENV_SCOPE_LOCK 保护。
 
 use std::path::PathBuf;
@@ -47,9 +47,10 @@ impl DownloadConfig {
         self
     }
 
-    /// 从环境变量获取 Token
-    pub fn with_env_token(mut self) -> Self {
-        if let Ok(token) = std::env::var("HF_TOKEN") {
+    /// 从 config.json 读取 token（唯一来源，无 env 回退）；空 = 匿名
+    pub fn with_config_token(mut self) -> Self {
+        let token = crate::model_manager::config_token();
+        if !token.is_empty() {
             self.token = Some(token);
         }
         self
@@ -74,7 +75,7 @@ impl SyncDownloader {
         }
 
         // 显式端点优先，其次 HF_ENDPOINT，缺省 huggingface.co
-        // with_env_token 链也同时靠 HF_TOKEN/HF_TOKEN_PATH 环境生效
+        // token 已由 with_config_token 从 config.json 注入
         
         // 设置缓存目录
         if let Some(ref cache_dir) = config.cache_dir {
@@ -173,7 +174,7 @@ pub fn download_file_sync(
     filename: &str,
     token: Option<&str>,
 ) -> Result<PathBuf> {
-    let mut config = DownloadConfig::new(model_id, filename).with_env_token();
+    let mut config = DownloadConfig::new(model_id, filename).with_config_token();
 
     if let Some(t) = token {
         config = config.with_token(t);

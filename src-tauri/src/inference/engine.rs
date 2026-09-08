@@ -93,7 +93,7 @@ pub trait InferenceEngine: Send + Sync {
     fn is_loaded(&self) -> bool;
 
     /// 获取当前模型名称
-    fn model_name(&self) -> Option<&str>;
+    fn model_name(&self) -> Option<String>;
 
     /// 获取当前推理设备
     fn device(&self) -> Device;

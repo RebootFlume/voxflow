@@ -15,7 +15,7 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use serde_json::json;
 
-use crate::inference::llama_server::global_engine;
+use crate::inference::engine::AsrEngine;
 use crate::tts::traits::TtsEngine;
 
 // ─── 类型 ──────────────────────────────────────────────────────────────────
@@ -236,16 +236,30 @@ fn handle_asr(body: &[u8], content_type: &str) -> tiny_http::Response<Cursor<Vec
         return json_response(200, json!({"text": ""}));
     }
 
-    // 6. 确保 ASR 引擎已加载（未加载则启动 llama-server 子进程）
-    let engine = global_engine();
-    if !engine.is_loaded() {
-        if let Err(e) = engine.load() {
-            return json_response(
-                500,
-                error_json(500, &format!("ASR model load failed: {e}")),
-            );
+    // 6. 引擎就绪：复用当前已加载引擎（任意框架）；无则按用户上次选择加载
+    let engine = {
+        let registry = crate::inference::registry::registry();
+        match registry.active_engine() {
+            Some(e) => e,
+            None => {
+                if let Err(e) = registry.load_requested_asr(&mut |_| {}) {
+                    return json_response(
+                        500,
+                        error_json(500, &format!("ASR engine load failed: {e}")),
+                    );
+                }
+                match registry.active_engine() {
+                    Some(e) => e,
+                    None => {
+                        return json_response(
+                            500,
+                            error_json(500, "ASR engine load failed: no engine available"),
+                        )
+                    }
+                }
+            }
         }
-    }
+    };
 
     // 7. 转写（engine.transcribe 已剥 language Chinese<asr_text> 前缀）
     match engine.transcribe(&samples, sample_rate) {

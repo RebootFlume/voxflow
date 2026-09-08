@@ -39,7 +39,7 @@ ort = { version = "2.0.0-rc.13", features = ["directml"] }  # ONNX Runtime 1.28 
 llama-cpp-2 = "0.1"         # llama.cpp GGUF 推理
 
 # llama-server 子进程 + HTTP 桥接（ASR）
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "multipart", "json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "multipart", "json", "rustls-tls", "socks"] }
 tungstenite = "0.24"
 log = "0.4"                 # 轻量日志（llama_server 子进程状态输出）
 tiny_http = "0.12"

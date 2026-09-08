@@ -44,6 +44,51 @@ impl AsrFramework {
 }
 
 impl AsrRegistry {
+    /// 注册表 format → registry framework 标识。
+    /// 新增框架（如 PyTorch）只需在此加一个 match 分支 + 注册表引擎行。
+    pub fn framework_for_format(f: &crate::model_manager::ModelFormat) -> Option<&'static str> {
+        match f {
+            crate::model_manager::ModelFormat::Gguf => Some("gguf"),
+            crate::model_manager::ModelFormat::Onnx => Some("onnx"),
+        }
+    }
+
+    /// 按模型名从注册表解析 framework（模型存在性 + kind 校验）
+    pub fn framework_for_model(&self, name: &str) -> Result<&'static str, String> {
+        let info = crate::model_manager::find_model_info(name)
+            .ok_or_else(|| format!("未知模型: {name}"))?;
+        if info.kind() != "asr" {
+            return Err(format!("{name} 不是 ASR 模型"));
+        }
+        Self::framework_for_format(info.format())
+            .ok_or_else(|| format!("{name} 的格式缺少对应引擎"))
+    }
+
+    /// 按模型名加载 ASR（唯一权威路由：查注册表 format → 互斥 → 引擎加载）。
+    /// 所有入口（UI 切换 / 热键兜底 / 文件转写 / API）都走这里，保证互斥不被绕过。
+    pub fn load_asr_by_name(
+        &self,
+        name: &str,
+        device: &str,
+        on_stage: &mut dyn FnMut(&str),
+    ) -> Result<(&'static str, String), String> {
+        // 记录本次请求（任意框架）：兜底加载跟随用户当前选择
+        crate::inference::llama_server::record_last_requested(name, device);
+        let fw = self.framework_for_model(name)?;
+        self.load_model_with_stage(fw, name, device, on_stage)
+    }
+
+    /// 加载「最近一次被请求」的 ASR 模型（注册表路由，保证互斥）——热键/文件/API 兜底用。
+    /// 无任何请求记录时退回注册表默认模型。
+    pub fn load_requested_asr(
+        &self,
+        on_stage: &mut dyn FnMut(&str),
+    ) -> Result<(&'static str, String), String> {
+        let (name, device) = crate::inference::llama_server::last_requested_model()
+            .unwrap_or_else(|| ("Qwen3-ASR-0.6B".to_string(), "cuda".to_string()));
+        self.load_asr_by_name(&name, &device, on_stage)
+    }
+
     fn new() -> Self {
         Self {
             engines: vec![
@@ -98,12 +143,9 @@ impl AsrRegistry {
             .engine(framework)
             .ok_or_else(|| format!("未知框架: {framework}"))?;
 
-        // 2. 互斥：如果目标引擎已加载同模型 → 直接返回
-        if engine.is_loaded() && engine.current_model() == name {
-            return Ok((engine.framework(), engine.current_model()));
-        }
+        // 幂等判定交给引擎层（模型名相同≠设备/参数相同），注册表只负责互斥与路由。
 
-        // 3. 卸载其他框架的引擎（ASR 互斥：同一时间只一个）
+        // 2. 卸载其他框架的引擎（ASR 互斥：同一时间只一个）
         for (other_f, other_e) in &self.engines {
             if *other_f != framework && other_e.is_loaded() {
                 let _ = other_e.unload();
@@ -127,14 +169,20 @@ impl AsrRegistry {
             .engine(framework)
             .ok_or_else(|| format!("未知框架: {framework}"))?;
 
-        if engine.is_loaded() && engine.current_model() == name {
-            return Ok((engine.framework(), engine.current_model()));
-        }
+        // 注意：不做注册表层的"已加载同模型"短路 —— 模型名相同但设备/参数可能不同，
+        // 幂等与身份验证交给引擎层（llama：running_matches 校验 model+采样+启动参数；
+        // sherpa：模型+设备都相等才算幂等）。注册表只负责互斥与路由。
 
-        // 互斥：先卸载其他框架
+        // 互斥：先卸载其他框架（stage 带出被卸载的模型名，便于日志追踪切换流程）
         for (other_f, other_e) in &self.engines {
             if *other_f != framework && other_e.is_loaded() {
-                on_stage("unload");
+                let victim = other_e.current_model();
+                let stage = if victim.is_empty() {
+                    "unload".to_string()
+                } else {
+                    format!("unload:{victim}")
+                };
+                on_stage(&stage);
                 let _ = other_e.unload();
             }
         }

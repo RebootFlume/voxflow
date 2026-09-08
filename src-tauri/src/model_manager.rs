@@ -5,7 +5,7 @@
 //! - 代理：写入 HTTP(S)_PROXY + NO_PROXY=localhost,127.0.0.1，reqwest `system-proxy` 自动读取
 //!   `ENV_SCOPE_LOCK` 保证「写入环境变量 + build_sync」原子化，避免多线程并发建 Client 时的竞态。
 //! - 镜像：`HFClientBuilder::endpoint()` 显式设置；`HF_ENDPOINT` 环境变量兜底
-//! - Token：`HFClient::builder().token()` 显式传入，否则 `HF_TOKEN` / token 文件自动检索
+//! - Token：仅来自 config.json 的 huggingfaceToken（bootstrap 注入 CONFIG），无 env 回退
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -248,6 +248,8 @@ struct RuntimeConfig {
     model_root: PathBuf,
     mirror: String,
     proxy: String,
+    /// HF 下载 token（config.json 可见可管；空 = 匿名/回退 env）
+    token: String,
 }
 
 fn default_model_root() -> PathBuf {
@@ -262,6 +264,7 @@ static CONFIG: once_cell::sync::Lazy<RwLock<RuntimeConfig>> =
             model_root: default_model_root(),
             mirror: String::new(),
             proxy: String::new(),
+            token: String::new(),
         })
     });
 
@@ -322,6 +325,13 @@ pub fn set_proxy(proxy: &str) -> String {
     p
 }
 
+pub fn set_token(token: &str) -> String {
+    let t = token.trim().to_string();
+    let mut cfg = CONFIG.write();
+    cfg.token = t.clone();
+    t
+}
+
 pub fn get_model_root() -> PathBuf {
     CONFIG.read().model_root.clone()
 }
@@ -330,6 +340,11 @@ pub fn get_mirror() -> String {
 }
 pub fn get_proxy() -> String {
     CONFIG.read().proxy.clone()
+}
+/// HF 下载 token：唯一来源 = config.json 的 models.huggingfaceToken（经 bootstrap 进入 CONFIG）。
+/// 空 = 匿名下载（不设 token）。不读任何环境变量——删除软件无残留，配置只此一处。
+pub fn config_token() -> String {
+    CONFIG.read().token.trim().to_string()
 }
 pub fn model_dir(name: &str) -> PathBuf {
     resolve_download_dir(&get_model_root(), name)
@@ -709,11 +724,11 @@ impl ProgressHandler for IpcProgress {
 }
 
 fn build_client_sync() -> Result<hf_hub::HFClientSync, String> {
-    let (mirror, proxy, token) = {
+    let (mirror, proxy) = {
         let cfg = CONFIG.read();
-        let tok = std::env::var("HF_TOKEN").ok();
-        (cfg.mirror.clone(), cfg.proxy.clone(), tok)
+        (cfg.mirror.clone(), cfg.proxy.clone())
     };
+    let token = crate::model_manager::config_token();
     let _env_guard = ENV_SCOPE_LOCK.lock();
     apply_proxy_env(&proxy);
     apply_mirror_env(&mirror);
@@ -721,8 +736,9 @@ fn build_client_sync() -> Result<hf_hub::HFClientSync, String> {
     if !mirror.trim().is_empty() {
         builder = builder.endpoint(mirror.trim());
     }
-    if let Some(t) = token.as_deref().filter(|s| !s.trim().is_empty()) {
-        builder = builder.token(t.trim());
+    let t = token.trim();
+    if !t.is_empty() {
+        builder = builder.token(t);
     }
     builder.build_sync().map_err(|e| e.to_string())
 }
@@ -879,6 +895,11 @@ fn download_github_release(
     // 写临时文件 + tar xjf 解压
     let tmp_bz2 = dest.join("_download.tar.bz2");
     std::fs::write(&tmp_bz2, &buf).map_err(|e| format!("write tmp: {e}"))?;
+    // 解压阶段：发"解压中"事件（进度无百分比，防 UI 停在 100% 像卡死）
+    let _ = app.emit(
+        "sidecar://event",
+        json!({ "status": "model_download_extracting", "model": model_name }),
+    );
     eprintln!("[download] extracting {} bytes to {}", buf.len(), dest.display());
     // 解压：7z → bsdtar（System32 全路径）→ tar 回退（避免 GNU tar 把 D: 当远程主机）
     crate::inference::runtime_download::extract_archive(&tmp_bz2, dest)?;

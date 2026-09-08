@@ -29,6 +29,7 @@ fn test_config() -> LlamaServerConfig {
         parallel: 1,
         temperature: 0.0,
         no_webui: true,
+        mmproj_offload: true,
     }
 }
 
