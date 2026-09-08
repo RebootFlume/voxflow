@@ -275,6 +275,51 @@ src-tauri/src/audio/
 
 ---
 
+### 规则 13：发版流程（严格遵循，禁止另起炉灶）
+
+**版本号单一事实源 = `package.json` 的 `version` 字段**。禁止在代码/脚本里硬编码版本号。
+
+#### 命令一览
+
+| 命令 | 用途 |
+|---|---|
+| `npm run bundle` | **仅打包本地验证**（不推送不上传）：产 `dist-bundle/VoxFlow-Portable-<ver>.zip` + `VoxFlow-Setup-<ver>.exe` |
+| `npm run bundle:portable` | 只打便携版 zip（本地快速验证） |
+| `npm run version:sync` | 把 package.json 的版本分发到 tauri.conf.json / Cargo.toml / Cargo.lock |
+| `npm run release` | **一键正式发版**：校验版本一致 → bundle → git push → gh release + 上传资产 |
+
+#### 正式发版流程（vX.Y.Z 示例）
+
+```
+1. 编辑 package.json 的 "version" 为 "0.4.0"   ← 唯一手改点（文件，不是命令参数）
+2. npm run version:sync                        ← 同步其余三处
+3. npm run release                             ← 打包+推送+建 release+传资产
+```
+
+#### 命名规则（必须与历史队列一致）
+
+| 位置 | 格式 | 示例 |
+|---|---|---|
+| package.json / tauri.conf.json / Cargo.toml | `X.Y.Z`（无 v） | `0.4.0` |
+| git tag / release tag | `vX.Y.Z`（带 v） | `v0.4.0` |
+| release 标题 | 纯 `vX.Y.Z`（不带产品名前缀） | `v0.4.0` |
+| 资产文件名 | `VoxFlow-Portable-X.Y.Z.zip` / `VoxFlow-Setup-X.Y.Z.exe`（无 v） | `VoxFlow-Portable-0.4.0.zip` |
+
+#### 禁止事项
+
+- ❌ 禁止在命令里敲版本号作为唯一设置方式（改 package.json 文件 + version:sync）
+- ❌ 禁止在 UI/代码里硬编码版本号（前端用 `__APP_VERSION__`，vite 构建注入）
+- ❌ 禁止改动远程已存在的 release（v0.1.0 / v0.2.0 / v0.3.x / runtime-assets 保持原样）
+- ❌ 禁止改资产命名规则（无 v 前缀；v0.2.0 那次带 -v 是跑偏，勿模仿）
+- ❌ 禁止手动分别改 4 处版本号（会漏 → 用 version:sync）
+- ❌ 禁止给 release 标题加产品名前缀（纯版本号）
+
+#### 本地验证（非发版）
+
+只打包不上传：`npm run bundle`（产物在 dist-bundle/，已 gitignore）。验证 UI 版本号应显示 `vX.Y.Z`（构建注入自动）。
+
+---
+
 ## 📋 开发流程
 
 1. **开发前**：阅读 `README.md` 了解项目架构
