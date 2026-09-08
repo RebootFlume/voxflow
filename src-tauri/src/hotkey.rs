@@ -73,11 +73,12 @@ fn start_capture_worker(app: AppHandle) {
                             match registry.active_engine() {
                                 Some(engine) => engine.transcribe(&samples, 16_000),
                                 None => {
-                                    // 无已加载引擎：自动拉起默认 llama-server（幂等）
+                                    // 无已加载引擎：自动拉起「用户最近一次选择」的 llama-server
+                                    // （load_requested 跟随 UI 选择，不再硬编码 0.6B）
                                     let engine = crate::inference::llama_server::global_engine();
-                                    match engine.load() {
+                                    match crate::inference::llama_server::load_requested() {
                                         Err(e) => Err(format!("引擎启动失败: {e}")),
-                                        Ok(()) => engine
+                                        Ok(_) => engine
                                             .transcribe(&samples, 16_000)
                                             .map_err(|e| e.to_string()),
                                     }
@@ -87,6 +88,9 @@ fn start_capture_worker(app: AppHandle) {
                         let engine_name = registry.active_framework();
                         match result {
                             Ok(text) => {
+                                // 上屏前清理句尾标点（对齐 CapsWriter trash_punc：
+                                // 语音输入尾巴不挂 。，但保留 ？！ 等有语义的标点）
+                                let text = strip_trailing_punct(&text);
                                 // 上屏：写剪贴板 + Ctrl+V 粘贴到鼠标光标处
                                 if let Err(e) = crate::clipboard::paste_text(&text) {
                                     eprintln!("[hotkey] paste error: {e}");
@@ -103,6 +107,13 @@ fn start_capture_worker(app: AppHandle) {
                                 }));
                             }
                             Err(e) => {
+                                // 失败时记录详细诊断（哪个引擎 + 加载状态 + 端口），供排障
+                                let llama_loaded = crate::inference::llama_server::global_engine().is_loaded();
+                                let sherpa_loaded = crate::inference::sherpa_asr::global_engine().is_loaded();
+                                let llama_port = crate::inference::llama_server::global_engine().current_port();
+                                log::warn!(
+                                    "[hotkey] 转写失败: {e} | active_framework={engine_name} llama_loaded={llama_loaded}(port {llama_port}) sherpa_loaded={sherpa_loaded}"
+                                );
                                 let _ = app2.emit("sidecar://event", serde_json::json!({
                                     "status": "recognition_error",
                                     "error": format!("转写失败: {e}"),
@@ -195,4 +206,54 @@ pub fn register_combo(app: &AppHandle, hotkey_str: &str) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+/// 清理识别文本的句尾标点（对齐 CapsWriter `trash_punc = '，。,。'` 语义）：
+/// 文本 >1 字且末字符属于 {， 。 , .} 时去掉它；`？！…` 等有语义的标点保留。
+/// 语音输入场景下，模型常在句尾补一个。，粘贴上屏后影响后续输入。
+fn strip_trailing_punct(text: &str) -> String {
+    const TRASH: &[char] = &['，', '。', ',', '.'];
+    let mut s = text.trim_end().to_string();
+    if s.chars().count() > 1 {
+        if let Some(last) = s.chars().last() {
+            if TRASH.contains(&last) {
+                s.pop();
+            }
+        }
+    }
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_trailing_period() {
+        assert_eq!(strip_trailing_punct("好了，满意了。"), "好了，满意了");
+        assert_eq!(strip_trailing_punct("今天下午三点开会。"), "今天下午三点开会");
+        assert_eq!(strip_trailing_punct("好的,"), "好的");
+    }
+
+    #[test]
+    fn keep_semantic_trailing_punct() {
+        // 问句/感叹/省略号保留
+        assert_eq!(strip_trailing_punct("你在吗？"), "你在吗？");
+        assert_eq!(strip_trailing_punct("太好了！"), "太好了！");
+        assert_eq!(strip_trailing_punct("然后……"), "然后……");
+    }
+
+    #[test]
+    fn keep_single_char_and_interior_punct() {
+        // 单字标点整体不上屏清理（CapsWriter: (?<=.) 前置条件）
+        assert_eq!(strip_trailing_punct("。"), "。");
+        // 句中标点不动
+        assert_eq!(strip_trailing_punct("会议，讨论。"), "会议，讨论");
+    }
+
+    #[test]
+    fn strip_only_one_trailing() {
+        // CapsWriter 用 re.sub($) 只删 1 个
+        assert_eq!(strip_trailing_punct("完了。。"), "完了。");
+    }
 }
