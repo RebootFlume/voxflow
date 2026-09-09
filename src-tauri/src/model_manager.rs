@@ -299,18 +299,29 @@ fn apply_mirror_env(endpoint: &str) {
     }
 }
 
+/// 设置模型根（运行时 CONFIG）。接受：
+///   - 绝对路径（数据根外，用户自选外部目录）→ 原样
+///   - 相对路径（如 "models" / "模型库B"）→ 相对数据根解析为绝对
+/// 相对路径禁止 ".." 逃逸（防 config 手改跳出数据根）。无存在性校验（空目录合法）。
+/// 返回解析后的绝对路径（调用方用于事件回传/展示）。
 pub fn set_model_root(path: &str) -> Result<PathBuf, String> {
+    use std::path::Component;
     let p = PathBuf::from(path.trim());
     if p.as_os_str().is_empty() {
         return Err("model root is empty".into());
     }
-    if !p.is_absolute() {
-        return Err(format!("model root must be absolute: {}", p.display()));
-    }
-    std::fs::create_dir_all(&p).map_err(|e| e.to_string())?;
+    let abs = if p.is_absolute() {
+        p
+    } else {
+        // 相对路径 → 相对数据根解析；".." 逃逸拒绝
+        if p.components().any(|c| matches!(c, Component::ParentDir)) {
+            return Err(format!("model root 相对路径禁止 .. 逃逸: {}", p.display()));
+        }
+        crate::data_root::get_data_root_raw().join(p)
+    };
     let mut cfg = CONFIG.write();
-    cfg.model_root = p.clone();
-    Ok(p)
+    cfg.model_root = abs.clone();
+    Ok(abs)
 }
 
 pub fn set_mirror(endpoint: &str) {

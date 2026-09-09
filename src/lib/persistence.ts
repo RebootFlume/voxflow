@@ -63,6 +63,13 @@ export async function loadConfig() {
 export async function saveConfig() {
   try {
     const state = useAppStore.getState();
+    // modelRoot 落盘转「存储形式」：数据根内 → 相对（换目录/改名自动跟随），外部 → 绝对。
+    // 运行时 store 始终持有绝对路径（Rust 事件回传），仅落盘瞬间转换。
+    const storageRoot = state.models.modelRoot
+      ? await invoke<string>("rust_storage_model_root", { root: state.models.modelRoot }).catch(
+          () => state.models.modelRoot,
+        )
+      : "models";
     const config = {
       asr: { hotkey: state.asr.hotkey, model: state.asr.model, device: state.asr.device, framework: state.asr.framework },
       tts: state.tts,
@@ -71,7 +78,7 @@ export async function saveConfig() {
       overlay: state.overlay,
       theme: state.theme,
       locale: state.locale,
-      models: { modelRoot: state.models.modelRoot, mirror: state.models.mirror, proxy: state.models.proxy, huggingfaceToken: state.models.huggingfaceToken },
+      models: { modelRoot: storageRoot, mirror: state.models.mirror, proxy: state.models.proxy, huggingfaceToken: state.models.huggingfaceToken },
       useRustEngine: state.useRustEngine,
     };
     await saveData("config.json", JSON.stringify(config, null, 2));

@@ -999,6 +999,7 @@ pub fn run() {
             rust_verify_runtime,
             get_data_root_info,
             download_runtime,
+            crate::data_root::rust_storage_model_root,
             tts::commands::rust_load_tts_model,
             tts::commands::rust_synthesize,
             tts::commands::rust_set_tts_language,
