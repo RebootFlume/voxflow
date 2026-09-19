@@ -3,9 +3,12 @@
 //! libs/ 是推理引擎二进制（llama-server / sherpa-onnx），与 exe 同级存放。
 //! 首次启动/框架缺失时，从 GitHub release 下载压缩包 → 解压到 exe 旁 libs/。
 //!
-//! 下载复用模型下载的机制：代理 env + reqwest + tar 解压。
+//! 下载统一走 `crate::net`（流式落盘 + 断点续传 + 重试 + 取消），代理经 env 单一来源。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use serde_json::json;
 use tauri::Emitter;
@@ -143,19 +146,6 @@ pub fn libs_root() -> PathBuf {
 /// 某个框架的 libs 目录
 fn pkg_dir(pkg: &RuntimePkg) -> PathBuf {
     libs_root().join(pkg.target_dir)
-}
-
-/// 从 URL 提取真实压缩包扩展名（如 "tar.bz2" / "zip"），供 tmp 命名与解压分支
-fn url_extension(url: &str) -> String {
-    let file = url.rsplit('/').next().unwrap_or(url);
-    let lower = file.to_lowercase();
-    for ext in [".tar.bz2", ".tar.gz", ".tgz", ".zip", ".tar"] {
-        if lower.ends_with(ext) {
-            return ext.trim_start_matches('.').to_string();
-        }
-    }
-    // 兜底：最后一段扩展
-    file.rsplit('.').next().unwrap_or("zip").to_string()
 }
 
 /// 检测框架是否已安装（与推理启动共用同一路径解析：能找到启动 exe = 已下载）
@@ -308,6 +298,43 @@ fn http_size(client: &reqwest::blocking::Client, url: &str, label: &str) -> Resu
     Ok(resp.content_length().unwrap_or(0))
 }
 
+/// 下载中的框架（framework → 取消标志）；同一框架同时只允许一个下载
+static ACTIVE_RUNTIME: once_cell::sync::Lazy<parking_lot::Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(HashMap::new()));
+
+/// 请求取消某框架的进行中下载（仅下载阶段可中断；解压阶段不可中断）
+pub fn request_cancel_runtime(framework: &str) -> bool {
+    if let Some(flag) = ACTIVE_RUNTIME.lock().get(framework) {
+        flag.store(true, Ordering::SeqCst);
+        return true;
+    }
+    false
+}
+
+/// 注册句柄：任意返回路径（含 `?` 提前返回）都会摘除注册，防"卡在下载中"的假状态
+struct ActiveGuard(&'static str);
+
+impl ActiveGuard {
+    fn register(framework: &'static str, flag: Arc<AtomicBool>) -> Result<Self, String> {
+        let mut active = ACTIVE_RUNTIME.lock();
+        if active.contains_key(framework) {
+            return Err(format!("{framework} 已在下载中"));
+        }
+        active.insert(framework.to_string(), flag);
+        Ok(Self(framework))
+    }
+}
+
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        ACTIVE_RUNTIME.lock().remove(self.0);
+    }
+}
+
+/// 下载一个包到 `out`，进度映射到 `[span_start, span_end]`（多包合并为一条 0→100）
+///
+/// 传输交给 `crate::net`（流式 + 断点续传 + 重试 + 取消），本函数只做区间映射。
+#[allow(clippy::too_many_arguments)]
 fn download_to_file(
     client: &reqwest::blocking::Client,
     app: &tauri::AppHandle,
@@ -317,64 +344,41 @@ fn download_to_file(
     out: &std::path::Path,
     span_start: u32,
     span_end: u32,
+    cancel: &AtomicBool,
 ) -> Result<(), String> {
-    use std::io::{Read, Write};
-    if let Some(parent) = out.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create dir {}: {e}", parent.display()))?;
-    }
-    let mut resp = client
-        .get(url)
-        .send()
-        .map_err(|e| format!("HTTP GET failed ({label}): {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {} from {url}", resp.status()));
-    }
-    let total = resp.content_length().unwrap_or(0);
     log::info!(
-        "[framework] 下载 {label}: {}（{:.1} MB）",
-        url.rsplit('/').next().unwrap_or(url),
-        total as f64 / 1024.0 / 1024.0
+        "[framework] 下载{label}: {}",
+        url.rsplit('/').next().unwrap_or(url)
     );
-    let mut file = std::fs::File::create(out)
-        .map_err(|e| format!("create tmp file {}: {e}", out.display()))?;
-    let mut downloaded: u64 = 0;
-    let mut last_emit = std::time::Instant::now();
-    let mut chunk = vec![0u8; 64 * 1024];
-    loop {
-        let n = resp
-            .read(&mut chunk)
-            .map_err(|e| format!("read error ({label}): {e}"))?;
-        if n == 0 {
-            break;
-        }
-        file.write_all(&chunk[..n])
-            .map_err(|e| format!("write error ({label}): {e}"))?;
-        downloaded += n as u64;
-        if last_emit.elapsed().as_millis() > 500 {
-            let pct = if total > 0 {
-                let f = downloaded as f64 / total as f64; // 0..1
-                span_start + ((span_end - span_start) as f64 * f) as u32
-            } else {
-                span_start
-            };
-            let _ = app.emit(
-                "sidecar://event",
-                json!({
-                    "status": "runtime_download_progress",
-                    "framework": framework,
-                    "progress": pct,
-                    "downloaded": downloaded,
-                    "total": total,
-                }),
-            );
-            last_emit = std::time::Instant::now();
-        }
-    }
-    let _ = app.emit(
-        "sidecar://event",
-        json!({ "status": "runtime_download_progress", "framework": framework, "progress": span_end }),
-    );
+    let on_progress = |downloaded: u64, total: Option<u64>| {
+        let pct = match total {
+            Some(t) if t > 0 => {
+                let f = downloaded as f64 / t as f64;
+                span_start + ((span_end.saturating_sub(span_start)) as f64 * f) as u32
+            }
+            // 大小未知：停在区间起点（只更新字节数）；完成时 net 补 (n, Some(n)) → 落到 span_end
+            _ => span_start,
+        };
+        let _ = app.emit(
+            "sidecar://event",
+            json!({
+                "status": "runtime_download_progress",
+                "framework": framework,
+                "progress": pct,
+                "downloaded": downloaded,
+                "total": total.unwrap_or(0),
+            }),
+        );
+    };
+    crate::net::download(
+        client,
+        &crate::net::Download {
+            url,
+            dest: out,
+            on_progress: Some(&on_progress),
+            cancel: Some(cancel),
+        },
+    )?;
     Ok(())
 }
 
@@ -395,6 +399,10 @@ pub fn download_runtime(app: &tauri::AppHandle, framework: &str) -> Result<(), S
     if is_runtime_installed(pkg) {
         return Ok(()); // 已安装（含 aux 运行库校验）
     }
+
+    // 取消注册（任意返回路径自动摘除）；同一框架同时只允许一个下载
+    let cancel = Arc::new(AtomicBool::new(false));
+    let _active = ActiveGuard::register(pkg.framework, cancel.clone())?;
 
     // 目标目录 = runtime_dir_for(pkg)（与完整性校验同一解析：llama/sherpa 都按 exe 旁 libs）
     let dest = runtime_dir_for(pkg);
@@ -430,27 +438,47 @@ pub fn download_runtime(app: &tauri::AppHandle, framework: &str) -> Result<(), S
 
     // 2. 下载：主包 + 附件（同一函数），进度合并为一条 0→100
     //    先 HEAD 拿两文件大小算权重，避免"每文件独立 0→100"进度条反复回跳
-    let ext = url_extension(pkg.url);
-    let main_arch = tmp.join(format!("main.{ext}"));
-    let aux_arch = pkg.aux_url.map(|aux| {
-        let ext = url_extension(aux);
-        tmp.join(format!("aux.{ext}"))
-    });
-    let main_size = http_size(&client, pkg.url, "主程序")?;
-    let aux_size = match &pkg.aux_url {
-        Some(u) => http_size(&client, u, "附加运行库")?,
-        None => 0u64,
-    };
-    let total = main_size + aux_size;
+    let main_arch = tmp.join(format!("main.{}", crate::net::url_suffix(pkg.url)));
+    let aux_arch = pkg
+        .aux_url
+        .map(|aux| tmp.join(format!("aux.{}", crate::net::url_suffix(aux))));
+    // 大小只用于进度权重：HEAD 失败不阻断下载（退化为"主包独占 0..100"）
+    let main_size = http_size(&client, pkg.url, "主程序").ok();
+    let aux_size = pkg
+        .aux_url
+        .and_then(|u| http_size(&client, u, "附加运行库").ok());
+    let merged = main_size.is_some() && (pkg.aux_url.is_none() || aux_size.is_some());
+    if !merged {
+        log::warn!("[framework] {} 大小探测失败：进度条按主包单包区间显示", pkg.name);
+    }
+    let total = main_size.unwrap_or(0) + aux_size.unwrap_or(0);
     // 主包占 [0, main_end]，附件占 [main_end, 100]
-    let main_end = if total > 0 {
-        (main_size as f64 / total as f64 * 100.0) as u32
+    let main_end = if merged && total > 0 {
+        (main_size.unwrap_or(0) as f64 / total as f64 * 100.0) as u32
     } else {
         100
     };
-    download_to_file(&client, app, pkg.url, pkg.framework, "主程序", &main_arch, 0, main_end)?;
+
+    // 磁盘预检：归档与解压产物在解压期间并存 ≈ 2× 下载量（大小探测失败的包不参与）
+    let need = (main_size.unwrap_or(0) + aux_size.unwrap_or(0)) * 2;
+    if need > 0 {
+        if let Some(free) = crate::model_manager::free_bytes_for_dir(&root) {
+            if free < need {
+                let _ = std::fs::remove_dir_all(&tmp);
+                return Err(format!(
+                    "磁盘空间不足：需要约 {:.1}GB，剩余 {:.1}GB",
+                    need as f64 / 1024f64.powi(3),
+                    free as f64 / 1024f64.powi(3)
+                ));
+            }
+        }
+    }
+
+    download_to_file(&client, app, pkg.url, pkg.framework, "主程序", &main_arch, 0, main_end, &cancel)?;
     if let Some(path) = &aux_arch {
-        download_to_file(&client, app, pkg.aux_url.unwrap(), pkg.framework, "附加运行库", path, main_end, 100)?;
+        // 大小未知时附件区间退化为 [100,100]（只报字节，不回退进度条）
+        let (s, e) = if merged { (main_end, 100) } else { (100, 100) };
+        download_to_file(&client, app, pkg.aux_url.unwrap(), pkg.framework, "附加运行库", path, s, e, &cancel)?;
     }
 
     // 3. 解压（主包/附件独立目录；解压无进度，发"解压中"状态防 UI 假卡死）

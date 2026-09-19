@@ -334,11 +334,12 @@ fn walkdir_size(dir: &Path) -> u64 {
     total
 }
 
+/// 指定目录所在卷的可用字节（Windows；其他平台 None = 不做预检）
 #[cfg(windows)]
-fn free_bytes_for_root() -> Option<u64> {
+pub fn free_bytes_for_dir(path: &Path) -> Option<u64> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
-    let root = get_model_root();
+    let root = path;
     // 取盘符根目录，如 D:\
     let drive = root
         .ancestors()
@@ -359,8 +360,12 @@ fn free_bytes_for_root() -> Option<u64> {
     if ok != 0 { Some(free) } else { None }
 }
 #[cfg(not(windows))]
-fn free_bytes_for_root() -> Option<u64> {
+pub fn free_bytes_for_dir(_path: &Path) -> Option<u64> {
     None
+}
+
+fn free_bytes_for_root() -> Option<u64> {
+    free_bytes_for_dir(&get_model_root())
 }
 
 // ── 下载管理 ──
@@ -402,11 +407,12 @@ pub fn start_download(app: AppHandle, name: &str) -> Result<(), String> {
         }
     }
     if let Some(free) = free_bytes_for_root() {
-        let need = (spec.size_gb * 1024f64.powi(3)) as u64;
+        // 峰值 = 下载归档 + 解压产物（解压期间两者并存）≈ 2× 模型体积
+        let need_gb = spec.size_gb * 2.0;
+        let need = (need_gb * 1024f64.powi(3)) as u64;
         if free < need {
             return Err(format!(
-                "disk full: need ~{}GB, free {:.1}GB",
-                spec.size_gb,
+                "disk full: need ~{need_gb:.1}GB, free {:.1}GB",
                 free as f64 / 1024f64.powi(3)
             ));
         }
@@ -442,6 +448,16 @@ pub fn delete_model(name: &str) -> Result<u64, String> {
         return Err(format!("downloading: {name}"));
     }
     let root = get_model_root();
+    // 顺带清理该模型的下载临时物（`.tmp/<name>.*`：中断留下的 .part / 解压失败的归档）
+    let tmp_dir = root.join(".tmp");
+    if let Ok(entries) = std::fs::read_dir(&tmp_dir) {
+        let prefix = format!("{name}.");
+        for e in entries.flatten() {
+            if e.file_name().to_string_lossy().starts_with(&prefix) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
     // 删除目标目录：优先引擎目录名，同时兼容旧布局展示名残留（如 Kokoro-v1_1）
     let dir = resolve_download_dir(&root, name);
     let legacy_dir = root.join(name);
@@ -669,7 +685,7 @@ fn run_download(app: AppHandle, spec: &'static crate::tts::spec::ModelSpec, canc
                     "sidecar://event",
                     json!({ "status": "model_download_progress", "model": name.clone(), "progress": 0u32 }),
                 );
-                match download_single_file(url, &extra_dest, extra.dest_rel, &app, &cancel) {
+                match download_single_file(url, &extra_dest, &name, &app, &cancel) {
                     Ok(()) => eprintln!("[download] extra file downloaded: {}", extra_dest.display()),
                     Err(e) => eprintln!("[download] extra file download failed: {e}"),
                 }
@@ -703,7 +719,10 @@ fn run_download(app: AppHandle, spec: &'static crate::tts::spec::ModelSpec, canc
     emit_models_state(&app);
 }
 
-/// 从 GitHub releases 下载 tar.bz2 并解压到目标目录
+/// 从 GitHub releases 下载归档并解压到目标目录
+///
+/// 归档落在 `<模型根>/.tmp/`（与模型目录分离）：解压成功后删除；解压失败保留，
+/// 重跑时 `net` 见归档已存在即跳过下载、只重试解压；中断则留 `<arch>.part` 供续传。
 fn download_github_release(
     url: &str,
     dest: &Path,
@@ -711,74 +730,106 @@ fn download_github_release(
     app: &AppHandle,
     cancel: &AtomicBool,
 ) -> Result<PathBuf, String> {
-    use std::io::Read;
-    let proxy = { CONFIG.read().proxy.clone() };
-    let _env_guard = ENV_SCOPE_LOCK.lock();
-    apply_proxy_env(&proxy);
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(3600))
-        .build()
-        .map_err(|e| format!("HTTP client build failed: {e}"))?;
-    let mut resp = client.get(url).send().map_err(|e| format!("HTTP GET failed: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {} from {}", resp.status(), url));
-    }
-    let total = resp.content_length().unwrap_or(0);
-    let mut downloaded: u64 = 0;
-    let mut buf = Vec::with_capacity(total as usize);
-    let mut last_emit = std::time::Instant::now();
-    let mut chunk = vec![0u8; 64 * 1024];
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            return Err("__CANCELLED__".into());
-        }
-        let n = resp.read(&mut chunk).map_err(|e| format!("read error: {e}"))?;
-        if n == 0 { break; }
-        buf.extend_from_slice(&chunk[..n]);
-        downloaded += n as u64;
-        if last_emit.elapsed().as_millis() > 500 {
-            let pct = if total > 0 { (downloaded as f64 / total as f64 * 100.0) as u32 } else { 0 };
-            let _ = app.emit(
-                "sidecar://event",
-                json!({ "status": "model_download_progress", "model": model_name, "progress": pct, "downloaded": downloaded, "total": total }),
-            );
-            last_emit = std::time::Instant::now();
-        }
-    }
-    let _ = app.emit(
-        "sidecar://event",
-        json!({ "status": "model_download_progress", "model": model_name, "progress": 100u32 }),
-    );
-    // 写临时文件 + tar xjf 解压
-    let tmp_bz2 = dest.join("_download.tar.bz2");
-    std::fs::write(&tmp_bz2, &buf).map_err(|e| format!("write tmp: {e}"))?;
+    let client = build_download_client()?;
+    let tmp_dir = get_model_root().join(".tmp");
+    let arch = tmp_dir.join(format!("{model_name}.{}", crate::net::url_suffix(url)));
+    let on_progress = download_progress_emitter(app.clone(), model_name);
+    crate::net::download(
+        &client,
+        &crate::net::Download {
+            url,
+            dest: &arch,
+            on_progress: Some(&on_progress),
+            cancel: Some(cancel),
+        },
+    )?;
+
     // 解压阶段：发"解压中"事件（进度无百分比，防 UI 停在 100% 像卡死）
     let _ = app.emit(
         "sidecar://event",
         json!({ "status": "model_download_extracting", "model": model_name }),
     );
-    eprintln!("[download] extracting {} bytes to {}", buf.len(), dest.display());
-    // 解压：7z → bsdtar（System32 全路径）→ tar 回退（避免 GNU tar 把 D: 当远程主机）
-    crate::inference::runtime_download::extract_archive(&tmp_bz2, dest)?;
-    let _ = std::fs::remove_file(&tmp_bz2);
-    // tar 解压后：把模型文件从子目录移到 dest 根
-    // GitHub tarball 通常是 `sherpa-onnx-xxx/model.onnx` 格式
-    // 需要移到 `dest/model.onnx`
+    if let Err(e) = crate::inference::runtime_download::extract_archive(&arch, dest) {
+        // 保留归档：重跑只重试解压，不重新下载
+        return Err(e);
+    }
+    let _ = std::fs::remove_file(&arch);
+    flatten_tarball_subdir(dest)?;
+    Ok(dest.to_path_buf())
+}
+
+/// 下载单个文件（不解压，用于 vocoder 等附加文件）；带与其他模型下载一致的进度事件
+fn download_single_file(
+    url: &str,
+    dest: &Path,
+    model_name: &str,
+    app: &AppHandle,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    let client = build_download_client()?;
+    let on_progress = download_progress_emitter(app.clone(), model_name);
+    crate::net::download(
+        &client,
+        &crate::net::Download {
+            url,
+            dest,
+            on_progress: Some(&on_progress),
+            cancel: Some(cancel),
+        },
+    )?;
+    Ok(())
+}
+
+/// 下载用 reqwest 客户端（同一超时与代理口径；代理经 env + CONFIG 单一来源）
+fn build_download_client() -> Result<reqwest::blocking::Client, String> {
+    let proxy = { CONFIG.read().proxy.clone() };
+    let _env_guard = ENV_SCOPE_LOCK.lock();
+    apply_proxy_env(&proxy);
+    reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(3600))
+        .build()
+        .map_err(|e| format!("HTTP client build failed: {e}"))
+}
+
+/// 模型下载进度事件发射器（`downloaded/total` 与 backend 现约定一致）
+fn download_progress_emitter(app: AppHandle, model_name: &str) -> impl Fn(u64, Option<u64>) {
+    let model_name = model_name.to_string();
+    move |downloaded: u64, total: Option<u64>| {
+        let pct = match total {
+            Some(t) if t > 0 => (downloaded as f64 / t as f64 * 100.0) as u32,
+            _ => 0,
+        };
+        let _ = app.emit(
+            "sidecar://event",
+            json!({
+                "status": "model_download_progress",
+                "model": model_name.as_str(),
+                "progress": pct,
+                "downloaded": downloaded,
+                "total": total.unwrap_or(0),
+            }),
+        );
+    }
+}
+
+/// GitHub tarball 解压后通常多一层目录（`sherpa-onnx-xxx/model.onnx`）→ 移到 `dest` 根
+fn flatten_tarball_subdir(dest: &Path) -> Result<(), String> {
     let entries: Vec<_> = std::fs::read_dir(dest)
         .map_err(|e| format!("read_dir: {e}"))?
         .filter_map(|e| e.ok())
         .collect();
-    // 找到包含 .onnx 文件的子目录（忽略 README.md 等杂项）
     for entry in &entries {
-        if !entry.path().is_dir() { continue; }
+        if !entry.path().is_dir() {
+            continue;
+        }
         let sub = entry.path();
         let has_onnx = std::fs::read_dir(&sub)
-            .map(|rd| rd.filter_map(|e| e.ok()).any(|e| {
-                e.path().extension().map(|x| x == "onnx").unwrap_or(false)
-            }))
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .any(|e| e.path().extension().map(|x| x == "onnx").unwrap_or(false))
+            })
             .unwrap_or(false);
         if has_onnx {
-            // 把子目录里的所有文件移到 dest
             for f in std::fs::read_dir(&sub).map_err(|e| format!("read_dir sub: {e}"))? {
                 let f = f.map_err(|e| e.to_string())?;
                 let target = dest.join(f.file_name());
@@ -788,38 +839,6 @@ fn download_github_release(
             break;
         }
     }
-    Ok(dest.to_path_buf())
-}
-
-/// 下载单个文件（不解压，用于 vocoder 等依赖）
-fn download_single_file(
-    url: &str,
-    dest: &Path,
-    _label: &str,
-    _app: &AppHandle,
-    cancel: &AtomicBool,
-) -> Result<(), String> {
-    use std::io::Read;
-    let proxy = { CONFIG.read().proxy.clone() };
-    let _env_guard = ENV_SCOPE_LOCK.lock();
-    apply_proxy_env(&proxy);
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(600))
-        .build()
-        .map_err(|e| format!("HTTP client: {e}"))?;
-    let mut resp = client.get(url).send().map_err(|e| format!("HTTP GET: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()));
-    }
-    let mut buf = Vec::new();
-    let mut chunk = vec![0u8; 64 * 1024];
-    loop {
-        if cancel.load(Ordering::Relaxed) { return Err("__CANCELLED__".into()); }
-        let n = resp.read(&mut chunk).map_err(|e| format!("read: {e}"))?;
-        if n == 0 { break; }
-        buf.extend_from_slice(&chunk[..n]);
-    }
-    std::fs::write(dest, &buf).map_err(|e| format!("write: {e}"))?;
     Ok(())
 }
 

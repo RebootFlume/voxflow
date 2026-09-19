@@ -8,7 +8,7 @@ mod app_state;
 #[allow(unused_imports)]
 pub mod clipboard;
 #[allow(unused_imports)]
-pub mod download;
+pub mod net;
 mod errors;
 #[allow(unused_imports)]
 pub mod hotkey;
@@ -906,8 +906,15 @@ async fn rust_verify_runtime(framework: String) -> serde_json::Value {
     }
 }
 
+/// 取消进行中的框架运行时下载（下载阶段生效；解压阶段不可中断，返回 ok=false）
+#[tauri::command]
+async fn cancel_runtime_download(framework: String) -> serde_json::Value {
+    let ok = inference::runtime_download::request_cancel_runtime(&framework);
+    serde_json::json!({ "ok": ok })
+}
+
 /// 下载 + 解压推理框架运行时（libs）到 exe 旁 libs/
-/// 复用模型下载机制（代理 env + reqwest + tar 解压），带进度事件
+/// 复用统一下载器（net）+ 代理 env + 解压，带进度事件
 #[tauri::command]
 async fn download_runtime(
     app: tauri::AppHandle,
@@ -922,10 +929,16 @@ async fn download_runtime(
     .map_err(|e| format!("运行时下载线程失败: {e}"))?;
     if let Err(e) = &result {
         // 失败也发事件：全局清除下载态 + 记日志（面板不在时也不卡住）
+        // 用户取消走独立事件（前端文案与收尾不同）
+        let status = if e == net::CANCELLED {
+            "runtime_download_cancelled"
+        } else {
+            "runtime_download_error"
+        };
         let _ = app.emit(
             "sidecar://event",
             serde_json::json!({
-                "status": "runtime_download_error",
+                "status": status,
                 "framework": framework,
                 "msg": e,
             }),
@@ -1013,6 +1026,7 @@ pub fn run() {
             rust_verify_runtime,
             get_data_root_info,
             download_runtime,
+            cancel_runtime_download,
             crate::data_root::rust_storage_model_root,
             tts::commands::rust_load_tts_model,
             tts::commands::rust_synthesize,
