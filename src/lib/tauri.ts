@@ -33,6 +33,16 @@ export async function pickFolder(title: string, defaultPath?: string): Promise<s
 }
 
 /** 用系统文件管理器打开目录 */
+/**
+ * 读取音频文件字节（Rust 侧 `rust_read_audio` 返回裸字节 ⇒ 前端拿到 ArrayBuffer）。
+ * 供应用内试听；比 `openPath` 可靠（不依赖系统默认播放器与 opener 权限）。
+ */
+export async function rustReadAudio(path: string): Promise<ArrayBuffer> {
+  const r = await invoke<ArrayBuffer | number[]>("rust_read_audio", { path });
+  if (r instanceof ArrayBuffer) return r;
+  return new Uint8Array(r).buffer;
+}
+
 export function openPath(path: string): Promise<void> {
   return import("@tauri-apps/plugin-opener").then((m) => m.openPath(path));
 }

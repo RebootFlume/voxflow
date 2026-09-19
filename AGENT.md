@@ -349,6 +349,11 @@ src-tauri/src/audio/
   1. **先引擎、后落库**：`voice_use` 必须等引擎 `set_clone_voice` 成功，才写 `active_id`；否则库里显示"已选中"而引擎里根本没有这份参数。
   2. **取消要清两处**：`rust_clear_tts_clone_voice` = 引擎 `clear_clone_voice` + `active_id` 置空。只清引擎 ⇒ 下次 TTS 模型就绪时按 `active_id` 恢复，会把用户**刚取消的克隆装回来**。
 - 入库方式按来源区分（数据安全）：**我们自己的草稿**（`ref-*.wav`）→ 移走；**用户上传的文件** → 一律**复制**（移走 = 从用户自己的目录里凭空删除）。判定见 `voices::is_own_draft`。
+- **试听一律走应用内播放**（`src/lib/useAudioPreview.ts` → `rust_read_audio` → Blob → `<audio>`），不用 `openPath`：
+  - `openPath` 需要 `opener:allow-open-path` 权限，而本项目只申请了 `opener:default`（只含 open url / reveal item）⇒ 运行时一律被拒，"点了没反应"；
+  - 即便放开权限，也依赖系统默认播放器（`.wav` 无关联时静默失败）。
+  - `rust_read_audio` 有护栏：扩展名白名单（wav/mp3/flac/ogg/m4a）+ 必须是文件 + ≤32MB，别把它变成任意文件读取入口。
+- 克隆能力判据**只此一处**：`src/lib/modelState.ts` 的 `supportsClone` / `ttsSupportsClone`（页面门控与"模型就绪恢复"必须同源）。
 
 ---
 

@@ -13,7 +13,6 @@ import { useAppStore } from "@/stores";
 import { t, type Locale } from "@/lib/i18n";
 import type { TtsVoiceMode } from "@/stores/slices/ttsSlice";
 import {
-  openPath,
   rustListTtsSpeakers,
   rustClearTtsCloneVoice,
   rustSetTtsLanguage,
@@ -28,6 +27,7 @@ import {
   type TtsVoiceItem,
 } from "@/lib/tauri";
 import { runtimeKeyOf, supportsClone, ttsModelInfoOf } from "@/lib/modelState";
+import { useAudioPreview } from "@/lib/useAudioPreview";
 import { loadTtsModel } from "@/lib/modelLoader";
 import { useExportDir } from "@/lib/useExportDir";
 
@@ -643,8 +643,12 @@ interface VoiceTileGridProps {
 
 /** 音色平铺网格：名称（主）+ 说明（次）+ 相对时间（弱）+ 试听/使用/编辑/删除，生效项高亮 */
 function VoiceTileGrid({ lib, locale }: VoiceTileGridProps) {
+  const audio = useAudioPreview();
   return (
     <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+      {audio.error && (
+        <p className="col-span-full text-xs text-destructive">{audio.error}</p>
+      )}
       {lib.voices.map((v) => {
         const selected = v.id === lib.selectedVoice?.id;
         const busy = lib.busyId === v.id;
@@ -684,11 +688,17 @@ function VoiceTileGrid({ lib, locale }: VoiceTileGridProps) {
                 size="sm"
                 className="h-6 px-2 text-[11px]"
                 disabled={busy}
-                title={t(locale, "tts.voice.lib.preview")}
-                onClick={() => void openPath(v.audio_path)}
+                title={
+                  audio.playing === v.audio_path
+                    ? t(locale, "tts.stop")
+                    : t(locale, "tts.voice.lib.preview")
+                }
+                onClick={() => void audio.play(v.audio_path)}
               >
                 <Play className="mr-1 h-3 w-3" />
-                {t(locale, "tts.voice.lib.preview")}
+                {audio.playing === v.audio_path
+                  ? t(locale, "tts.stop")
+                  : t(locale, "tts.voice.lib.preview")}
               </Button>
               {busy ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
@@ -841,7 +851,9 @@ function VoiceSettingsPage() {
     s.setActiveSubMenu("tts");
   }
 
-  /** 试听当前音色：合成到导出目录后用系统默认播放器打开（与任务列表 playAudio 同一条路径） */
+  const audio = useAudioPreview();
+
+  /** 试听当前音色：合成到导出目录后在应用内播放（与任务列表 playAudio 同一条路径） */
   async function handlePreview(voice: string) {
     if (previewBusy) return;
     setPreviewBusy(true);
@@ -849,7 +861,10 @@ function VoiceSettingsPage() {
     try {
       const r = await rustSynthesize(sampleText, voice, exportDir);
       const saved = typeof r.saved_path === "string" ? r.saved_path : "";
-      if (saved) await openPath(saved);
+      if (saved) {
+        const err = await audio.play(saved);
+        if (err) setPreviewError(err);
+      }
     } catch (e) {
       const msg = String(e);
       setPreviewError(msg);
@@ -1273,6 +1288,7 @@ function SynthesizePage() {
   const tasks = useAppStore((s) => s.ttsTasks);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
+  const audio = useAudioPreview();
 
   // 共享导出目录（与 ASR 转写共用一份）
   const { exportDir, setExportDir } = useExportDir();
@@ -1329,10 +1345,12 @@ function SynthesizePage() {
     if (tasks.every((t) => t.status !== "synthesizing")) setBusy(false);
   }, [tasks, busy]);
 
-  // 播放
+  // 播放（应用内，见 useAudioPreview）
   function playAudio(task: typeof tasks[0]) {
     if (!task.savedPath) return;
-    import("@tauri-apps/plugin-opener").then((m) => m.openPath(task.savedPath!)).catch(() => {});
+    void audio.play(task.savedPath).then((err) => {
+      if (err) useAppStore.getState().addLog("[tts] 播放失败: " + err, "error");
+    });
   }
 
   return (
@@ -1424,7 +1442,7 @@ function SynthesizePage() {
                       {task.status === "done" && (
                         <Button variant="ghost" size="sm" className="h-6 px-2" onClick={() => playAudio(task)}>
                           <Play className="h-3 w-3" />
-                          {t(locale, "tts.play")}
+                          {audio.playing === task.savedPath ? t(locale, "tts.stop") : t(locale, "tts.play")}
                         </Button>
                       )}
                     </div>

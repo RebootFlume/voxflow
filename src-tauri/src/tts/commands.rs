@@ -444,8 +444,84 @@ struct SpeakerEntry {
     name: String,
 }
 
+// --- 应用内试听（读音频字节）--------------------------------------------------
+
+/// 试听可读的音频扩展名（与音色库 AUDIO_EXTS 同集合）
+const LISTEN_EXTS: [&str; 5] = ["wav", "mp3", "flac", "ogg", "m4a"];
+/// 单次试听大小上限：约 8 分钟 24kHz/16bit 单声道 ≈ 23MB，留余量
+const MAX_LISTEN_BYTES: u64 = 32 * 1024 * 1024;
+
+/// 读取音频文件原始字节，供前端在应用内试听（Blob → `<audio>`）。
+///
+/// 为什么不沿用 `openPath`：① 它依赖系统默认播放器，`.wav` 无关联时**静默无反应**；
+/// ② 它需要 `opener:allow-open-path` 权限，而本项目只申请了 `opener:default`（不含 open_path），
+/// 运行时一律被拒 ⇒ 表现就是"点了试听没反应"。
+///
+/// 护栏（避免这个命令变成任意文件读取入口）：扩展名白名单 + 必须是文件 + 大小上限。
+#[tauri::command]
+pub async fn rust_read_audio(path: String) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || read_audio_bytes(std::path::Path::new(&path)))
+        .await
+        .map_err(|e| format!("read audio task failed: {e}"))?
+        .map(tauri::ipc::Response::new)
+}
+
+fn read_audio_bytes(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    if !LISTEN_EXTS.contains(&ext.as_str()) {
+        return Err(format!("不是可试听的音频文件: {}", path.display()));
+    }
+    let meta = std::fs::metadata(path).map_err(|e| format!("音频文件不可读: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("不是文件: {}", path.display()));
+    }
+    if meta.len() > MAX_LISTEN_BYTES {
+        return Err(format!(
+            "音频过大（{} MB），无法在应用内试听",
+            meta.len() / 1024 / 1024
+        ));
+    }
+    std::fs::read(path).map_err(|e| format!("读取音频失败: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn read_audio_rejects_non_audio_and_missing() {
+        let dir = std::env::temp_dir().join(format!("voxflow-listen-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let txt = dir.join("note.txt");
+        std::fs::write(&txt, b"not audio").unwrap();
+        assert!(super::read_audio_bytes(&txt).is_err(), "非音频扩展名必须拒绝");
+        assert!(
+            super::read_audio_bytes(&dir.join("nope.wav")).is_err(),
+            "文件不存在必须拒绝"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_audio_reads_bytes_and_caps_size() {
+        let dir = std::env::temp_dir().join(format!("voxflow-listen-size-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("ok.wav");
+        std::fs::write(&wav, b"RIFFxxxxWAVE").unwrap();
+        assert_eq!(super::read_audio_bytes(&wav).unwrap(), b"RIFFxxxxWAVE");
+
+        // 超过上限（set_len 造大文件，不实际写满）
+        let big = dir.join("big.wav");
+        let f = std::fs::File::create(&big).unwrap();
+        f.set_len(super::MAX_LISTEN_BYTES + 1).unwrap();
+        drop(f);
+        let err = super::read_audio_bytes(&big).unwrap_err();
+        assert!(err.contains("音频过大"), "超限必须拒绝: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     #[test]

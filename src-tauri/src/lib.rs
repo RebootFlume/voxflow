@@ -1103,6 +1103,7 @@ pub fn run() {
             tts::commands::rust_tts_voice_update,
             tts::commands::rust_tts_voice_remove,
             tts::commands::rust_tts_voice_use,
+        tts::commands::rust_read_audio,
             rust_test_tts_model,
             persistence::read_data_file,
             persistence::write_data_file,
