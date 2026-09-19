@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { onSidecarEvent, rustSetTtsCloneVoice, rustTtsVoicesList, rustTtsVoiceUse, sendToSidecar } from "@/lib/tauri";
-import { applyEngineStatus, applyAsrFrameworkFromRust, syncAsrFrameworkFromLoaded, resolveModelKind, runtimeKeyOf } from "@/lib/modelState";
+import { applyEngineStatus, applyAsrFrameworkFromRust, syncAsrFrameworkFromLoaded, resolveModelKind, runtimeKeyOf, ttsSupportsClone } from "@/lib/modelState";
 import { useAppStore, type EngineState } from "@/stores";
 import { t } from "@/lib/i18n";
 
@@ -244,6 +244,16 @@ export function useSidecarEvents() {
                     return null;
                   });
                   const activeId = lib?.active_id ?? null;
+                  // 克隆音色只对支持克隆的模型有意义（当前仅 zipvoice）：在预设 / 固定音色模型上
+                  // 恢复必然失败，属于**预期**而非错误 ⇒ 跳过并静默，不写错误日志、不显示报错。
+                  // 库里保留 active_id：切回支持克隆的模型时会照常恢复。
+                  if (!ttsSupportsClone(model)) {
+                    useAppStore
+                      .getState()
+                      .addLog(`[tts] 当前模型（${model}）不支持克隆，跳过音色恢复`, "info");
+                    useAppStore.getState().updateTtsClone({ active: false, status: "idle", error: "" });
+                    return;
+                  }
                   if (activeId) {
                     await rustTtsVoiceUse(activeId);
                     const v = lib?.voices.find((x) => x.id === activeId);
@@ -262,6 +272,8 @@ export function useSidecarEvents() {
                     clone.audioPath !== ""
                   ) {
                     await rustSetTtsCloneVoice(clone.audioPath, clone.referenceText);
+                    // 兜底路径同样要落"已生效"：否则 active=true 配 status="idle" 自相矛盾
+                    useAppStore.getState().updateTtsClone({ status: "ok", error: "" });
                   }
                 })().catch((e) => {
                   // 失败时不能继续显示"克隆已激活"：当前模型不支持克隆 / 未就绪、

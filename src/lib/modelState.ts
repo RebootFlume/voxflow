@@ -12,6 +12,37 @@ import { useAppStore, type ModelItemState } from "@/stores";
 
 export type ModelKind = "asr" | "tts";
 
+/** 清单里按展示名 / 引擎目录名归一化找模型（与 Rust `spec::find` 的别名集合一致） */
+export function ttsModelInfoOf(
+  items: ModelItemState[],
+  model: string,
+): ModelItemState | null {
+  if (!model) return null;
+  const norm = (s: string) => s.toLowerCase().replace(/[-_]/g, "");
+  return (
+    items.find(
+      (m) => m.kind === "tts" && (norm(m.name) === norm(model) || norm(m.path) === norm(model)),
+    ) ?? null
+  );
+}
+
+/**
+ * 描述符能力：该模型是否支持语音克隆（`voice_mode` 优先，旧 payload 退回 `supports_clone`）。
+ *
+ * **判据只此一处**：音色工作区的按钮门控与「模型就绪时恢复克隆音色」必须同源，
+ * 否则会出现「页面说模型不支持克隆、恢复路径却去下发参考音」这种必然失败的组合。
+ */
+export function supportsClone(info: ModelItemState | null | undefined): boolean {
+  if (!info) return false;
+  const mode = info.voice_mode?.type;
+  return mode === "clone" || mode === "preset_and_clone" || info.supports_clone === true;
+}
+
+/** 非 React 上下文（事件回调）用：按当前清单判断某 TTS 模型是否支持克隆 */
+export function ttsSupportsClone(model: string): boolean {
+  return supportsClone(ttsModelInfoOf(useAppStore.getState().models.items, model));
+}
+
 /** 运行时包 key：Rust 下发的 runtime_key 优先，缺失回退既有 format（不再按格式枚举/映射） */
 export function runtimeKeyOf(
   item: Pick<ModelItemState, "runtime_key" | "format"> | undefined | null,

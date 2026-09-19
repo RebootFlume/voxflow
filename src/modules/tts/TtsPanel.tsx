@@ -27,7 +27,7 @@ import {
   rustTtsVoiceUse,
   type TtsVoiceItem,
 } from "@/lib/tauri";
-import { runtimeKeyOf } from "@/lib/modelState";
+import { runtimeKeyOf, supportsClone, ttsModelInfoOf } from "@/lib/modelState";
 import { loadTtsModel } from "@/lib/modelLoader";
 import { useExportDir } from "@/lib/useExportDir";
 
@@ -780,8 +780,8 @@ function VoiceSettingsPage() {
   /** Fixed（单音色）：隐藏音色遍历/网格，改为固定音色名文本。
    *  vm 缺失（旧 payload）时按方案 §4.2 的兜底判定：无克隆能力且音色数 ≤1 → 视为单音色模型。 */
   const fixedVoice = mode === "fixed" || (vm === undefined && info?.supports_clone === false && numSpeakers <= 1);
-  /** 克隆能力：能力字段优先（clone / preset_and_clone），旧 payload 退回 supports_clone */
-  const cloneCapable = !!info && (mode === "clone" || mode === "preset_and_clone" || info.supports_clone === true);
+  /** 克隆能力：与「模型就绪恢复」同源（modelState.supportsClone） */
+  const cloneCapable = supportsClone(info);
   /** Clone + overrides_preset：克隆激活后隐藏 sid 控件（不是禁用） */
   const sidHidden = mode === "clone" && cloneActive && vm?.overrides_preset === true;
   /** PresetAndClone：克隆激活时 sid 控件禁用（保留可见） */
@@ -1215,15 +1215,7 @@ const langLabel: Record<string, string> = {
  */
 function useTtsModelInfo(model: string) {
   const items = useAppStore((s) => s.models.items);
-  return useMemo(() => {
-    if (!model) return null;
-    const norm = (s: string) => s.toLowerCase().replace(/[-_]/g, "");
-    return (
-      items.find(
-        (m) => m.kind === "tts" && (norm(m.name) === norm(model) || norm(m.path) === norm(model)),
-      ) ?? null
-    );
-  }, [items, model]);
+  return useMemo(() => ttsModelInfoOf(items, model), [items, model]);
 }
 
 function LanguageSelector() {
