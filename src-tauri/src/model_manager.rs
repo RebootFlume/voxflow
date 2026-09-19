@@ -3,7 +3,13 @@
 //! - 下载：统一走 `crate::net`（流式 + 断点续传 + 原子 + 取消 + 重试）
 //!   · GitHub release 资产：整包下载后解压
 //!   · HuggingFace：按模型的**精选条目**（`DownloadEntry.files` 精确文件名）逐个直链下载
-//! - 代理：写入 HTTP(S)_PROXY + NO_PROXY=localhost,127.0.0.1；`ENV_SCOPE_LOCK` 保证
+//! - 代理：**显式** `Proxy::all(CONFIG.proxy)`，不写进程环境变量。
+//!   实测（本机）：reqwest **默认就会读** `HTTP(S)_PROXY`（与 `system-proxy` feature 无关），
+//!   显式代理优先于 env；但 env 的 `no_proxy=127.0.0.1` 会把回环从**显式**代理里也排除掉，
+//!   同进程内的 env 变更会互相污染（测试实测到过）。
+//!   ⇒ 统一改为：显式代理 + 回环硬豁免（`LOOPBACK_NO_PROXY`）+ 启动时把 env 代理"接管"进配置
+//!   再清空 env（见 `adopt_proxy_env`），从此不再依赖任何隐式行为。
+//! - 旧机制（已删除）：~~写入 HTTP(S)_PROXY + NO_PROXY=localhost,127.0.0.1；`ENV_SCOPE_LOCK` 保证
 //!   「写环境变量 + 建 client」原子化，避免并发建 Client 的竞态
 //! - Token：仅来自 config.json 的 huggingfaceToken（bootstrap 注入 CONFIG），且**只发 huggingface.co**
 //! - 记账：下载完成写 `.voxflow-manifest.json`（条目 id + repo@revision + 文件与大小）
@@ -125,26 +131,67 @@ static CONFIG: once_cell::sync::Lazy<RwLock<RuntimeConfig>> =
         })
     });
 
-/// 创建 HFClient 前必须持有的锁，保证「写入环境变量 + build_sync」原子化
-pub static ENV_SCOPE_LOCK: once_cell::sync::Lazy<Mutex<()>> =
-    once_cell::sync::Lazy::new(|| Mutex::new(()));
+/// 回环永不走代理：所有本地 HTTP 客户端（llama-server 健康检查/转写/chat）都挂这条规则。
+/// 否则用户环境里的 `HTTP_PROXY` 会让 127.0.0.1 的请求绕一圈（实测：curl 走代理时仍返回 200，
+/// 但代理一旦不可用，整个 ASR 就挂）。
+pub const LOOPBACK_NO_PROXY: &str = "127.0.0.1,localhost,::1";
 
-pub fn apply_proxy_env(proxy: &str) {
+/// 只访问回环的客户端（llama-server 健康检查/转写/chat）：**彻底禁用代理**。
+/// 比"白名单"更硬：任何 env / 显式代理都不会影响本地请求。
+pub fn loopback_client_builder(
+    timeout: std::time::Duration,
+) -> reqwest::blocking::ClientBuilder {
+    reqwest::blocking::Client::builder().timeout(timeout).no_proxy()
+}
+
+/// 带显式代理的客户端 builder（下载用）：配置为空 → 同样彻底禁用代理（不落回 env 隐式行为）；
+/// 配置非空 → 显式 `Proxy::all` + 回环豁免（`Proxy::no_proxy` 白名单）。
+pub fn net_client_builder(
+    proxy: &str,
+    timeout: std::time::Duration,
+) -> Result<reqwest::blocking::ClientBuilder, String> {
+    let b = reqwest::blocking::Client::builder().timeout(timeout);
     let p = proxy.trim();
-    let keys = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"];
     if p.is_empty() {
-        for k in keys {
-            std::env::remove_var(k);
-        }
-        std::env::remove_var("NO_PROXY");
-        std::env::remove_var("no_proxy");
-    } else {
-        for k in keys {
-            std::env::set_var(k, p);
-        }
-        std::env::set_var("NO_PROXY", "localhost,127.0.0.1");
-        std::env::set_var("no_proxy", "localhost,127.0.0.1");
+        return Ok(b.no_proxy());
     }
+    // 意图：本地镜像（127.0.0.1 上的 HF 镜像）不经代理。reqwest 是否把该白名单应用到
+    // **显式** 代理上未被本仓库验证（只验证了"回环客户端彻底禁代理"这条不变式），故不作为依赖。
+    let parsed = reqwest::Proxy::all(p)
+        .map_err(|_| format!("代理格式无效（支持 http:// 或 socks5://）: {p}"))?
+        .no_proxy(reqwest::NoProxy::from_string(LOOPBACK_NO_PROXY));
+    Ok(b.proxy(parsed))
+}
+
+/// 启动时的一次性归一化：把我们进程的代理配置**收敛为唯一来源**。
+///
+/// - 配置为空时，接管环境变量里的代理（尊重用户已有的环境设置，不然他的下载会直连失败）；
+/// - 随后**清空**所有代理环境变量：reqwest 默认会读它们，留着就会隐式生效，
+///   与显式配置打架、并可被 `no_proxy` 的副作用影响（实测踩过）。
+///
+/// 返回最终生效的代理（供日志/事件展示）。
+pub fn adopt_proxy_env() -> String {
+    let mut cfg = CONFIG.write();
+    if cfg.proxy.trim().is_empty() {
+        for k in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"] {
+            if let Ok(v) = std::env::var(k) {
+                if !v.trim().is_empty() {
+                    cfg.proxy = v.trim().to_string();
+                    log::info!("[proxy] 配置为空 → 接管环境变量 {k}");
+                    break;
+                }
+            }
+        }
+    }
+    let p = cfg.proxy.clone();
+    drop(cfg);
+    for k in [
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy",
+        "NO_PROXY", "no_proxy",
+    ] {
+        std::env::remove_var(k);
+    }
+    p
 }
 
 /// 设置模型根（运行时 CONFIG）。接受：
@@ -547,6 +594,38 @@ pub fn write_manifest(dir: &Path, m: &Manifest) -> Result<(), String> {
     let text = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
     std::fs::write(&tmp, text).map_err(|e| format!("write manifest: {e}"))?;
     std::fs::rename(&tmp, manifest_path(dir)).map_err(|e| format!("rename manifest: {e}"))
+}
+
+/// 条目显存预估（MiB）：权重 + mmproj **实际字节** + KV（按 ctx 与 GGUF 几何）+ 固定开销。
+///
+/// 只有该条目文件**全部在本地**时才算（否则读不到 GGUF 几何、也不知道真实字节数）——
+/// 宁可不出这个数字，也不猜。ctx 取 `DEFAULT_CTX_SIZE`（与实际启动参数同一来源）。
+fn entry_vram_estimate_mb(dir: &Path, entry: &crate::tts::spec::DownloadEntry) -> Option<u64> {
+    use crate::tts::spec::FileRole;
+    let main = entry.file(FileRole::Main)?;
+    let main_path = dir.join(main);
+    if !main_path.is_file() {
+        return None;
+    }
+    let mut weights = 0u64;
+    let mut mmproj = 0u64;
+    for f in entry.files {
+        let Ok(md) = std::fs::metadata(dir.join(f.name)) else {
+            return None;
+        };
+        if f.role == FileRole::Mmproj {
+            mmproj += md.len();
+        } else {
+            weights += md.len();
+        }
+    }
+    let geom = crate::vram::read_gguf_kv_geometry(&main_path);
+    Some(crate::vram::estimate_vram_mb(
+        weights,
+        mmproj,
+        geom,
+        crate::inference::llama_server::DEFAULT_CTX_SIZE,
+    ))
 }
 
 /// 该模型当前安装的条目：manifest 优先 → 默认条目（无条目的模型 → None）
@@ -1007,23 +1086,13 @@ fn download_single_file(
 }
 
 /// 下载用 reqwest 客户端（同一超时与代理口径；代理经 env + CONFIG 单一来源）
-/// 统一下载客户端（模型与框架共用）：超时 + **显式**代理。
+/// 统一下载客户端（模型与框架共用）：超时 + **显式**代理 + 回环豁免。
 ///
-/// reqwest 是 `default-features = false`（未启 system-proxy）→ **仅写 HTTP(S)_PROXY 环境变量无效**，
-/// 必须 `builder.proxy(Proxy::all(..))`。框架下载早已如此，模型/HF 侧此前漏了（代理形同虚设）。
+/// 为什么显式：reqwest 默认也会读 `HTTP(S)_PROXY`（本机实测），但 env 的 `no_proxy` 会把回环
+/// 从显式代理里一起排除，且同进程 env 变更会互相污染 ⇒ 只信 `CONFIG.proxy` 这一个来源。
 pub fn build_net_client(timeout_secs: u64) -> Result<reqwest::blocking::Client, String> {
     let proxy = CONFIG.read().proxy.clone();
-    let _env_guard = ENV_SCOPE_LOCK.lock();
-    apply_proxy_env(&proxy);
-    let mut builder =
-        reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(timeout_secs));
-    let p = proxy.trim();
-    if !p.is_empty() {
-        let parsed = reqwest::Proxy::all(p)
-            .map_err(|_| format!("代理格式无效（支持 http:// 或 socks5://）: {p}"))?;
-        builder = builder.proxy(parsed);
-    }
-    builder
+    net_client_builder(&proxy, std::time::Duration::from_secs(timeout_secs))?
         .build()
         .map_err(|e| format!("HTTP client build failed: {e}"))
 }
@@ -1199,6 +1268,8 @@ pub fn list_models_payload(kind: Option<&str>) -> Value {
                     "label_zh": e.label_zh,
                     "label_en": e.label_en,
                     "size_gb": e.size_gb(),
+                    // 预计显存（MiB）：下载体积之外的真实占用量级；只有文件齐了才算（否则 null）
+                    "vram_estimate_mb": entry_vram_estimate_mb(&dir, e),
                     "default": e.default,
                     "state": state,
                 })
@@ -1219,6 +1290,13 @@ pub fn list_models_payload(kind: Option<&str>) -> Value {
             "entries": entries_json,
             "active_entry": active_entry,
             "size_gb": spec.size_gb,
+            // 预计显存：优先当前激活条目，否则默认条目（均只在文件齐时给出）
+            "vram_estimate_mb": spec
+                .entries
+                .iter()
+                .find(|e| Some(e.id) == active_entry)
+                .or_else(|| spec.default_entry())
+                .and_then(|e| entry_vram_estimate_mb(&dir, e)),
             "description_zh": spec.description_zh,
             "description_en": spec.description_en,
             "available": spec.available,

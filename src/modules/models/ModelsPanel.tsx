@@ -341,6 +341,9 @@ function ModelRow({ name }: { name: string }) {
                 {it.entries.map((e) => (
                   <SelectItem key={e.id} value={e.id}>
                     {`${locale === "zh" ? e.labelZh : e.labelEn} · ${formatGb(e.sizeGb)} GB`}
+                    {e.vramEstimateMb != null
+                      ? ` · ${t(locale, "models.entry.vram", { v: (e.vramEstimateMb / 1024).toFixed(2) })}`
+                      : ""}
                     {it.activeEntry === e.id ? ` ${t(locale, "models.entry.current")}` : ""}
                   </SelectItem>
                 ))}
@@ -350,6 +353,14 @@ function ModelRow({ name }: { name: string }) {
         )}
         <StatusBadge />
         <span className="text-xs text-muted-foreground tabular-nums">{formatModelSize(it)}</span>
+        {it.vramEstimateMb != null && (
+          <span
+            className="text-xs text-sky-600 dark:text-sky-400 tabular-nums"
+            title={t(locale, "models.vram.hint")}
+          >
+            {t(locale, "models.entry.vram", { v: (it.vramEstimateMb / 1024).toFixed(2) })}
+          </span>
+        )}
         {expanded ? <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" /> : <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />}
       </div>
 

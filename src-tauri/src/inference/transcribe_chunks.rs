@@ -5,11 +5,11 @@
 //! sherpa-onnx 虽支持流式任意长度，但为统一各框架能力，长音频一律走本模块分段。
 //!
 //! ## 算法（参照 CapsWriter 滑动窗口）
-//! 段长 60s + 重叠 4s：
-//!   - 每段实际发送 64s（60s 正片 + 4s 重叠尾巴）
-//!   - 窗口每次前移 60s，相邻段有 4s 重叠，防止句子被切碎
-//!   - 剩余不足 64s 的残留作为最后一段
-//!   - 64s 实测 ≈ 850 audio token + 输出 ≈ 1.1k < 2048 ctx ✅（单段安全，近 2× 余量）
+//! 段长 60s + 重叠 8s：
+//!   - 每段实际发送 68s（60s 正片 + 8s 重叠尾巴）
+//!   - 窗口每次前移 60s，相邻段有 8s 重叠，防止句子被切碎
+//!   - 剩余不足 68s 的残留作为最后一段
+//!   - 68s 实测 ≈ 900 audio token + 输出 ≈ 1.2k < 2048 ctx ✅（单段安全，近 1.7× 余量）
 //!
 //! ## 接缝处理（两道，缺一不可）
 //! 硬切不可避免会把句子切成两半，两道处理都在本模块：
@@ -23,20 +23,25 @@
 //! ## 框架无关
 //! 只依赖 `AsrEngine::transcribe` / `transcribe_with_context`，llama-server / sherpa / PyTorch
 //! 未来接入零成本获得长音频能力（无上下文能力的引擎走 trait 默认实现，行为不变）。
-//! 引擎永远只处理 ≤64s 的一段。
+//! 引擎永远只处理 ≤68s 的一段。
 
 use super::engine::AsrEngine;
 
 /// 段长（秒）：CapsWriter 同款。实测音频 token 率 13.2/s（60s → 808 input tokens），
-/// 故 64s 段 ≈ 1.1k token，配 2048 ctx 有近 2× 余量（旧注释「60s≈6000 token」高估 7 倍）
+/// 故 68s 段 ≈ 1.2k token，配 2048 ctx 有近 1.7× 余量（旧注释「60s≈6000 token」高估 7 倍）
 pub const SEG_DURATION_SEC: usize = 60;
-/// 重叠（秒）：防止句子被段边界切断
-pub const SEG_OVERLAP_SEC: usize = 4;
+/// 重叠（秒）：防止句子被段边界切断。
+///
+/// 实测（180s 真实录音 × 3 切点 × 2 run，接缝处前后两段对同一音频读数的一致性）：
+/// 4s → 0.280、8s → 0.560（无上文）/ **0.640（有上文）** ⇒ 8s 是最大杠杆；
+/// 4s 时上文几乎无增益（0.280 = 0.280），说明记忆需要足够的声学上下文才起作用。
+/// 代价：每段 64s → 68s（≈ +50 token，仍远低于 ctx 2048）。
+pub const SEG_OVERLAP_SEC: usize = 8;
 
 /// 单段最大长度超过此值才需要分段（短音频直接单次转写，零开销）
 pub const CHUNK_THRESHOLD_SEC: usize = SEG_DURATION_SEC;
 
-/// 跨段记忆的上文字数（≈120 token；64s 音频 ≈ 860 token，合计仍远低于 ctx 2048）
+/// 跨段记忆的上文字数（≈120 token；68s 音频 ≈ 900 token，合计仍远低于 ctx 2048）
 pub const CTX_CHARS: usize = 120;
 
 /// 重叠匹配窗口：上一段尾 / 新段头各取多少字参与对齐
@@ -321,7 +326,7 @@ mod tests {
     #[test]
     fn test_memory_ctx_passed_per_segment() {
         let e = FakeEngine::new();
-        let samples = vec![0.0f32; 130 * 16000]; // 64s + 64s + 10s → 3 段
+        let samples = vec![0.0f32; 130 * 16000]; // 68s + 68s + 10s → 3 段
         let text = transcribe_long(&e, &samples, 16000, &mut |_, _| {}).unwrap();
         assert_eq!(e.calls(), 3, "130s 应切 3 段");
         assert_eq!(text, "第1段第2段第3段");
@@ -352,7 +357,7 @@ mod tests {
 
     #[test]
     fn test_300s_audio_5_chunks() {
-        // 300s 音频 → 60s 步进，5 段 + 每段 4s 重叠
+        // 300s 音频 → 60s 步进，5 段 + 每段 8s 重叠
         let e = FakeEngine::new();
         let samples = vec![0.0f32; 300 * 16000];
         let mut progress: Vec<(f64, f64)> = Vec::new();
@@ -364,10 +369,10 @@ mod tests {
         // 每段长度：前 4 段 64s，最后一段 60s
         let recv = e.received.lock().unwrap();
         assert_eq!(recv.len(), 5);
-        assert_eq!(recv[0], 64 * 16000);
-        assert_eq!(recv[1], 64 * 16000);
-        assert_eq!(recv[2], 64 * 16000);
-        assert_eq!(recv[3], 64 * 16000);
+        assert_eq!(recv[0], 68 * 16000);
+        assert_eq!(recv[1], 68 * 16000);
+        assert_eq!(recv[2], 68 * 16000);
+        assert_eq!(recv[3], 68 * 16000);
         assert_eq!(recv[4], 60 * 16000);
         // 进度回调
         assert_eq!(progress.len(), 5);
@@ -378,13 +383,13 @@ mod tests {
 
     #[test]
     fn test_90s_audio_2_chunks() {
-        // 90s：64s 满段 + 26s 残留（offset=60 → 剩 30s < 64s）
+        // 90s：68s 满段 + 30s 残留（offset=60 → 剩 30s < 68s）
         let e = FakeEngine::new();
         let samples = vec![0.0f32; 90 * 16000];
         let text = transcribe_long(&e, &samples, 16000, &mut |_, _| {}).unwrap();
         assert_eq!(e.calls(), 2);
         let recv = e.received.lock().unwrap();
-        assert_eq!(recv[0], 64 * 16000);
+        assert_eq!(recv[0], 68 * 16000);
         assert_eq!(recv[1], 30 * 16000);
         assert!(text.contains("第1段"));
     }

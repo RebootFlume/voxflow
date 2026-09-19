@@ -40,6 +40,7 @@ function pickEntries(v: unknown): ModelEntryState[] {
       labelZh: String(e.label_zh ?? ""),
       labelEn: String(e.label_en ?? ""),
       sizeGb: Number(e.size_gb ?? 0) || 0,
+      vramEstimateMb: typeof e.vram_estimate_mb === "number" ? e.vram_estimate_mb : undefined,
       default: e.default === true,
       state: (e.state as ModelEntryState["state"]) ?? "not_downloaded",
     }));
@@ -104,6 +105,7 @@ export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: Mod
             runtime_key: typeof m.runtime_key === "string" ? m.runtime_key : undefined,
             source: String(m.source ?? ""),
             sizeGb: Number(m.size_gb ?? 0),
+            vramEstimateMb: typeof m.vram_estimate_mb === "number" ? m.vram_estimate_mb : undefined,
             descriptionZh: String(m.description_zh ?? ""),
             descriptionEn: String(m.description_en ?? ""),
             available: m.available !== false,

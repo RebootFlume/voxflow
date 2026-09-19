@@ -105,11 +105,17 @@ function VramMonitorCard() {
               />
             </div>
             <div className="space-y-1 text-xs text-muted-foreground">
-              {/* 各框架占用：键由 Rust 下发（旧键 llama/sherpa 与新框架 id 都能显示） */}
-              {Object.entries(vram.frameworks).map(([fw, mb]) => (
+              {/* 各框架占用：键由 Rust 下发；source=estimate 时标注「估算」，其余为驱动真值 */}
+              {Object.entries(vram.frameworks).map(([fw, v]) => (
                 <div key={fw} className="flex justify-between">
-                  <span>{fw}</span>
-                  <span className="tabular-nums">≈{(mb / 1024).toFixed(2)} GB</span>
+                  <span>
+                    {fw}
+                    {v.source === "estimate" ? ` · ${t(locale, "asr.vram.estimated")}` : ""}
+                  </span>
+                  <span className="tabular-nums">
+                    {v.source === "estimate" ? "≈" : ""}
+                    {(v.mb / 1024).toFixed(2)} GB
+                  </span>
                 </div>
               ))}
               {Object.keys(vram.frameworks).length === 0 && (

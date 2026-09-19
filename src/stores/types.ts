@@ -59,6 +59,8 @@ export interface ModelEntryState {
   labelZh: string;
   labelEn: string;
   sizeGb: number;
+  /** 预计显存（MiB）：权重 + KV(按 ctx) + CUDA 开销；文件未齐为 undefined（Rust 不给猜数） */
+  vramEstimateMb?: number;
   /** 未指定条目时的默认条目（下载动作不传 entry 时 Rust 用它） */
   default: boolean;
   state: "downloaded" | "not_downloaded" | "downloading";
@@ -76,6 +78,8 @@ export interface ModelItemState {
   /** 来源标签（如 github.com/k2-fsa/sherpa-onnx、huggingface.co/…，Rust 推导；前端只展示） */
   source: string;
   sizeGb: number;
+  /** 预计显存（MiB，当前激活/默认条目；文件未齐为 undefined） */
+  vramEstimateMb?: number;
   descriptionZh: string;
   descriptionEn: string;
   available: boolean;

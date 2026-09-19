@@ -17,8 +17,13 @@ export interface InfrastructureSlice {
   sidebarCollapsed: boolean;
   /** 推理框架（libs）安装状态：检测结果 + 检测时间；null = 尚未检测 */
   runtime: { packages: RuntimePkgState[] | null; lastUpdate: number };
-  /** 显存监控（全局单例轮询，不随组件生命周期）：frameworks = 框架 id → 占用 MB（Rust 下发键） */
-  vram: { total: number; used: number; frameworks: Record<string, number>; lastUpdate: number };
+  /** 显存监控（全局单例轮询）：frameworks = 框架 id → {占用 MB, 来源}（来源 wmi=真值 / estimate=预估） */
+  vram: {
+    total: number;
+    used: number;
+    frameworks: Record<string, { mb: number; source: string }>;
+    lastUpdate: number;
+  };
   updateIo: (patch: Partial<InfrastructureSlice["io"]>) => void;
   setAudioDevices: (current: string, currentName: string) => void;
   audioDevices: { current: string; currentName: string };

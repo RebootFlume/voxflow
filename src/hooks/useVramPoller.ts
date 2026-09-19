@@ -4,12 +4,12 @@ import { useAppStore } from "@/stores";
 
 /** 框架占用：仅收集有意义的正数（缺失/0/null 视为未加载，不显示空行） */
 function collectFrameworkVram(
-  raw: Record<string, { mb: number } | null> | null | undefined,
-): Record<string, number> {
-  const out: Record<string, number> = {};
+  raw: Record<string, { mb: number; source?: string } | null> | null | undefined,
+): Record<string, { mb: number; source: string }> {
+  const out: Record<string, { mb: number; source: string }> = {};
   for (const [key, v] of Object.entries(raw ?? {})) {
     const mb = v?.mb;
-    if (typeof mb === "number" && mb > 0) out[key] = mb;
+    if (typeof mb === "number" && mb > 0) out[key] = { mb, source: v?.source ?? "" };
   }
   return out;
 }

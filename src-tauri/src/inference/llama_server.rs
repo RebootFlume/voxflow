@@ -29,6 +29,9 @@ pub const HEALTH_PATH: &str = "/health";
 pub const TRANSCRIBE_PATH: &str = "/v1/audio/transcriptions";
 /// 多模态 chat 端点：带「上文」的转写走这里（可同时送 text + input_audio 两个 part）
 pub const CHAT_PATH: &str = "/v1/chat/completions";
+/// 默认上下文长度（KV cache 在加载时按此整块分配 → 直接决定显存占用；
+/// 依据：分段上限 64s × 实测 13.2 token/s ≈ 850 token，2048 有近 2× 余量）
+pub const DEFAULT_CTX_SIZE: u32 = 2048;
 /// 启动后等待就绪的最长时间
 pub const READY_TIMEOUT: Duration = Duration::from_secs(30);
 /// 健康检查轮询间隔
@@ -69,7 +72,7 @@ impl Default for LlamaServerConfig {
             mmproj_path: PathBuf::new(),
             port: DEFAULT_PORT,
             n_gpu_layers: 99,
-            ctx_size: 2048,
+            ctx_size: DEFAULT_CTX_SIZE,
             parallel: 1,
             temperature: 0.0,
             no_webui: true,
@@ -154,8 +157,8 @@ impl LlamaServerEngine {
         // 禁用空闲连接复用（pool_idle_timeout=0）：llama-server 空闲后可能关闭
         // keep-alive 连接，池化 client 复用 stale 连接会报 "error sending request" /
         // /health 探测失败 → is_loaded 假阴性。本地回环新连接开销毫秒级，可靠优先。
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(60))
+        // 回环客户端：彻底禁用代理（环境里的 HTTP_PROXY 绝不能让 127.0.0.1 的健康检查/转写绕一圈）
+        let client = crate::model_manager::loopback_client_builder(Duration::from_secs(60))
             .pool_idle_timeout(Duration::ZERO)
             .build()
             .expect("reqwest client build");
@@ -559,10 +562,9 @@ impl LlamaServerEngine {
                 log::warn!(
                     "[llama-server] transcribe 首次请求失败（可能连接池 stale），用新连接重试: {url} — {first_err}"
                 );
-                let fresh = reqwest::blocking::Client::builder()
-                    .timeout(Duration::from_secs(120))
-                    .build()
-                    .map_err(|e| InferenceError::InferenceFailed(format!("重建 client 失败: {e}")))?;
+                let fresh =
+                    crate::model_manager::loopback_client_builder(Duration::from_secs(120)).build()
+                .map_err(|e| InferenceError::InferenceFailed(format!("重建 client 失败: {e}")))?;
                 fresh
                     .post(&url)
                     .multipart(build_form(wav_bytes))
@@ -660,6 +662,11 @@ impl LlamaServerEngine {
     }
 
     /// 当前加载的模型文件路径（换模型后同步更新）
+    /// 当前生效配置（克隆）——显存预估、诊断用
+    pub fn config(&self) -> LlamaServerConfig {
+        self.config.lock().clone()
+    }
+
     pub fn current_model_path(&self) -> PathBuf {
         self.config.lock().model_path.clone()
     }
@@ -903,11 +910,11 @@ fn llama_config_for_model(name: &str, device: &str) -> InferenceResult<LlamaServ
         // 设备生效：cpu → 全 CPU（0 层）；其他（cuda 等）→ 全 GPU（99 层）
         n_gpu_layers: if is_cpu { 0 } else { 99 },
         // ctx 由「最长单段请求」定，不是越大越好：KV cache 在**加载时**按 ctx 整块分配，
-        // 与模型大小无关（Qwen3 全系 28 层 × 8 KV 头 × 128 维 = 112 KiB/token）。
-        // 分段上限 64s（60s+4s 重叠）× 实测音频 13.2 token/s ≈ 850 token + 输出 ≈ 1.1k
-        // → 2048 留近 2× 余量（8192 = 白占 672 MiB 显存）。
-        // 实测（RTX 4070 Laptop，0.6B Q8 + Q8 mmproj，-ngl 99）：ctx8192 = 2488 MiB，ctx2048 = 1664 MiB。
-        ctx_size: 2048,
+        // 与模型大小无关（Qwen3 全系 28 层 × 8 KV 头 × 128 维 = 112 KiB/token，见 vram.rs）。
+        // 分段上限 68s（60s+8s 重叠）× 13.2 token/s ≈ 900 token + 输出，2048 留 1.7× 余量。
+        // 实测（RTX 4070 Laptop，0.6B Q8 + Q8 mmproj，-ngl 99）：
+        // ctx8192 = 2488 MiB / ctx4096 = 1994 / ctx2048 = 1768 ⇒ 8192 白占 672 MiB。
+        ctx_size: DEFAULT_CTX_SIZE,
         parallel: 1,
         temperature: 0.0,
         no_webui: true,
@@ -1006,25 +1013,20 @@ impl super::engine::AsrEngine for LlamaAsrAdapter {
     }
 
     fn vram_estimate_mb(&self) -> Option<u64> {
-        // 无权限时回退：取当前模型目录大小估算
-        let p = self.engine.current_model_path();
-        p.parent().map(|d| {
-            let mut total: u64 = 0;
-            fn walk(dir: &std::path::Path, total: &mut u64) {
-                if let Ok(rd) = std::fs::read_dir(dir) {
-                    for e in rd.flatten() {
-                        let p = e.path();
-                        if p.is_dir() {
-                            walk(&p, total);
-                        } else if let Ok(md) = e.metadata() {
-                            *total += md.len();
-                        }
-                    }
-                }
-            }
-            walk(&d, &mut total);
-            total / (1024 * 1024)
-        })
+        // 预估（真值由 lib.rs 的按进程查询给出）：权重 + mmproj + KV(按 ctx 与 GGUF 几何) + 固定开销。
+        // 旧实现取「模型目录大小」—— 把文件体积当显存，系统性少算 KV + CUDA 上下文（实测差 ~1.3 GiB）。
+        let cfg = self.engine.config();
+        if cfg.n_gpu_layers == 0 {
+            return None; // 纯 CPU：不占显存
+        }
+        let weights = std::fs::metadata(&cfg.model_path).ok()?.len();
+        let mmproj = if cfg.mmproj_offload {
+            std::fs::metadata(&cfg.mmproj_path).map(|m| m.len()).unwrap_or(0)
+        } else {
+            0
+        };
+        let geom = crate::vram::read_gguf_kv_geometry(&cfg.model_path);
+        Some(crate::vram::estimate_vram_mb(weights, mmproj, geom, cfg.ctx_size))
     }
 }
 
@@ -1055,7 +1057,7 @@ mod tests {
     fn test_config_default_paths() {
         let cfg = LlamaServerConfig::default();
         assert!(cfg.port == DEFAULT_PORT);
-        assert!(cfg.ctx_size == 2048);
+        assert!(cfg.ctx_size == DEFAULT_CTX_SIZE);
         assert!(cfg.parallel == 1);
         // 分离架构：运行时在 libs/llama-cpp；模型路径在模型已下载时才可解析
         eprintln!("[test] server_path={}", cfg.server_path.display());

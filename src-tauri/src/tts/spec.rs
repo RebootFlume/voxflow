@@ -314,6 +314,8 @@ pub static SPECS: &[ModelSpec] = &[
         },
         // 精选条目：文件组合由我们调试后定死，用户只选一条；同一模型同时只装一条。
         // 默认 = 主权重 Q8_0 + 解码器 bf16（调试结论：解码器取无损 bf16，质量优先）
+        // ⚠️ size_mb = **磁盘实测字节数 / 1024²**（不是估算）：它同时驱动下载进度、磁盘预检
+        //    （并集 ×2）与 UI 显示，写错会直接体现在界面上。新增条目请按实际文件填。
         entries: &[
             DownloadEntry {
                 id: "q8_0__mp_bf16",
@@ -321,7 +323,7 @@ pub static SPECS: &[ModelSpec] = &[
                 label_en: "Q8_0 weights + bf16 decoder · Recommended",
                 files: &[
                     EntryFile { role: FileRole::Main, name: "Qwen3-ASR-0.6B-Q8_0.gguf", size_mb: 768 },
-                    EntryFile { role: FileRole::Mmproj, name: "mmproj-Qwen3-ASR-0.6B-bf16.gguf", size_mb: 410 },
+                    EntryFile { role: FileRole::Mmproj, name: "mmproj-Qwen3-ASR-0.6B-bf16.gguf", size_mb: 361 },
                 ],
                 default: true,
             },
@@ -336,7 +338,7 @@ pub static SPECS: &[ModelSpec] = &[
                 default: false,
             },
         ],
-        size_gb: 0.95,
+        size_gb: 1.10, // 默认条目实测：768 + 361 MiB
         description_zh: "默认识别模型 · GGUF 量化 · 更快 · 内存占用更低",
         description_en: "Default ASR model · GGUF quantized · faster · lower memory",
         available: true,
@@ -364,8 +366,8 @@ pub static SPECS: &[ModelSpec] = &[
                 label_zh: "Q8_0 主权重 + bf16 解码器 · 推荐",
                 label_en: "Q8_0 weights + bf16 decoder · Recommended",
                 files: &[
-                    EntryFile { role: FileRole::Main, name: "Qwen3-ASR-1.7B-Q8_0.gguf", size_mb: 2350 },
-                    EntryFile { role: FileRole::Mmproj, name: "mmproj-Qwen3-ASR-1.7B-bf16.gguf", size_mb: 410 },
+                    EntryFile { role: FileRole::Main, name: "Qwen3-ASR-1.7B-Q8_0.gguf", size_mb: 2065 },
+                    EntryFile { role: FileRole::Mmproj, name: "mmproj-Qwen3-ASR-1.7B-bf16.gguf", size_mb: 612 },
                 ],
                 default: true,
             },
@@ -374,13 +376,13 @@ pub static SPECS: &[ModelSpec] = &[
                 label_zh: "Q8_0 主权重 + Q8_0 解码器（更省显存）",
                 label_en: "Q8_0 weights + Q8_0 decoder (lower VRAM)",
                 files: &[
-                    EntryFile { role: FileRole::Main, name: "Qwen3-ASR-1.7B-Q8_0.gguf", size_mb: 2350 },
-                    EntryFile { role: FileRole::Mmproj, name: "mmproj-Qwen3-ASR-1.7B-Q8_0.gguf", size_mb: 205 },
+                    EntryFile { role: FileRole::Main, name: "Qwen3-ASR-1.7B-Q8_0.gguf", size_mb: 2065 },
+                    EntryFile { role: FileRole::Mmproj, name: "mmproj-Qwen3-ASR-1.7B-Q8_0.gguf", size_mb: 339 },
                 ],
                 default: false,
             },
         ],
-        size_gb: 2.35,
+        size_gb: 2.61, // 默认条目实测：2065 + 612 MiB
         description_zh: "更准 · GGUF 量化 · 需要更多内存/显存",
         description_en: "More accurate · GGUF quantized · needs more memory",
         available: true,

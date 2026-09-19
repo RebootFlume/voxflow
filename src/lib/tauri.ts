@@ -19,8 +19,8 @@ export function rustGetVramStatus(): Promise<{
   gpu_name: string;
   total_mb: number;
   used_mb: number;
-  /** 框架 id → 占用（未加载为 null；旧键 llama/sherpa 可能暂时并存） */
-  frameworks?: Record<string, { mb: number } | null> | null;
+  /** 框架 id → 占用（未加载为 null）。source：wmi=驱动真值 / smi=nvidia-smi / estimate=预估 */
+  frameworks?: Record<string, { mb: number; source?: string } | null> | null;
 }> {
   return invoke("get_vram_status");
 }

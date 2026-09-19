@@ -138,6 +138,7 @@ const DICTS: Record<Locale, Dict> = {
     "asr.vram.desc": "当前 GPU 显存与推理框架占用",
     "asr.vram.usage": "已用显存",
     "asr.vram.noDetail": "推理框架未加载或显存信息不可用",
+    "asr.vram.estimated": "估算",
     "asr.vram.noGpu": "未检测到 NVIDIA GPU",
     "asr.status.current": "当前状态：",
     "asr.status.idle": "空闲",
@@ -274,6 +275,8 @@ const DICTS: Record<Locale, Dict> = {
     "models.source.label": "来源",
     "models.entry.label": "量化组合",
     "models.entry.current": "（当前）",
+    "models.entry.vram": "显存 ≈{v} GB",
+    "models.vram.hint": "预计显存 = 权重 + KV 缓存（按当前上下文 2048）+ CUDA 固定开销；与下载体积不是一回事",
     "models.entry.switch": "切换",
     "models.state.in_use": "已加载",
     "models.state.downloaded": "已下载",
@@ -536,6 +539,7 @@ const DICTS: Record<Locale, Dict> = {
 
     "asr.vram.title": "VRAM Monitor",
     "asr.vram.desc": "GPU VRAM usage by inference frameworks",
+    "asr.vram.estimated": "est.",
     "asr.vram.usage": "VRAM used",
     "asr.vram.noDetail": "No framework loaded or VRAM info unavailable",
     "asr.vram.noGpu": "No NVIDIA GPU detected",
@@ -640,6 +644,8 @@ const DICTS: Record<Locale, Dict> = {
     "models.entry.label": "Quantization",
     "models.entry.current": "(current)",
     "models.entry.switch": "Switch",
+    "models.entry.vram": "VRAM ≈{v} GB",
+    "models.vram.hint": "Estimated VRAM = weights + KV cache (ctx 2048) + CUDA fixed overhead; not the same as download size",
 
     "models.status.ready": "Ready",
     "models.status.loading": "Loading",

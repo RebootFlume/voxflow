@@ -345,9 +345,36 @@ mod tests {
         (0..n).map(|i| (i % 251) as u8).collect()
     }
 
+    /// 代理相关测试共用的 env 锁：env 是进程级全局态，测试并行会互相污染
+    /// （踩过：某测试写入 no_proxy=127.0.0.1 后，另一个测试的**显式**代理被一起豁免）。
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 在「无代理 env」环境下运行闭包（保存/清空/恢复），保证断言只反映代码行为
+    fn without_proxy_env<T>(f: impl FnOnce() -> T) -> T {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let keys = [
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy",
+            "NO_PROXY", "no_proxy",
+        ];
+        let saved: Vec<(&str, Option<String>)> =
+            keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        for k in keys {
+            std::env::remove_var(k);
+        }
+        let out = f();
+        for (k, v) in saved {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+        out
+    }
+
     fn client() -> reqwest::blocking::Client {
-        reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(30))
+        // 与生产同款「回环客户端」：彻底禁用代理。
+        // 否则环境里的 HTTP_PROXY（本机实测存在）会把本地假服务器的请求劫走 → 断言全乱。
+        crate::model_manager::loopback_client_builder(Duration::from_secs(30))
             .build()
             .expect("client")
     }
@@ -513,6 +540,7 @@ mod tests {
     /// 必须 `builder.proxy(Proxy::all(..))`；这条测试锁住该行为，防回归）
     #[test]
     fn proxy_is_actually_used() {
+        without_proxy_env(|| {
         let body = body_of(32 * 1024);
         let target = spawn(ServerCfg {
             body: body.clone(),
@@ -547,6 +575,36 @@ mod tests {
         assert_eq!(std::fs::read(&dest).expect("read"), body);
         assert_eq!(proxy.hits.load(Ordering::SeqCst), 1, "请求必须经过代理");
         assert_eq!(target.hits.load(Ordering::SeqCst), 0, "配了代理就不应直连目标");
+        });
+    }
+
+    /// 回环不变式：env 里配了代理时，回环客户端（生产 llama-server 用同款）必须仍直连。
+    /// 否则用户环境里的 HTTP_PROXY 一旦不可用，整个 ASR 的健康检查/转写都会挂。
+    #[test]
+    fn loopback_never_uses_proxy() {
+        without_proxy_env(|| {
+            let body = body_of(8 * 1024);
+            let target = spawn(ServerCfg { body: body.clone(), support_range: true, fail_first: 0, chunk_delay_ms: 0 });
+            let proxy = spawn(ServerCfg { body: body.clone(), support_range: true, fail_first: 0, chunk_delay_ms: 0 });
+            std::env::set_var("HTTP_PROXY", &proxy.base);
+            std::env::set_var("http_proxy", &proxy.base);
+            let client = crate::model_manager::loopback_client_builder(Duration::from_secs(30))
+                .build()
+                .expect("client");
+            let dir = tmpdir("loopback");
+            let dest = dir.join("a.bin");
+            download(
+                &client,
+                &Download { url: &target.url, dest: &dest, on_progress: None, cancel: None, headers: &[] },
+            )
+            .expect("download");
+            assert_eq!(target.hits.load(Ordering::SeqCst), 1, "回环应直连目标");
+            assert_eq!(
+                proxy.hits.load(Ordering::SeqCst),
+                0,
+                "回环绝不应走代理（env 代理存在时也一样）"
+            );
+        });
     }
 
     #[test]

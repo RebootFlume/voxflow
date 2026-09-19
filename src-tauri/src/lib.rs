@@ -5,6 +5,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 mod app_state;
+mod vram;
 #[allow(unused_imports)]
 pub mod clipboard;
 #[allow(unused_imports)]
@@ -100,6 +101,9 @@ fn dispatch_sidecar_action(
             if let Some(proxy) = payload.get("proxy").and_then(|v| v.as_str()) {
                 model_manager::set_proxy(proxy);
             }
+            // 代理单一来源：配置为空则接管 env，然后清空 env（reqwest 会隐式读 env）
+            let effective = model_manager::adopt_proxy_env();
+            log::info!("[proxy] 生效代理: {}", if effective.is_empty() { "(直连)" } else { &effective });
             if let Some(token) = payload.get("hf_token").and_then(|v| v.as_str()) {
                 model_manager::set_token(token);
             }
@@ -392,26 +396,29 @@ fn get_vram_status_sync() -> serde_json::Value {
     // （新增框架无需改此处）。关键：引擎已卸载时不得回退到"模型目录大小"估算——
     // 那会在引擎死后假报占用；只有引擎 is_loaded() 却查不到 nvidia-smi 明细（无权限）
     // 时才用目录大小近似（见 active_engine_dir_mb）。
-    let mut by_engine: std::collections::BTreeMap<&'static str, Option<u64>> =
+    // 真值优先：WMI（Windows 驱动口径）→ nvidia-smi（其他平台/旧权限）→ 预估（标注 estimate）
+    let wmi = vram_by_process_wmi();
+    let mut by_engine: std::collections::BTreeMap<&'static str, (u64, &'static str)> =
         std::collections::BTreeMap::new();
     for fw in crate::model_manager::FRAMEWORKS {
-        let mb = fw
+        let hit = fw
             .process_name
-            .and_then(vram_of_process)
-            .or_else(|| active_engine_dir_mb(fw.id))
-            .or_else(|| registry_vram_mb_if_active(fw.id));
-        let slot = by_engine.entry(fw.engine).or_insert(None);
-        if mb.is_some() {
-            *slot = mb; // 非空优先（同一展示名可能对应多个注册键）
+            .and_then(|n| {
+                wmi.get(&n.to_ascii_lowercase())
+                    .map(|mb| (*mb, "wmi"))
+                    .or_else(|| vram_of_process(n).map(|mb| (mb, "smi")))
+            })
+            .or_else(|| registry_vram_mb_if_active(fw.id).map(|mb| (mb, "estimate")));
+        if let Some(v) = hit {
+            by_engine.insert(fw.engine, v); // 非空覆盖（同一展示名可能对应多个注册键）
         }
     }
     let frameworks: serde_json::Map<String, serde_json::Value> = by_engine
         .into_iter()
-        .map(|(k, v)| {
+        .map(|(k, (mb, src))| {
             (
                 k.to_string(),
-                v.map(|m| serde_json::json!({ "mb": m }))
-                    .unwrap_or_else(|| serde_json::json!(null)),
+                serde_json::json!({ "mb": mb, "source": src }),
             )
         })
         .collect();
@@ -436,19 +443,46 @@ fn registry_vram_mb_if_active(framework: &'static str) -> Option<u64> {
     }
 }
 
-/// 引擎活着但拿不到 nvidia-smi 明细时的近似：已加载模型的目录大小（MB）。
-/// 引擎未加载 → None（显存已释放，绝不估算）。通用实现，不按框架写分支。
-fn active_engine_dir_mb(framework: &'static str) -> Option<u64> {
-    let r = crate::inference::registry::registry();
-    let e = r.engine(framework)?;
-    if !e.is_loaded() {
-        return None;
+/// 按进程读 GPU 显存**真值**（Windows：WMI GPU Process Memory 计数器）。
+///
+/// 为什么不用 nvidia-smi：Windows/WDDM 下 `--query-compute-apps` 的 used_memory 全是 N/A
+/// （本机实测 `[Insufficient Permissions], [N/A]`），旧实现因此只能回退成「模型目录大小」
+/// ——把文件体积当显存，系统性少算 KV + 固定开销（本机实测差 ~1.3 GiB）。
+/// WMI 计数器给的是驱动口径的 DedicatedUsage，无需管理员（本机实测与进程一一对应）。
+/// 非 Windows 返回空表 → 调用方回退 nvidia-smi。
+pub(crate) fn vram_by_process_wmi() -> std::collections::HashMap<String, u64> {
+    let mut out = std::collections::HashMap::new();
+    if !cfg!(windows) {
+        return out;
     }
-    let model = e.current_model();
-    if model.is_empty() {
-        return None;
+    // 一次 PowerShell 拿全部（逐行查 Win32_Process 太慢）；>50MB 才回传，行数很少
+    let script = r#"
+$procs = @{}
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | ForEach-Object { $procs[[int]$_.ProcessId] = $_.Name }
+Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory -ErrorAction SilentlyContinue |
+  Where-Object { $_.DedicatedUsage -gt 52428800 } |
+  ForEach-Object {
+    $p = [int]($_.Name -replace '^pid_(\d+)_.*$', '$1')
+    if ($procs.ContainsKey($p)) { '{0},{1}' -f $procs[$p], [int]($_.DedicatedUsage / 1MB) }
+  }
+"#;
+    let mut cmd = std::process::Command::new("powershell");
+    crate::process_hidden::hide_console_window(&mut cmd);
+    let Ok(o) = cmd.args(["-NoProfile", "-NonInteractive", "-Command", script]).output() else {
+        return out;
+    };
+    if !o.status.success() {
+        return out;
     }
-    dir_size_mb(&crate::model_manager::model_dir(&model))
+    for line in String::from_utf8_lossy(&o.stdout).lines() {
+        if let Some((name, mb)) = line.trim().split_once(',') {
+            if let Ok(mb) = mb.trim().parse::<u64>() {
+                // 同名多实例（如两个 llama-server）要**累加**，否则后一行覆盖前一行会少报
+                *out.entry(name.trim().to_ascii_lowercase()).or_insert(0) += mb;
+            }
+        }
+    }
+    out
 }
 
 /// 查询指定进程名的显存占用（MB）——按 PID 匹配 nvidia-smi
@@ -491,31 +525,6 @@ fn vram_of_process(name: &str) -> Option<u64> {
     })
 }
 
-/// 计算目录大小（MB）——用于无权限时按模型文件大小估算显存
-fn dir_size_mb(dir: &std::path::Path) -> Option<u64> {
-    if !dir.is_dir() {
-        return None;
-    }
-    let mut total: u64 = 0;
-    fn walk(d: &std::path::Path, total: &mut u64) {
-        if let Ok(rd) = std::fs::read_dir(d) {
-            for e in rd.flatten() {
-                let p = e.path();
-                if p.is_dir() {
-                    walk(&p, total);
-                } else if let Ok(md) = e.metadata() {
-                    *total += md.len();
-                }
-            }
-        }
-    }
-    walk(dir, &mut total);
-    if total > 0 {
-        Some(total / (1024 * 1024))
-    } else {
-        None
-    }
-}
 
 /// Rust 原生音频解码（不依赖 Python）
 /// 输入：文件路径，输出：16kHz mono float32 samples + 时长

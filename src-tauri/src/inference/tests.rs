@@ -136,6 +136,19 @@ fn smoke_long_audio_segmented() {
     let engine = crate::inference::llama_server::global_engine();
     engine.load_with_config(cfg, &mut |_| {}).expect("llama-server 启动失败");
 
+    // 显存账目对照：预估值（权重+KV+固定开销）vs 驱动真值（WMI 按进程）
+    let adapter_vram = crate::inference::llama_server::LlamaAsrAdapter::new();
+    let est = crate::inference::engine::AsrEngine::vram_estimate_mb(&adapter_vram)
+        .expect("GPU 模式应有预估");
+    let truth = crate::vram_by_process_wmi()
+        .get("llama-server.exe")
+        .copied();
+    println!("[smoke] 预计显存 = {est} MiB | WMI 真值(含其它实例) = {truth:?} MiB");
+    assert!(
+        (1500..=2200).contains(&est),
+        "0.6B/ctx2048/Q8 的预估应在 1.5–2.2 GiB 量级（实测 1768），实际 {est}"
+    );
+
     // 真实语音铺满 180s（> 3 × 60s 段，触发滑动窗口分段）
     let wav =
         std::fs::read(manifest.join("../benchmarks/test-audio/asr-test-zh.wav")).expect("样本音频");
