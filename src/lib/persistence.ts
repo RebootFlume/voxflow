@@ -79,9 +79,10 @@ export async function saveConfig() {
     const config = {
       asr: { hotkey: state.asr.hotkey, model: state.asr.model, device: state.asr.device, framework: state.asr.framework },
       tts: state.tts,
-      // 克隆音色：落盘只保留可复现场景需要的三项（status/error 属运行态）
+      // 克隆音色：落盘只保留可复现场景需要的四项（status/error 属运行态）
       ttsClone: {
         active: state.ttsClone.active,
+        name: state.ttsClone.name,
         audioPath: state.ttsClone.audioPath,
         referenceText: state.ttsClone.referenceText,
       },
