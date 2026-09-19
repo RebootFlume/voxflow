@@ -429,7 +429,7 @@ function useVoiceLibrary(): VoiceLibraryApi {
       try {
         await rustClearTtsCloneVoice();
       } catch { /* 引擎可能本来就没参数，忽略 */ }
-      updateTtsClone({ active: false, audioPath: "", referenceText: "", status: "idle", error: "" });
+      updateTtsClone({ active: false, name: "", audioPath: "", referenceText: "", status: "idle", error: "" });
     }
     if (modal?.kind === "edit" && modal.id === v.id) resetModal();
     await refresh();
