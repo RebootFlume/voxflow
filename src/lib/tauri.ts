@@ -40,11 +40,6 @@ export function openPath(path: string): Promise<void> {
 // Rust 原生推理引擎桥接（Phase 3）
 // ============================================================
 
-/** 卸载 sherpa ASR 引擎（杀 websocket server 进程） */
-export function rustUnloadSherpaAsr(): Promise<Record<string, unknown>> {
-  return invoke("rust_unload_sherpa_asr");
-}
-
 /**
  * 统一 ASR 加载入口（路由由 Rust 注册表决定，前端不做框架推断）。
  * 返回 { reqId }；加载进度/结果由 sidecar://event（model_loading/progress/ready/error）驱动。
@@ -66,21 +61,6 @@ export function rustUnloadAsr(): Promise<Record<string, unknown>> {
 // ============================================================
 // llama-server 子进程桥接（ASR 主力路线）
 // ============================================================
-
-/** 启动 llama-server 子进程（常驻，供 ASR 转写）。model 指定模型名（0.6B / 1.7B），device: cuda / cpu */
-export function rustStartLlamaServer(model?: string, device?: string): Promise<Record<string, unknown>> {
-  return invoke("rust_start_llama_server", { model: model ?? null, device: device ?? "cuda" });
-}
-
-/** 停止 llama-server 子进程 */
-export function rustStopLlamaServer(): Promise<Record<string, unknown>> {
-  return invoke("rust_stop_llama_server");
-}
-
-/** 查询 llama-server 状态 */
-export function rustLlamaServerStatus(): Promise<{ loaded: boolean; model: string }> {
-  return invoke("rust_llama_server_status");
-}
 
 /** 通过 llama-server 转写音频文件（主力 ASR 入口，支持导出） */
 export function rustTranscribeLlama(
@@ -123,7 +103,6 @@ export function rustListTtsSpeakers(): Promise<{
   return invoke("rust_list_tts_speakers");
 }
 
-/** TTS 可用语言/音色（已废弃：语言能力改由 rustListE2eTtsModels 的描述符提供） */
 
 export function rustSetTtsLanguage(language: string): Promise<{ language: string }> {
   return invoke("rust_set_tts_language", { language });
@@ -139,16 +118,6 @@ export function rustSynthesize(
 /** Rust 原生音频设备枚举 */
 export function rustListAudioDevices(): Promise<Record<string, unknown>> {
   return invoke("rust_list_audio_devices");
-}
-
-/** 测试 TTS 模型加载（打印输入输出 tensor 名称） */
-export function rustTestTtsModel(): Promise<Record<string, unknown>> {
-  return invoke("rust_test_tts_model");
-}
-
-/** Rust 原生音频解码 */
-export function decodeAudioFile(path: string): Promise<{ samples: number[]; sampleRate: number; duration: number }> {
-  return invoke("decode_audio_file", { path });
 }
 
 /** 检测推理框架（libs）安装状态（三态：ready / incomplete / missing） */

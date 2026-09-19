@@ -28,14 +28,6 @@ export function runtimeKeyForFormat(format: "gguf" | "onnx" | undefined): string
   return null;
 }
 
-/** 某框架是否可用（ready；未检测时返回 null 表示"未知"） */
-export function runtimeReady(framework: string | null): boolean | null {
-  if (!framework) return null;
-  const { packages } = useAppStore.getState().runtime;
-  if (!packages) return null;
-  return packages.find((p) => p.framework === framework)?.state === "ready";
-}
-
 export function useRuntimeStatus() {
   const downloadFramework = useAppStore((s) => s.runtimeDownload.framework);
   useEffect(() => {

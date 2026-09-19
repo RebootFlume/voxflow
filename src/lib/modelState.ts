@@ -29,11 +29,6 @@ export function computeIsLoaded(kind: ModelKind, name: string): boolean {
   return eng.status === "ready" && eng.model === name;
 }
 
-/** 引擎加载状态（直接读 engines） */
-export function getEngineStatus(kind: ModelKind): "idle" | "loading" | "ready" | "error" {
-  return useAppStore.getState().engines[kind].status;
-}
-
 /** 将引擎状态应用到 engines（替代旧的 applyModelStatus 写 ttsModelStatus/asr.modelStatus） */
 export function applyEngineStatus(
   kind: ModelKind | null,

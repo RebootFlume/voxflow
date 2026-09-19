@@ -10,7 +10,7 @@
  * 状态写入点唯一：engines（modelsSlice），tts.model / asr.model 仅表示 UI 选中。
  */
 import { useAppStore } from "@/stores";
-import { rustLoadAsr, rustGetStatus, rustUnloadAsr, rustLoadTtsModel, rustUnloadTtsModel } from "@/lib/tauri";
+import { rustLoadAsr, rustUnloadAsr, rustLoadTtsModel, rustUnloadTtsModel } from "@/lib/tauri";
 import type { EngineFramework, ModelFramework } from "@/stores/types";
 import { runtimeKeyForFormat } from "@/hooks/useRuntimeStatus";
 import { t } from "@/lib/i18n";
@@ -100,14 +100,6 @@ export function unloadAsrModel(): Promise<void> {
   return rustUnloadAsr().then(
     () => useAppStore.getState().addLog(`[model] ⏹ ASR 引擎已卸载`, "info"),
     () => {},
-  );
-}
-
-/** 查询真实引擎是否就绪（状态快照） */
-export function checkAsrServer(): Promise<boolean> {
-  return rustGetStatus().then(
-    (r) => Boolean((r.asr as { loaded?: boolean } | undefined)?.loaded),
-    () => false,
   );
 }
 
