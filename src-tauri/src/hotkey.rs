@@ -14,6 +14,8 @@ use parking_lot::Mutex as PLMutex;
 use rdev::{listen, Event, EventType, Key};
 use tauri::{AppHandle, Emitter};
 
+use crate::inference::transcribe_chunks::transcribe_long;
+
 /// 当前注册的快捷键字符串（如 "CapsLock" / "Alt+Space"）。由 set_hotkey 命令更新，rdev 回调读取。
 static CURRENT_HOTKEY: PLMutex<String> = PLMutex::new(String::new());
 static CAPSLOCK_LISTENING: PLMutex<bool> = PLMutex::new(false);
@@ -71,16 +73,27 @@ fn start_capture_worker(app: AppHandle) {
                         let registry = crate::inference::registry::registry();
                         let result: Result<String, String> =
                             match registry.active_engine() {
-                                Some(engine) => engine.transcribe(&samples, 16_000),
+                                // 分段转写：整段一次性发送会在长录音（>~150s）时超过
+                                // llama-server 的 ctx 上限并报 400。≤60s 由 transcribe_long
+                                // 直通单次调用，短按行为零变化。
+                                Some(engine) => {
+                                    transcribe_long(engine.as_ref(), &samples, 16_000, &mut |_, _| {})
+                                }
                                 None => {
                                     // 无已加载引擎：自动拉起「用户最近一次选择」的 llama-server
-                                    // （load_requested 跟随 UI 选择，不再硬编码 0.6B）
-                                    let engine = crate::inference::llama_server::global_engine();
+                                    // （load_requested 内部走 registry.load_requested_asr；加载完成后
+                                    //  注册表即有 adapter，重新取一次以便同样走分段转写，不再用裸引擎）
                                     match crate::inference::llama_server::load_requested() {
                                         Err(e) => Err(format!("引擎启动失败: {e}")),
-                                        Ok(_) => engine
-                                            .transcribe(&samples, 16_000)
-                                            .map_err(|e| e.to_string()),
+                                        Ok(_) => match registry.active_engine() {
+                                            Some(engine) => transcribe_long(
+                                                engine.as_ref(),
+                                                &samples,
+                                                16_000,
+                                                &mut |_, _| {},
+                                            ),
+                                            None => Err("引擎启动失败: 注册表无可用引擎".into()),
+                                        },
                                     }
                                 }
                             };

@@ -7,7 +7,7 @@
 //!
 //! 启动参数（已通过 benchmarks 验证，勿随意调整）：
 //!   -m <model.gguf> --mmproj <mmproj.gguf> --port 8931
-//!   -ngl 99 --ctx-size 8192 --parallel 1 --no-webui
+//!   -ngl 99 --ctx-size 2048 --parallel 1 --no-webui
 //!
 //! 重要：默认 ctx 大小会让 8GB 显存爆掉（→ 慢 500 倍），必须显式限制。
 
@@ -67,7 +67,7 @@ impl Default for LlamaServerConfig {
             mmproj_path: PathBuf::new(),
             port: DEFAULT_PORT,
             n_gpu_layers: 99,
-            ctx_size: 8192,
+            ctx_size: 2048,
             parallel: 1,
             temperature: 0.0,
             no_webui: true,
@@ -827,7 +827,12 @@ fn llama_config_for_model(name: &str, device: &str) -> InferenceResult<LlamaServ
         port: DEFAULT_PORT,
         // 设备生效：cpu → 全 CPU（0 层）；其他（cuda 等）→ 全 GPU（99 层）
         n_gpu_layers: if is_cpu { 0 } else { 99 },
-        ctx_size: 8192,
+        // ctx 由「最长单段请求」定，不是越大越好：KV cache 在**加载时**按 ctx 整块分配，
+        // 与模型大小无关（Qwen3 全系 28 层 × 8 KV 头 × 128 维 = 112 KiB/token）。
+        // 分段上限 64s（60s+4s 重叠）× 实测音频 13.2 token/s ≈ 850 token + 输出 ≈ 1.1k
+        // → 2048 留近 2× 余量（8192 = 白占 672 MiB 显存）。
+        // 实测（RTX 4070 Laptop，0.6B Q8 + Q8 mmproj，-ngl 99）：ctx8192 = 2488 MiB，ctx2048 = 1664 MiB。
+        ctx_size: 2048,
         parallel: 1,
         temperature: 0.0,
         no_webui: true,
@@ -964,7 +969,7 @@ mod tests {
     fn test_config_default_paths() {
         let cfg = LlamaServerConfig::default();
         assert!(cfg.port == DEFAULT_PORT);
-        assert!(cfg.ctx_size == 8192);
+        assert!(cfg.ctx_size == 2048);
         assert!(cfg.parallel == 1);
         // 分离架构：运行时在 libs/llama-cpp；模型路径在模型已下载时才可解析
         eprintln!("[test] server_path={}", cfg.server_path.display());

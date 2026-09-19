@@ -261,8 +261,14 @@ fn handle_asr(body: &[u8], content_type: &str) -> tiny_http::Response<Cursor<Vec
         }
     };
 
-    // 7. 转写（engine.transcribe 已剥 language Chinese<asr_text> 前缀）
-    match engine.transcribe(&samples, sample_rate) {
+    // 7. 转写（长音频按 60s 分段：外部客户端可 POST 任意长度音频，
+    //    一次性发送会超过 llama-server ctx 报 400；engine.transcribe 已剥前缀）
+    match crate::inference::transcribe_chunks::transcribe_long(
+        engine.as_ref(),
+        &samples,
+        sample_rate,
+        &mut |_, _| {},
+    ) {
         Ok(text) => json_response(200, json!({"text": text})),
         Err(e) => json_response(500, error_json(500, &format!("transcription failed: {e}"))),
     }

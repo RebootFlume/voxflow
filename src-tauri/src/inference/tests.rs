@@ -105,3 +105,62 @@ fn test_registry_load_model_not_downloaded() {
     assert!(result.is_err(), "未注册框架应报错");
 }
 
+
+/// 长音频（180s）必须**分段**转写：ctx 2048 下单次请求会超过上下文并报 400。
+/// 覆盖热键 / HTTP API 现在走的那条路径（真引擎 + 真滑动窗口分段）。
+///
+/// 手动运行（需本机 0.6B GGUF 模型 + CUDA）：
+///   cargo test --lib -- --ignored smoke_long_audio_segmented --nocapture
+#[test]
+#[ignore = "needs local 0.6B gguf model + CUDA GPU; run with --ignored"]
+fn smoke_long_audio_segmented() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let model_dir = manifest.join("../data/models/qwen3-asr-0.6b-gguf");
+    let cfg = crate::inference::llama_server::LlamaServerConfig {
+        server_path: manifest
+            .join("target/debug/libs/llama-cpp")
+            .join(if cfg!(windows) { "llama-server.exe" } else { "llama-server" }),
+        model_path: model_dir.join("Qwen3-ASR-0.6B-Q8_0.gguf"),
+        mmproj_path: model_dir.join("mmproj-Qwen3-ASR-0.6B-Q8_0.gguf"),
+        port: 18941,
+        n_gpu_layers: 99,
+        ctx_size: 2048,
+        parallel: 1,
+        temperature: 0.0,
+        no_webui: true,
+        mmproj_offload: true,
+    };
+    assert!(cfg.model_path.is_file(), "模型缺失: {}", cfg.model_path.display());
+    assert!(cfg.mmproj_path.is_file(), "mmproj 缺失: {}", cfg.mmproj_path.display());
+
+    let engine = crate::inference::llama_server::global_engine();
+    engine.load_with_config(cfg, &mut |_| {}).expect("llama-server 启动失败");
+
+    // 真实语音铺满 180s（> 3 × 60s 段，触发滑动窗口分段）
+    let wav =
+        std::fs::read(manifest.join("../benchmarks/test-audio/asr-test-zh.wav")).expect("样本音频");
+    let (clip, rate) = crate::audio::decode_audio(&wav).expect("解码样本");
+    assert!(!clip.is_empty(), "样本音频为空");
+    let mut samples: Vec<f32> = Vec::new();
+    while samples.len() < rate as usize * 180 {
+        samples.extend_from_slice(&clip);
+    }
+    samples.truncate(rate as usize * 180);
+
+    let adapter = crate::inference::llama_server::LlamaAsrAdapter::new();
+    let text = crate::inference::transcribe_chunks::transcribe_long(
+        &adapter,
+        &samples,
+        rate,
+        &mut |_, _| {},
+    )
+    .expect("180s 必须转写成功（分段）；单次请求会在 ctx 2048 下报 400");
+    println!(
+        "[smoke] 180s → {} 字: {}",
+        text.chars().count(),
+        text.chars().take(50).collect::<String>()
+    );
+    assert!(text.chars().count() > 20, "长音频应产出非空文本: {text:?}");
+
+    engine.unload().ok();
+}

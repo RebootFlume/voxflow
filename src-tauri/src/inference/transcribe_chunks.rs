@@ -1,7 +1,7 @@
 //! 长音频分批转写编排（框架无关，任何 AsrEngine 都受益）
 //!
 //! ## 为什么需要
-//! llama-server 的 context 有限（8192 token），一次性发送长音频会 400 错误。
+//! llama-server 的 context 有限（2048 token），一次性发送长音频会 400 错误。
 //! sherpa-onnx 虽支持流式任意长度，但为统一各框架能力，长音频一律走本模块分段。
 //!
 //! ## 算法（参照 CapsWriter 滑动窗口）
@@ -9,7 +9,7 @@
 //!   - 每段实际发送 64s（60s 正片 + 4s 重叠尾巴）
 //!   - 窗口每次前移 60s，相邻段有 4s 重叠，防止句子被切碎
 //!   - 剩余不足 64s 的残留作为最后一段
-//!   - 60s ≈ 6000 token < 8192 ctx ✅（llama-server 单段安全）
+//!   - 64s 实测 ≈ 850 audio token + 输出 ≈ 1.1k < 2048 ctx ✅（单段安全，近 2× 余量）
 //!
 //! ## 框架无关
 //! 只依赖 `AsrEngine::transcribe(&[f32], rate)`，llama-server / sherpa / PyTorch
@@ -17,7 +17,8 @@
 
 use super::engine::AsrEngine;
 
-/// 段长（秒）：CapsWriter 同款，60s ≈ 6000 token < 8192 ctx
+/// 段长（秒）：CapsWriter 同款。实测音频 token 率 13.2/s（60s → 808 input tokens），
+/// 故 64s 段 ≈ 1.1k token，配 2048 ctx 有近 2× 余量（旧注释「60s≈6000 token」高估 7 倍）
 pub const SEG_DURATION_SEC: usize = 60;
 /// 重叠（秒）：防止句子被段边界切断
 pub const SEG_OVERLAP_SEC: usize = 4;
