@@ -39,11 +39,6 @@ impl GgufKvGeometry {
     pub fn kv_bytes_f16(&self, ctx: u32) -> u64 {
         (ctx as u64) * 2 * self.layers * self.kv_heads * self.head_dim * 2
     }
-
-    /// MiB 形式（向上取整，避免显示成 0）
-    pub fn kv_mb_f16(&self, ctx: u32) -> u64 {
-        self.kv_bytes_f16(ctx).div_ceil(1024 * 1024)
-    }
 }
 
 // ─── 驱动口径：总/已用/可用显存 ─────────────────────────────────────────────
@@ -263,8 +258,11 @@ mod tests {
             }
         );
         // 与真机实测一致：112 KiB/token → ctx 8192 = 896 MiB、ctx 2048 = 224 MiB
-        assert_eq!(g.kv_mb_f16(8192), 896);
-        assert_eq!(g.kv_mb_f16(2048), 224);
+        // 走生产 API（字节）；MiB 便于对照上面实测值
+        assert_eq!(g.kv_bytes_f16(8192).div_ceil(1024 * 1024), 896);
+        assert_eq!(g.kv_bytes_f16(2048).div_ceil(1024 * 1024), 224);
+        // 逐字节核对公式：ctx × 2(K+V) × 28 层 × 8 KV 头 × 128 维 × 2B
+        assert_eq!(g.kv_bytes_f16(2048), 2048 * 2 * 28 * 8 * 128 * 2);
         let _ = std::fs::remove_file(&p);
     }
 
