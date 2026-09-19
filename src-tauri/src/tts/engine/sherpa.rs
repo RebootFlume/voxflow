@@ -17,7 +17,7 @@ use parking_lot::Mutex;
 
 use crate::errors::AppError;
 use crate::tts::engine::argv::{build_argv, ArgEnv};
-use crate::tts::spec::{BackendSpec, ModelSpec};
+use crate::tts::spec::{BackendSpec, ModelSpec, VoiceMode};
 use crate::tts::traits::{SynthAudio, TtsEngine, TtsResult};
 
 /// 引擎可变状态（&self 接口下的内部锁）
@@ -203,30 +203,6 @@ impl SherpaTtsEngine {
         Ok((wav, sample_rate))
     }
 
-    /// 设置语音克隆参数（ZipVoice）
-    pub fn set_clone_voice(&self, audio: &Path, text: &str) -> TtsResult<()> {
-        let mut inner = self.inner.lock();
-        if !audio.exists() {
-            return Err(AppError::LoadFailed(format!("参考音频不存在: {}", audio.display())));
-        }
-        if text.trim().is_empty() {
-            return Err(AppError::InvalidInput("参考文本不能为空".into()));
-        }
-        inner.reference_audio = Some(audio.to_path_buf());
-        inner.reference_text = Some(text.to_string());
-        Ok(())
-    }
-
-    /// 清除语音克隆参数（回到预设音色模式）
-    pub fn clear_clone_voice(&self) {
-        self.inner.lock().reference_audio = None;
-        self.inner.lock().reference_text = None;
-    }
-
-    /// 是否正在使用语音克隆
-    pub fn is_cloning(&self) -> bool {
-        self.inner.lock().reference_audio.is_some()
-    }
 }
 
 impl TtsEngine for SherpaTtsEngine {
@@ -292,6 +268,56 @@ impl TtsEngine for SherpaTtsEngine {
         Ok(())
     }
 
+    /// 设置语音克隆参数（ZipVoice 等克隆模型）
+    ///
+    /// 之前这两个方法只以「固有方法」存在、**没有进 trait impl** ⇒ 命令层经
+    /// `Arc<dyn TtsEngine>` 调用时命中 trait 默认实现：任何模型都被拒（"当前 TTS 模型
+    /// 不支持语音克隆"），而"清除克隆"走默认 no-op 静默失效。必须实现在 trait 里。
+    fn set_clone_voice(&self, audio: &Path, text: &str) -> TtsResult<()> {
+        let mut inner = self.inner.lock();
+        let spec = inner
+            .spec
+            .ok_or_else(|| AppError::InvalidInput("TTS 模型未加载，无法设置克隆音色".into()))?;
+
+        // 能力来自描述符（不做模型名分支）：只有 clone / preset_and_clone 接受克隆参数
+        let requires_text = match spec.voice_mode {
+            VoiceMode::Clone(c) | VoiceMode::PresetAndClone(_, c) => c.requires_text,
+            _ => {
+                return Err(AppError::InvalidInput(format!(
+                    "当前 TTS 模型（{}）不支持语音克隆",
+                    spec.name
+                )))
+            }
+        };
+
+        let text = text.trim();
+        if requires_text && text.is_empty() {
+            return Err(AppError::InvalidInput(format!(
+                "模型 {} 需要参考文本（参考音频里说的内容）",
+                spec.name
+            )));
+        }
+        if !audio.is_file() {
+            return Err(AppError::LoadFailed(format!(
+                "参考音频不存在: {}",
+                audio.display()
+            )));
+        }
+
+        inner.reference_audio = Some(audio.to_path_buf());
+        // 空文本存 None：argv 解释器按 Some/None 决定是否拼 `--reference-text`，
+        // 存 Some("") 会拼出空值参数（需要对不要求文本的克隆模型安全）
+        inner.reference_text = (!text.is_empty()).then(|| text.to_string());
+        Ok(())
+    }
+
+    /// 清除语音克隆参数（回到预设音色）
+    fn clear_clone_voice(&self) {
+        let mut inner = self.inner.lock();
+        inner.reference_audio = None;
+        inner.reference_text = None;
+    }
+
     fn synthesize(&self, text: &str, voice: &str) -> TtsResult<SynthAudio> {
         if !self.is_loaded() {
             return Err(AppError::NotInitialized);
@@ -342,6 +368,25 @@ impl TtsEngine for SherpaTtsEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 回归：克隆方法必须**实现在 trait impl 里**，否则命令层经 `Arc<dyn TtsEngine>` 调用会
+    /// 命中 trait 默认实现 —— 无论加载什么模型都返回"当前 TTS 模型不支持语音克隆"（用户实测踩到）。
+    /// 本测试经 `&dyn TtsEngine` 调用：未加载模型时应报"未加载"，绝不能是"不支持克隆"那句。
+    #[test]
+    fn clone_methods_are_reachable_through_dyn() {
+        let engine = SherpaTtsEngine::new();
+        let dyn_engine: &dyn TtsEngine = &engine;
+        let err = dyn_engine
+            .set_clone_voice(Path::new("no-such-file.wav"), "文本")
+            .expect_err("未加载模型必须报错");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("不支持语音克隆"),
+            "命中了 trait 默认实现（= 没在 trait impl 里覆写）: {msg}"
+        );
+        // clear 也必须可达（默认实现是 no-op，静默失效）
+        dyn_engine.clear_clone_voice();
+    }
 
     #[test]
     fn test_resolve_spec_by_dir() {

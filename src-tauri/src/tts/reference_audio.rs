@@ -14,6 +14,8 @@ pub const MIN_SECONDS: f64 = 3.0;
 pub const MAX_SECONDS: f64 = 30.0;
 /// 采样率（引擎侧的参考音频口径）
 pub const SAMPLE_RATE: u32 = 16_000;
+/// 数据目录里保留的参考音个数（每次录音写一个新文件，必须清理否则无限堆积）
+pub const KEEP_FILES: usize = 5;
 
 /// 时长钳制（纯函数）：NaN/非正数用默认值，否则收敛到 [MIN, MAX]
 pub fn clamp_seconds(seconds: f64) -> f64 {
@@ -46,6 +48,7 @@ pub fn record_to(dir: &Path, seconds: f64) -> Result<serde_json::Value, String> 
         .unwrap_or(0);
     let path = dir.join(format!("ref-{stamp}.wav"));
     crate::audio::wav::write_wav(&path, &samples, SAMPLE_RATE, 1)?;
+    prune(dir, KEEP_FILES);
 
     Ok(serde_json::json!({
         "path": path.to_string_lossy(),
@@ -55,9 +58,57 @@ pub fn record_to(dir: &Path, seconds: f64) -> Result<serde_json::Value, String> 
     }))
 }
 
+/// 只保留最近 `keep` 个 `ref-*.wav`（best-effort：失败不影响录音）。
+///
+/// 文件名是 `ref-<毫秒时间戳>.wav` ⇒ 同目录内**字典序 ≈ 时间序**，无需读文件时间。
+pub fn prune(dir: &Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("ref-") && n.ends_with(".wav"))
+        })
+        .collect();
+    if files.len() <= keep {
+        return;
+    }
+    files.sort();
+    for old in &files[..files.len() - keep] {
+        let _ = std::fs::remove_file(old);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_prune_keeps_newest_and_ignores_foreign_files() {
+        let dir = std::env::temp_dir().join(format!("voxflow_prune_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for ms in [100u128, 200, 300, 400, 500, 600] {
+            std::fs::write(dir.join(format!("ref-{ms}.wav")), b"x").unwrap();
+        }
+        // 非本次录音命名的文件不能被动（例如用户手动放进来的参考音）
+        std::fs::write(dir.join("my-voice.wav"), b"x").unwrap();
+
+        prune(&dir, 3);
+
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        left.sort();
+        assert_eq!(left, vec!["my-voice.wav", "ref-400.wav", "ref-500.wav", "ref-600.wav"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn test_clamp_seconds() {

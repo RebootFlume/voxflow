@@ -242,7 +242,14 @@ export function useSidecarEvents() {
               ) {
                 cloneRestoredFor = model;
                 void rustSetTtsCloneVoice(clone.audioPath, clone.referenceText).catch((e) => {
+                  // 失败时不能继续显示"克隆已激活"：参考音频可能已被删除，
+                  // 或便携版整体搬目录导致持久化的绝对路径失效（装/便携两种数据根见 data_root）
                   useAppStore.getState().addLog(`[tts] 恢复克隆音色失败: ${String(e)}`, "error");
+                  useAppStore.getState().updateTtsClone({
+                    active: false,
+                    status: "error",
+                    error: String(e),
+                  });
                 });
               }
             } else if (kind === "asr") {
