@@ -58,6 +58,8 @@ const DICTS: Record<Locale, Dict> = {
     "general.autostart.desc": "登录 Windows 后自动启动 VoxFlow",
     "general.locale": "界面语言",
     "general.locale.desc": "选择应用显示语言，后续可扩展更多语种",
+    "general.closeToTray": "关闭窗口时最小化到托盘",
+    "general.closeToTray.desc": "开启：点关闭只是隐藏到托盘，程序继续运行（录音热键仍可用）；关闭：点关闭直接退出程序",
     // Settings appearance
     "appearance.title": "外观",
     "appearance.desc": "主题模式与强调色（实时生效）",
@@ -534,6 +536,8 @@ const DICTS: Record<Locale, Dict> = {
     "general.autostart.desc": "Start VoxFlow automatically when you sign in to Windows",
     "general.locale": "Language",
     "general.locale.desc": "Display language — more locales can be added later",
+    "general.closeToTray": "Minimize to tray on close",
+    "general.closeToTray.desc": "On: closing the window only hides it to the tray, the app keeps running (recording hotkey stays active). Off: closing the window quits the app.",
     "appearance.title": "Appearance",
     "appearance.desc": "Theme mode and accent color (live)",
     "appearance.mode": "Appearance mode",

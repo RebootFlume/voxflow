@@ -56,6 +56,9 @@ pub struct AppState {
     pub tts: Arc<Mutex<TtsRegistry>>,
     /// 当前合成的取消令牌（命令层与 `rust_cancel_tts` 共用）
     pub tts_cancel: Arc<TtsCancel>,
+    /// 关闭窗口时"隐藏到托盘"（true，默认 = 历史行为）还是"直接退出"（false）。
+    /// 由前端设置项同步（`useWindowBehaviorSync`），关窗事件在 `lib.rs` 的 setup 里读它。
+    pub close_to_tray: AtomicBool,
 }
 
 impl AppState {
@@ -63,7 +66,18 @@ impl AppState {
         Self {
             tts: Arc::new(Mutex::new(TtsRegistry::new())),
             tts_cancel: Arc::new(TtsCancel::default()),
+            close_to_tray: AtomicBool::new(true),
         }
+    }
+
+    /// 设置关窗行为（true = 隐藏到托盘）
+    pub fn set_close_to_tray(&self, value: bool) {
+        self.close_to_tray.store(value, Ordering::SeqCst);
+    }
+
+    /// 关窗时是否隐藏到托盘
+    pub fn close_to_tray(&self) -> bool {
+        self.close_to_tray.load(Ordering::SeqCst)
     }
 }
 

@@ -16,7 +16,7 @@ import { useAppStore } from "@/stores";
 import { t } from "@/lib/i18n";
 import { useSidecarEvents } from "@/hooks/useSidecarEvents";
 import { useVramPoller } from "@/hooks/useVramPoller";
-import { useHotkeySync, useStartupFallback, useModelLoadTimeout, useStatusReconcile } from "@/hooks/useStartup";
+import { useHotkeySync, useWindowBehaviorSync, useStartupFallback, useModelLoadTimeout, useStatusReconcile } from "@/hooks/useStartup";
 import { useRuntimeStatus } from "@/hooks/useRuntimeStatus";
 import { MODULE_ICONS, resolveHeading } from "@/config/modules";
 
@@ -31,6 +31,7 @@ export default function App() {
   useSidecarEvents();
   useVramPoller();
   useHotkeySync();
+  useWindowBehaviorSync();
   useStartupFallback();
   useModelLoadTimeout();
   useStatusReconcile();

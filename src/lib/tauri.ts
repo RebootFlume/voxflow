@@ -211,6 +211,11 @@ export function rustSynthesize(
   return invoke("rust_synthesize", { text, voice, exportDir });
 }
 
+/** 关闭窗口的行为：true = 隐藏到托盘继续运行（默认），false = 直接退出应用 */
+export function rustSetCloseToTray(closeToTray: boolean): Promise<void> {
+  return invoke("rust_set_close_to_tray", { closeToTray });
+}
+
 /** Rust 引擎：取消当前正在进行的 TTS 合成（段边界生效，最多等当前一段跑完）。
  *  返回 cancelled=true 表示确实有一个进行中的合成被标记取消。 */
 export function rustCancelTts(): Promise<{ cancelled: boolean }> {

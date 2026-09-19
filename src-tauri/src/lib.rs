@@ -43,6 +43,15 @@ fn set_hotkey(app: tauri::AppHandle, hotkey: String) -> Result<(), String> {
     hotkey::register_combo(&app, &hotkey)
 }
 
+/// 关闭窗口的行为：`true`（默认）= 隐藏到托盘继续运行，`false` = 直接退出应用。
+///
+/// 只落在 Rust 侧的内存状态里（同步命令，只翻一个 AtomicBool）；持久化由前端
+/// `config.json` 负责，启动时经 `useWindowBehaviorSync` 推回来。
+#[tauri::command]
+fn rust_set_close_to_tray(state: tauri::State<'_, AppState>, close_to_tray: bool) {
+    state.set_close_to_tray(close_to_tray);
+}
+
 /// 模型是否使用中：按注册表 kind（与前端 modelState.resolveModelKind 一致）判定对应引擎
 ///
 /// 取 `tts` 句柄而非 `&AppState`：命令侧需把本函数移入阻塞池（State 不能跨线程边界）。
@@ -1054,14 +1063,19 @@ pub fn run() {
             // 启动录音 worker + rdev 全局监听（幂等，热键链路依赖）
             hotkey::start_capslock_listener(app.handle().clone());
 
-            // ── System Tray + 关闭 → 隐藏 ──
+            // ── System Tray + 关闭行为可配（隐藏到托盘 / 直接退出）──
             crate::tray::init_tray(app.handle())?;
             if let Some(window) = app.get_webview_window("main") {
                 let win = window.clone();
+                let app_handle = app.handle().clone();
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        api.prevent_close();
-                        let _ = win.hide();
+                        if app_handle.state::<AppState>().close_to_tray() {
+                            api.prevent_close();
+                            let _ = win.hide();
+                        } else {
+                            app_handle.exit(0);
+                        }
                     }
                 });
             }
@@ -1070,6 +1084,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             set_hotkey,
+            rust_set_close_to_tray,
             send_to_sidecar_safe,
             get_gpu_info,
             get_vram_status,

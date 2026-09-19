@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { useAppStore } from "@/stores";
-import { sendToSidecar } from "@/lib/tauri";
+import { rustSetCloseToTray, sendToSidecar } from "@/lib/tauri";
 import { t } from "@/lib/i18n";
 
 /** 热键变更 → 同步到 Rust */
@@ -12,6 +12,14 @@ export function useHotkeySync() {
       invoke("set_hotkey", { hotkey }).catch(() => {});
     });
   }, [hotkey]);
+}
+
+/** 关闭窗口行为 → 同步到 Rust（Rust 侧关窗事件据此决定隐藏到托盘还是退出） */
+export function useWindowBehaviorSync() {
+  const closeToTray = useAppStore((s) => s.closeToTray);
+  useEffect(() => {
+    void rustSetCloseToTray(closeToTray).catch(() => {});
+  }, [closeToTray]);
 }
 
 /** 启动兜底：主动查询 GPU 和音频设备信息（不依赖事件推送） */

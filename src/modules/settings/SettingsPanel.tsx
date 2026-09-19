@@ -13,6 +13,8 @@ export function SettingsPanel() {
   const updateOverlay = useAppStore((s) => s.updateOverlay);
   const locale = useAppStore((s) => s.locale);
   const setLocale = useAppStore((s) => s.setLocale);
+  const closeToTray = useAppStore((s) => s.closeToTray);
+  const setCloseToTray = useAppStore((s) => s.setCloseToTray);
 
   if (sub === "general") {
     return (
@@ -47,6 +49,14 @@ export function SettingsPanel() {
                 ))}
               </SelectContent>
             </Select>
+          </div>
+          <Separator />
+          <div className="flex items-center justify-between">
+            <div className="space-y-0.5">
+              <div className="text-sm font-medium">{t(locale, "general.closeToTray")}</div>
+              <div className="text-xs text-muted-foreground">{t(locale, "general.closeToTray.desc")}</div>
+            </div>
+            <Switch checked={closeToTray} onCheckedChange={setCloseToTray} />
           </div>
           <Separator />
           <div className="flex items-center justify-between">

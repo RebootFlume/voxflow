@@ -2,11 +2,14 @@ export interface SettingsSlice {
   overlay: { visible: boolean };
   theme: { mode: "system" | "light" | "dark"; accent: string };
   locale: "zh" | "en";
+  /** 点窗口关闭时：true = 隐藏到托盘继续运行（默认，历史行为）；false = 直接退出应用 */
+  closeToTray: boolean;
   updateOverlay: (patch: Partial<SettingsSlice["overlay"]>) => void;
   updateTheme: (patch: Partial<SettingsSlice["theme"]>) => void;
   setThemeMode: (mode: SettingsSlice["theme"]["mode"]) => void;
   setAccent: (hex: string) => void;
   setLocale: (l: "zh" | "en") => void;
+  setCloseToTray: (closeToTray: boolean) => void;
 }
 
 /**
@@ -26,9 +29,11 @@ export const createSettingsSlice = (set: (partial: Partial<SettingsSlice> | ((s:
   overlay: { visible: true },
   theme: { mode: "system", accent: "#18181b" },
   locale: detectSystemLocale(),
+  closeToTray: true,
   updateOverlay: (patch) => set((s) => ({ overlay: { ...s.overlay, ...patch } })),
   updateTheme: (patch) => set((s) => ({ theme: { ...s.theme, ...patch } })),
   setThemeMode: (mode) => set((s) => ({ theme: { ...s.theme, mode } })),
   setAccent: (accent) => set((s) => ({ theme: { ...s.theme, accent } })),
   setLocale: (locale) => set({ locale }),
+  setCloseToTray: (closeToTray) => set({ closeToTray }),
 });

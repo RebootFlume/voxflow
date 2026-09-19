@@ -48,6 +48,7 @@ export async function loadConfig() {
       overlay: { ...store.overlay, ...parsed.overlay },
       theme: { ...store.theme, ...parsed.theme },
       locale: parsed.locale ?? store.locale,
+      closeToTray: typeof parsed.closeToTray === "boolean" ? parsed.closeToTray : store.closeToTray,
       io: { ...store.io, ...parsed.io },
       models: {
         ...store.models,
@@ -81,6 +82,7 @@ export async function saveConfig() {
       overlay: state.overlay,
       theme: state.theme,
       locale: state.locale,
+      closeToTray: state.closeToTray,
       models: { modelRoot: storageRoot, proxy: state.models.proxy, huggingfaceToken: state.models.huggingfaceToken },
       useRustEngine: state.useRustEngine,
     };
@@ -192,7 +194,7 @@ export async function initPersistence() {
 
   // 监听配置变化 → 防抖保存
   let configTimer: ReturnType<typeof setTimeout> | null = null;
-  const watchConfigKeys = ["asr", "tts", "api", "io", "overlay", "theme", "locale", "models", "useRustEngine"] as const;
+  const watchConfigKeys = ["asr", "tts", "api", "io", "overlay", "theme", "locale", "closeToTray", "models", "useRustEngine"] as const;
   useAppStore.subscribe((state, prev) => {
     const changed = watchConfigKeys.some((k) => state[k] !== prev[k]);
     if (changed) {
