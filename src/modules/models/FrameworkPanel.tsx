@@ -83,7 +83,8 @@ export function FrameworkPanel() {
     }
   };
 
-  // 框架定义（含未来 PyTorch 占位）
+  // 框架描述文案查表（纯 i18n，未登记的框架不显示描述、不影响功能；
+  // 描述字段 Rust 未下发，故只能按运行时包 id 映射到 i18n key）
   const frameworkMeta: Record<string, { descKey: string; future?: boolean }> = {
     gguf: { descKey: "framework.desc.llama" },
     onnx: { descKey: "framework.desc.sherpa" },

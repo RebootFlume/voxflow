@@ -6,7 +6,8 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ModelSelector } from "@/components/ModelSelector";
 import { ModelStatusBadge } from "@/components/ModelStatusBadge";
-import { useAppStore, type ModelFramework } from "@/stores";
+import { useAppStore } from "@/stores";
+import { runtimeKeyOf } from "@/lib/modelState";
 import { VolumeWave } from "@/components/VolumeWave";
 import { t } from "@/lib/i18n";
 import { sendToSidecar } from "@/lib/tauri";
@@ -104,19 +105,14 @@ function VramMonitorCard() {
               />
             </div>
             <div className="space-y-1 text-xs text-muted-foreground">
-              {vram.llama != null && (
-                <div className="flex justify-between">
-                  <span>llama-server</span>
-                  <span className="tabular-nums">≈{(vram.llama / 1024).toFixed(2)} GB</span>
+              {/* 各框架占用：键由 Rust 下发（旧键 llama/sherpa 与新框架 id 都能显示） */}
+              {Object.entries(vram.frameworks).map(([fw, mb]) => (
+                <div key={fw} className="flex justify-between">
+                  <span>{fw}</span>
+                  <span className="tabular-nums">≈{(mb / 1024).toFixed(2)} GB</span>
                 </div>
-              )}
-              {vram.sherpa != null && (
-                <div className="flex justify-between">
-                  <span>sherpa-onnx</span>
-                  <span className="tabular-nums">≈{(vram.sherpa / 1024).toFixed(2)} GB</span>
-                </div>
-              )}
-              {vram.llama == null && vram.sherpa == null && (
+              ))}
+              {Object.keys(vram.frameworks).length === 0 && (
                 <p className="text-xs text-muted-foreground/70">{t(locale, "asr.vram.noDetail")}</p>
               )}
             </div>
@@ -138,6 +134,25 @@ export function AsrPanel() {
   // 引擎加载状态 + 实际加载设备（判断「设备待应用」）
   const asrEngineReady = useAppStore((s) => s.engines.asr.status === "ready");
   const loadedDevice = useAppStore((s) => s.models.loadedDevice);
+  const modelItems = useAppStore((s) => s.models.items);
+  const runtimePackages = useAppStore((s) => s.runtime.packages);
+
+  // 框架下拉项：ASR 模型清单里的运行时包 key 去重（顺序 = 清单顺序，确定性）；
+  // label 优先取运行时包名，无包则直接用 key —— 新增框架无需改前端
+  const frameworkOptions: { key: string; label: string }[] = [];
+  const seenKeys = new Set<string>();
+  for (const m of modelItems) {
+    if (m.kind !== "asr") continue;
+    const key = runtimeKeyOf(m);
+    if (!key || seenKeys.has(key)) continue;
+    seenKeys.add(key);
+    frameworkOptions.push({ key, label: runtimePackages?.find((p) => p.framework === key)?.name ?? key });
+  }
+  // 当前选中值不在清单里（清单未到/模型已下架）→ 补一项，避免选择框空白
+  if (asr.framework && !seenKeys.has(asr.framework)) {
+    const pkg = runtimePackages?.find((p) => p.framework === asr.framework);
+    frameworkOptions.unshift({ key: asr.framework, label: pkg?.name ?? asr.framework });
+  }
 
   if (sub === "hotkey") {
     return (
@@ -231,18 +246,18 @@ export function AsrPanel() {
               <Select
                 value={asr.framework}
                 onValueChange={(v) => {
-                  const fw = v as ModelFramework;
-                  updateAsr({ framework: fw });
+                  updateAsr({ framework: v });
                   // 切换框架时，如果当前模型不匹配新框架，不自动卸载，只提示用户
-                  void sendToSidecar({ action: "set_asr_framework", framework: fw });
+                  void sendToSidecar({ action: "set_asr_framework", framework: v });
                 }}
               >
                 <SelectTrigger className="w-56">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="gguf">{t(locale, "asr.framework.gguf")}</SelectItem>
-                  <SelectItem value="onnx">{t(locale, "asr.framework.onnx")}</SelectItem>
+                  {frameworkOptions.map((o) => (
+                    <SelectItem key={o.key} value={o.key}>{o.label}</SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>

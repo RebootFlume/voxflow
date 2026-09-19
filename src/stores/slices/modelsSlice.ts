@@ -1,4 +1,4 @@
-import type { EngineState, ModelFramework, ModelItemState } from "../types";
+import type { EngineState, ModelItemState } from "../types";
 
 /** 引擎集中管理：每个功能（asr/tts）一个引擎状态 */
 export interface EngineRegistry {
@@ -87,7 +87,10 @@ export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: Mod
           return {
             name: String(m.name ?? ""),
             kind: (m.kind === "tts" ? "tts" : "asr") as ModelItemState["kind"],
-            format: ((m.format === "onnx" ? "onnx" : "gguf") as ModelFramework),
+            // format / engine / runtime_key 全部透传 Rust 原值（非法/缺失保持空值，不塞默认）
+            format: typeof m.format === "string" ? m.format : "",
+            engine: typeof m.engine === "string" ? m.engine : undefined,
+            runtime_key: typeof m.runtime_key === "string" ? m.runtime_key : undefined,
             repo: String(m.repo ?? ""),
             sizeGb: Number(m.size_gb ?? 0),
             descriptionZh: String(m.description_zh ?? ""),

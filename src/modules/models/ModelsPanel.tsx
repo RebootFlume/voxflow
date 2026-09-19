@@ -22,13 +22,20 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useAppStore, type ModelItemState } from "@/stores";
 import { t } from "@/lib/i18n";
 import { openPath, pickFolder, sendToSidecar } from "@/lib/tauri";
-import { loadAsrModel, loadTtsModel, unloadAsrModel, unloadTtsModel, frameworkForModel } from "@/lib/modelLoader";
-import { computeIsLoaded } from "@/lib/modelState";
+import { loadAsrModel, loadTtsModel, unloadAsrModel, unloadTtsModel } from "@/lib/modelLoader";
+import { computeIsLoaded, engineOf, runtimeKeyOf } from "@/lib/modelState";
 import { FrameworkPanel } from "./FrameworkPanel";
 
 function refreshModels() {
   void sendToSidecar({ action: "list_models" });
 }
+
+/** 引擎徽章配色（仅视觉查表；未登记引擎走默认样式 —— 新增框架无需改前端） */
+const ENGINE_BADGE_CLASSES: Record<string, string> = {
+  llama: "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20",
+  sherpa: "bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20",
+  torch: "bg-orange-500/10 text-orange-600 dark:text-orange-400 border-orange-500/20",
+};
 
 /** 模型大小显示：已下载用真实磁盘占用，未下载用清单预估值 */
 function formatModelSize(it: ModelItemState): string {
@@ -176,21 +183,16 @@ function SettingsPage() {
 
 function FrameworkBadge({ name }: { name: string }) {
   const item = useAppStore((s) => s.models.items.find((i) => i.name === name));
-  const fw = item ? frameworkForModel(item) : "torch";
-  // 格式：sherpa 模型 → onnx，llama → gguf，torch → torch
-  const fmt = item?.format === "onnx" ? "onnx" : item?.format === "gguf" ? "gguf" : fw;
-  const styles: Record<string, string> = {
-    llama: "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20",
-    sherpa: "bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20",
-    torch: "bg-orange-500/10 text-orange-600 dark:text-orange-400 border-orange-500/20",
-  };
+  // 徽章文本 = 运行时包 key（缺省退回引擎名/format）；配色按引擎 —— 全部来自 Rust 下发
+  const engine = engineOf(item);
+  const label = runtimeKeyOf(item) ?? engine ?? "unknown";
   return (
     <Badge
       variant="outline"
-      className={`ml-1.5 font-mono text-[10px] uppercase ${styles[fw] ?? ""}`}
-      title={`${fw} · ${fmt}`}
+      className={`ml-1.5 font-mono text-[10px] uppercase ${ENGINE_BADGE_CLASSES[engine ?? ""] ?? ""}`}
+      title={`${engine ?? "unknown"} · ${label}`}
     >
-      {fmt}
+      {label}
     </Badge>
   );
 }
@@ -442,43 +444,33 @@ function ModelListPage({ kind, title, icon: Icon }: { kind: "asr" | "tts"; title
         <div className="flex h-16 items-center justify-center text-sm text-muted-foreground">…</div>
       )}
 
-      {/* 按框架分组展示：llama / sherpa / torch */}
+      {/* 按引擎分组展示：分组与顺序全部来自 Rust 清单（engine 首次出现顺序，确定性） */}
       {(() => {
-        const groups: { fw: "llama" | "sherpa" | "torch"; models: string[] }[] = [];
-        const byFw = new Map<string, string[]>();
+        const grouped: Record<string, string[]> = {};
+        const order: string[] = [];
         for (const n of names) {
           const item = items.find((i) => i.name === n);
-          const fw = item ? frameworkForModel(item) : "torch";
-          const arr = byFw.get(fw) ?? [];
-          arr.push(n);
-          byFw.set(fw, arr);
-        }
-        for (const fw of ["llama", "sherpa", "torch"] as const) {
-          const models = byFw.get(fw);
-          if (models && models.length > 0) {
-            groups.push({ fw, models });
+          const eng = engineOf(item) || "unknown"; // 无 engine/data 时的兜底标签
+          if (!grouped[eng]) {
+            grouped[eng] = [];
+            order.push(eng);
           }
+          grouped[eng].push(n);
         }
-        return groups.map((g) => (
-          <div key={g.fw} className="space-y-2">
+        return order.map((eng) => (
+          <div key={eng} className="space-y-2">
             <div className="flex items-center gap-2 pt-1">
               <Badge
                 variant="outline"
-                className={`font-mono text-[10px] uppercase ${
-                  g.fw === "llama"
-                    ? "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20"
-                    : g.fw === "sherpa"
-                      ? "bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20"
-                      : "bg-orange-500/10 text-orange-600 dark:text-orange-400 border-orange-500/20"
-                }`}
+                className={`font-mono text-[10px] uppercase ${ENGINE_BADGE_CLASSES[eng] ?? ""}`}
               >
-                {g.fw}
+                {eng}
               </Badge>
               <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                {g.fw} · {g.models.length}
+                {eng} · {grouped[eng].length}
               </span>
             </div>
-            {g.models.map((n) => <ModelRow key={n} name={n} />)}
+            {grouped[eng].map((n) => <ModelRow key={n} name={n} />)}
           </div>
         ));
       })()}

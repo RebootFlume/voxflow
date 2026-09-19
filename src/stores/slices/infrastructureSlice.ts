@@ -15,8 +15,8 @@ export interface InfrastructureSlice {
   sidebarCollapsed: boolean;
   /** 推理框架（libs）安装状态：检测结果 + 检测时间；null = 尚未检测 */
   runtime: { packages: RuntimePkgState[] | null; lastUpdate: number };
-  /** 显存监控（全局单例轮询，不随组件生命周期） */
-  vram: { total: number; used: number; llama: number | null; sherpa: number | null; lastUpdate: number };
+  /** 显存监控（全局单例轮询，不随组件生命周期）：frameworks = 框架 id → 占用 MB（Rust 下发键） */
+  vram: { total: number; used: number; frameworks: Record<string, number>; lastUpdate: number };
   updateIo: (patch: Partial<InfrastructureSlice["io"]>) => void;
   setAudioDevices: (current: string, currentName: string) => void;
   audioDevices: { current: string; currentName: string };
@@ -37,7 +37,7 @@ export const createInfrastructureSlice = (set: (partial: Partial<InfrastructureS
   sidebarCollapsed: false,
   audioDevices: { current: "default", currentName: "…" },
   runtime: { packages: null, lastUpdate: 0 },
-  vram: { total: 0, used: 0, llama: null, sherpa: null, lastUpdate: 0 },
+  vram: { total: 0, used: 0, frameworks: {}, lastUpdate: 0 },
   updateIo: (patch) => set((s) => ({ io: { ...s.io, ...patch } })),
   setAudioDevices: (current, currentName) => set({ audioDevices: { current, currentName } }),
   setGpu: (available, name, deviceCount) => set({ gpu: { available, name, deviceCount } }),

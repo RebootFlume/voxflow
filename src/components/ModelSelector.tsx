@@ -1,10 +1,16 @@
 import { useAppStore, type ModelItemState, type ModelFramework } from "@/stores";
 import { t } from "@/lib/i18n";
 import { Badge } from "@/components/ui/badge";
-import { computeIsLoaded } from "@/lib/modelState";
-import { runtimeKeyForFormat } from "@/hooks/useRuntimeStatus";
+import { computeIsLoaded, engineOf, runtimeKeyOf } from "@/lib/modelState";
 
 const EMPTY_ITEMS: ModelItemState[] = [];
+
+/** 引擎徽章配色（仅视觉查表；未登记引擎走默认样式 —— 新增框架无需改前端） */
+const ENGINE_BADGE_CLASSES: Record<string, string> = {
+  llama: "border-sky-500/40 text-sky-600 dark:text-sky-400",
+  sherpa: "border-emerald-500/40 text-emerald-600 dark:text-emerald-400",
+  torch: "border-orange-500/40 text-orange-600 dark:text-orange-400",
+};
 
 /** 模型大小显示：已下载用真实磁盘占用，未下载用清单预估值 */
 function sizeLabel(m: ModelItemState): string {
@@ -16,24 +22,23 @@ interface ModelSelectorProps {
   kind: "asr" | "tts";
   selected: string;
   onSelect: (name: string) => void;
-  /** 按格式过滤（可选） */
+  /** 按运行时包 key 过滤（可选） */
   formatFilter?: ModelFramework;
   /** 只展示已下载的模型（默认 false） */
   downloadedOnly?: boolean;
 }
 
-function FormatBadge({ format }: { format: ModelFramework }) {
-  const isOnnx = format === "onnx";
+function FormatBadge({ item }: { item: ModelItemState }) {
+  const engine = engineOf(item);
+  const label = runtimeKeyOf(item) ?? engine ?? "unknown";
   return (
     <Badge
       variant="outline"
       className={`text-[10px] px-1.5 py-0 h-4 ${
-        isOnnx
-          ? "border-emerald-500/40 text-emerald-600 dark:text-emerald-400"
-          : "border-sky-500/40 text-sky-600 dark:text-sky-400"
+        ENGINE_BADGE_CLASSES[engine ?? ""] ?? "border-muted-foreground/40 text-muted-foreground"
       }`}
     >
-      {format.toUpperCase()}
+      {label.toUpperCase()}
     </Badge>
   );
 }
@@ -49,8 +54,8 @@ export function ModelSelector({ kind, selected, onSelect, formatFilter, download
   // 过滤逻辑：kind + 可选 formatFilter + 状态
   const models = items.filter((i) => {
     if (i.kind !== kind) return false;
-    // 格式过滤（仅 ASR 且指定 formatFilter 时生效）
-    if (formatFilter && i.format !== formatFilter) return false;
+    // 运行时包 key 过滤（仅 ASR 且指定 formatFilter 时生效）
+    if (formatFilter && runtimeKeyOf(i) !== formatFilter) return false;
     // 只展示已下载的模型（可加载的）
     if (downloadedOnly) return i.state === "downloaded";
     // 默认：已下载 或 当前选中（但选中但未下载的不显示，避免误导）
@@ -88,7 +93,7 @@ export function ModelSelector({ kind, selected, onSelect, formatFilter, download
                   : ""
             : "";
         // 该模型所需框架未就绪 → 标注（用户不必先点一次才知道）
-        const fwKey = runtimeKeyForFormat(m.format);
+        const fwKey = runtimeKeyOf(m);
         const fwPkg = fwKey ? runtimePackages?.find((p) => p.framework === fwKey) : undefined;
         const fwBlocked = Boolean(fwPkg && fwPkg.state !== "ready");
 
@@ -116,7 +121,7 @@ export function ModelSelector({ kind, selected, onSelect, formatFilter, download
                   )}
                 </span>
                 <span className="text-sm font-medium truncate">{m.name}</span>
-                <FormatBadge format={m.format} />
+                <FormatBadge item={m} />
               </div>
               <div className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground pl-6">
                 <span>{sizeLabel(m)}</span>

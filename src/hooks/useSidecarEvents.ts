@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { onSidecarEvent, sendToSidecar } from "@/lib/tauri";
-import { applyEngineStatus, applyAsrFrameworkFromRust, syncAsrFrameworkFromLoaded, resolveModelKind } from "@/lib/modelState";
+import { applyEngineStatus, applyAsrFrameworkFromRust, syncAsrFrameworkFromLoaded, resolveModelKind, runtimeKeyOf } from "@/lib/modelState";
 import { useAppStore, type EngineState } from "@/stores";
 import { t } from "@/lib/i18n";
 
@@ -34,10 +34,12 @@ export function useSidecarEvents() {
         return;
       }
 
-      // 事件自带 kind（Rust 权威）优先，缺省按模型名解析（TTS 等旧事件）
+      // 事件自带 kind（Rust 权威）优先，缺省查清单（清单也查不到时默认 ASR）
       const pk = payload.kind;
       const kindOf = (modelName: string): "asr" | "tts" | null =>
         pk === "asr" || pk === "tts" ? pk : resolveModelKind(modelName);
+      // 事件自带的引擎展示名（Rust 下发时优先采信；缺省由清单反查）
+      const evtEngine = typeof payload.engine === "string" ? payload.engine : null;
 
       // 识别完成后自动回 idle（2 秒后）
       if (status === "recognized") {
@@ -218,22 +220,26 @@ export function useSidecarEvents() {
               store.setTtsModelStatus("ready");
               // 框架标签：事件权威 framework（Rust 注册表决定），前端不猜
               if (typeof payload.framework === "string") {
-                store.setEngineStatus("tts", {
-                  framework: payload.framework as EngineState["framework"],
-                });
+                store.setEngineStatus("tts", { framework: payload.framework });
               }
             } else if (kind === "asr") {
               store.updateAsr({ modelStatus: "ready", device: device as "cpu" | "cuda" });
               // 框架标签对齐：事件权威 framework 优先，清单兜底
-              if (typeof payload.framework === "string") applyAsrFrameworkFromRust(payload.framework);
-              else syncAsrFrameworkFromLoaded();
+              if (typeof payload.framework === "string") {
+                applyAsrFrameworkFromRust(payload.framework, evtEngine, model);
+              } else {
+                syncAsrFrameworkFromLoaded();
+              }
             }
           }
           break;
         }
         case "model_loading":
           store.addLog(`[model] ⏳ 正在加载 ${model}...`, "info");
-          if (typeof payload.framework === "string") applyAsrFrameworkFromRust(payload.framework);
+          // 只有 ASR 加载才对齐 ASR 框架标签（kind 权威；TTS 事件不再串改 asr.framework）
+          if (kindOf(model) !== "tts" && typeof payload.framework === "string") {
+            applyAsrFrameworkFromRust(payload.framework, evtEngine, model);
+          }
           applyEngineStatus(kindOf(model), "loading");
           break;
         case "model_progress": {
@@ -310,10 +316,11 @@ export function useSidecarEvents() {
                     modelStatus: "ready",
                     device: asrSnap.device as "cpu" | "cuda",
                   });
-                  // 快照带出真实加载模型 → 对齐框架标签
+                  // 快照带出真实加载模型 → 对齐框架标签（key/engine 全部来自清单）
                   if (asrSnap.model) {
                     const item = useAppStore.getState().models.items.find((i) => i.name === asrSnap.model);
-                    if (item) applyAsrFrameworkFromRust(item.format === "onnx" ? "onnx" : "gguf");
+                    const key = runtimeKeyOf(item);
+                    if (key) applyAsrFrameworkFromRust(key, item?.engine, asrSnap.model);
                   }
                 }
               } else if (!loaded && store.engines.asr.status === "ready") {
@@ -334,8 +341,13 @@ export function useSidecarEvents() {
         case "model_evicted": {
           const evicted = Array.isArray(payload.models) ? payload.models : [];
           const freedFor = typeof payload.freed_for === "string" ? payload.freed_for : "";
+          const engines = useAppStore.getState().engines;
           for (const evictedModel of evicted) {
-            applyEngineStatus(resolveModelKind(String(evictedModel)), "idle");
+            const m = String(evictedModel);
+            // 事件只给模型名：先按「引擎已加载模型」这种数据判定，再查清单（不再靠名字特征猜）
+            const kind =
+              m && engines.tts.model === m ? "tts" : m && engines.asr.model === m ? "asr" : resolveModelKind(m);
+            applyEngineStatus(kind, "idle");
           }
           if (evicted.length > 0) {
             store.addLog(

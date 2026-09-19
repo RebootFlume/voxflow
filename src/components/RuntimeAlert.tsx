@@ -2,7 +2,7 @@ import { AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAppStore } from "@/stores";
 import { t } from "@/lib/i18n";
-import { runtimeKeyForFormat } from "@/hooks/useRuntimeStatus";
+import { runtimeKeyOf } from "@/lib/modelState";
 
 /**
  * 缺少推理框架的全局横幅（可操作出口）。
@@ -26,7 +26,7 @@ export function RuntimeAlert() {
   const needed = new Set<string>();
   for (const m of items) {
     if (m.state !== "downloaded") continue;
-    const key = runtimeKeyForFormat(m.format);
+    const key = runtimeKeyOf(m);
     if (key) needed.add(key);
   }
   const broken = packages.filter((p) => needed.has(p.framework) && p.state !== "ready");

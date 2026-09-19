@@ -8,18 +8,32 @@
  * 「是否已加载」统一依据 engines（status === "ready" 且 model 匹配），
  * 不再用脆弱的 model 名对比，也不依赖 tts.model / asr.model 的「选中」值。
  */
-import { useAppStore } from "@/stores";
+import { useAppStore, type ModelItemState } from "@/stores";
 
 export type ModelKind = "asr" | "tts";
 
-/** 依据模型清单元数据判断模型种类；清单未就绪时按名称兜底（避免事件被吞） */
+/** 运行时包 key：Rust 下发的 runtime_key 优先，缺失回退既有 format（不再按格式枚举/映射） */
+export function runtimeKeyOf(
+  item: Pick<ModelItemState, "runtime_key" | "format"> | undefined | null,
+): string | null {
+  if (!item) return null;
+  return item.runtime_key || item.format || null;
+}
+
+/** 引擎展示名：Rust 下发的 engine 优先，缺失回退 runtime_key/format 原值（不做格式→引擎推导） */
+export function engineOf(
+  item: Pick<ModelItemState, "engine" | "runtime_key" | "format"> | undefined | null,
+): string | null {
+  if (!item) return null;
+  return item.engine || runtimeKeyOf(item);
+}
+
+/** 依据模型清单元数据判断模型种类；清单未就绪时默认 ASR（事件路径应优先采信 payload.kind） */
 export function resolveModelKind(name: string): ModelKind | null {
   if (!name) return null;
   const item = useAppStore.getState().models.items.find((i) => i.name === name);
   if (item) return item.kind;
-  // 兜底：清单未加载时按名称推断（E2E TTS 模型名特征，其余默认 ASR）
-  const lower = name.toLowerCase();
-  if (/kokoro|matcha|zipvoice|pocket|supertonic|kitten/.test(lower)) return "tts";
+  // 无清单可查时不猜名字：默认 ASR（与旧默认语义一致）
   return "asr";
 }
 
@@ -48,15 +62,32 @@ export function applyEngineStatus(
   }
 }
 
-/** 依据 Rust 事件里的权威框架（注册表 format）对齐 ASR 模型页标签 */
-export function applyAsrFrameworkFromRust(fw: string): void {
-  if (fw !== "gguf" && fw !== "onnx") return;
+/**
+ * 依据 Rust 下发的权威框架对齐 ASR 标签：
+ * - runtimeKey（运行时包 key）→ asr.framework（模型页过滤 / 持久化域）
+ * - engine（引擎展示名）→ engines.asr.framework（展示域）
+ * 事件的 framework 是 Rust 框架 id（可能是运行时包 key，也可能是引擎注册键），
+ * 统一用模型清单数据归一，不再做 format → engine 的白名单/二分映射。
+ * engine / modelName 由事件或清单下发，均可缺省。
+ */
+export function applyAsrFrameworkFromRust(
+  fw: string,
+  engine?: string | null,
+  modelName?: string | null,
+): void {
+  if (!fw) return;
   const s = useAppStore.getState();
-  const engineFw = fw === "onnx" ? ("sherpa" as const) : ("llama" as const);
-  if (s.asr.framework !== fw || s.engines.asr.framework !== engineFw) {
-    s.updateAsr({ framework: fw });
-    s.setEngineStatus("asr", { framework: engineFw });
-  }
+  const item =
+    (modelName ? s.models.items.find((i) => i.name === modelName) : undefined) ??
+    s.models.items.find((i) => i.engine === fw) ??
+    s.models.items.find((i) => runtimeKeyOf(i) === fw);
+  // 归一到运行时包 key：模型数据优先；该 id 本身就是已登记的运行时包时原样使用
+  const key =
+    (item ? runtimeKeyOf(item) : null) ??
+    (s.runtime.packages?.some((p) => p.framework === fw) ? fw : null);
+  const eng = engine || item?.engine || (fw !== key ? fw : null);
+  if (key && s.asr.framework !== key) s.updateAsr({ framework: key });
+  if (eng && s.engines.asr.framework !== eng) s.setEngineStatus("asr", { framework: eng });
 }
 
 /** 依据「已加载/正在加载」的模型 + 清单元数据对齐框架标签（清单晚到时的兜底） */
@@ -66,5 +97,7 @@ export function syncAsrFrameworkFromLoaded(): void {
   if (!name) return;
   const item = s.models.items.find((i) => i.name === name);
   if (!item) return;
-  applyAsrFrameworkFromRust(item.format === "onnx" ? "onnx" : "gguf");
+  const key = runtimeKeyOf(item);
+  if (!key) return;
+  applyAsrFrameworkFromRust(key, item.engine, name);
 }

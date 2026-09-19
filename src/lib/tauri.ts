@@ -13,13 +13,14 @@ export function onSidecarEvent(handler: (payload: Record<string, unknown>) => vo
   return listen<Record<string, unknown>>("sidecar://event", (e) => handler(e.payload));
 }
 
-/** 查询显存状态（总显存 + 已用 + 各框架占用） */
+/** 查询显存状态（总显存 + 已用 + 各框架占用；框架键由 Rust 下发，前端不枚举） */
 export function rustGetVramStatus(): Promise<{
   available: boolean;
   gpu_name: string;
   total_mb: number;
   used_mb: number;
-  frameworks: { llama: { mb: number } | null; sherpa: { mb: number } | null };
+  /** 框架 id → 占用（未加载为 null；旧键 llama/sherpa 可能暂时并存） */
+  frameworks?: Record<string, { mb: number } | null> | null;
 }> {
   return invoke("get_vram_status");
 }

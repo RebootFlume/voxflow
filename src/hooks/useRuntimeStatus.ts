@@ -21,13 +21,6 @@ export function refreshRuntime() {
     });
 }
 
-/** 模型 format → 所需推理框架标识（与 Rust RuntimePkg.framework 对齐） */
-export function runtimeKeyForFormat(format: "gguf" | "onnx" | undefined): string | null {
-  if (format === "gguf") return "gguf";
-  if (format === "onnx") return "onnx";
-  return null;
-}
-
 export function useRuntimeStatus() {
   const downloadFramework = useAppStore((s) => s.runtimeDownload.framework);
   useEffect(() => {

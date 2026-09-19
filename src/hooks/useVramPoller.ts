@@ -2,6 +2,18 @@ import { useEffect } from "react";
 import { rustGetVramStatus } from "@/lib/tauri";
 import { useAppStore } from "@/stores";
 
+/** 框架占用：仅收集有意义的正数（缺失/0/null 视为未加载，不显示空行） */
+function collectFrameworkVram(
+  raw: Record<string, { mb: number } | null> | null | undefined,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [key, v] of Object.entries(raw ?? {})) {
+    const mb = v?.mb;
+    if (typeof mb === "number" && mb > 0) out[key] = mb;
+  }
+  return out;
+}
+
 /**
  * 全局显存监控轮询器。
  *
@@ -32,8 +44,8 @@ export function useVramPoller() {
           useAppStore.getState().setVram({
             total: r.total_mb ?? 0,
             used: r.used_mb ?? 0,
-            llama: r.frameworks?.llama?.mb ?? null,
-            sherpa: r.frameworks?.sherpa?.mb ?? null,
+            // 框架占用：Rust 按框架 id 下发键（旧键 llama/sherpa 可能并存）→ 原样收集，前端不枚举
+            frameworks: collectFrameworkVram(r.frameworks),
           });
         })
         .catch(() => {});
