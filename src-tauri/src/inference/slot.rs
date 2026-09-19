@@ -63,16 +63,22 @@ impl<T: ?Sized + SlotEngine> EngineSlot<T> {
     }
 
     /// 卸载除 `keep` 之外的所有已加载引擎（互斥）。
-    /// 返回被卸载的 (框架, 模型名)，供日志 / 加载阶段（unload:<model>）使用。
-    pub fn unload_others(&self, keep: &str) -> Vec<(&'static str, String)> {
-        let mut victims = Vec::new();
+    /// 每个受害者在**卸载前**回调，供加载阶段事件（`unload:<model>`）按原时序上报。
+    pub fn unload_others_with(&self, keep: &str, on_victim: &mut dyn FnMut(&'static str, &str)) {
         for (f, e) in &self.entries {
             if *f != keep && e.slot_loaded() {
                 let model = e.slot_model();
+                on_victim(*f, &model);
                 let _ = e.slot_unload();
-                victims.push((*f, model));
             }
         }
+    }
+
+    /// 卸载除 `keep` 之外的所有已加载引擎（互斥）。
+    /// 返回被卸载的 (框架, 模型名)，供日志使用。
+    pub fn unload_others(&self, keep: &str) -> Vec<(&'static str, String)> {
+        let mut victims = Vec::new();
+        self.unload_others_with(keep, &mut |f, m| victims.push((f, m.to_string())));
         victims
     }
 }

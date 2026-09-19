@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use tungstenite::Message;
 
-use crate::model_manager::{ModelFormat, find_model_info};
+use crate::model_manager::ModelFormat;
+use crate::tts::spec::ModelSpec;
 
 /// websocket server 可执行文件名
 const SHERPA_WS_EXE: &str = "sherpa-onnx-offline-websocket-server.exe";
@@ -110,9 +111,9 @@ impl SherpaAsrEngine {
         // 先停旧进程
         self.unload_locked(&mut inner);
 
-        let info = find_model_info(model_name)
+        let spec = ModelSpec::find(model_name)
             .ok_or_else(|| format!("unknown model: {model_name}"))?;
-        if info.format() != &ModelFormat::Onnx {
+        if spec.format != ModelFormat::Onnx {
             return Err(format!("{model_name} 不是 sherpa 模型"));
         }
         let model_dir = crate::model_manager::model_dir(model_name);

@@ -4,20 +4,6 @@
 //! （未走 registry 路径，仅 llama_server 一个陈旧 impl）。ASR 走 `AsrEngine` + registry，
 //! TTS 走 `tts::traits::TtsEngine` + TtsRegistry。设备枚举在 `inference::device`。
 
-use super::errors::InferenceResult;
-
-/// 音频处理器 trait：音频预处理（重采样、格式转换等）
-pub trait AudioProcessor: Send + Sync {
-    /// 音频格式解码（支持多种格式的字节流输入）
-    fn decode(&self, data: &[u8]) -> InferenceResult<Vec<f32>>;
-
-    /// 重采样到目标采样率
-    fn resample(&self, samples: &[f32], from_rate: u32, to_rate: u32) -> InferenceResult<Vec<f32>>;
-
-    /// float32 → int16 转换
-    fn float_to_int16(samples: &[f32]) -> Vec<i16>;
-}
-
 /// ASR 引擎统一抽象：所有 ASR 框架（llama-server / sherpa-onnx / 未来 PyTorch）
 /// 实现此 trait，注册到 `registry` 后即可被统一路由（加载/卸载/转写/显存估算）。
 ///

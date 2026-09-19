@@ -7,45 +7,28 @@
 //!
 //! 互斥规则（用户确认）：同一时间只有一个 ASR 引擎加载。
 //! 加载新 ASR 模型前，自动卸载另一个 ASR 框架的模型。
+//! 互斥 / active 查询与 TtsRegistry 共用 `slot::EngineSlot`（单一实现）。
 
 use std::sync::Arc;
 
 use super::engine::AsrEngine;
 use super::llama_server;
 use super::sherpa_asr;
+use super::slot::EngineSlot;
 
 /// 已注册的 ASR 引擎（顺序 = 加载优先级：gguf 主引擎在前）
 ///
 /// 新增框架（如 PyTorch）在此追加一行：
 /// ```ignore
-/// (Framework::PyTorch, Arc::new(pytorch::PyTorchAsrEngine::new())),
+/// ("pytorch", Arc::new(pytorch::PyTorchAsrAdapter::new()) as Arc<dyn AsrEngine>),
 /// ```
 pub struct AsrRegistry {
-    engines: Vec<(&'static str, Arc<dyn AsrEngine>)>,
-}
-
-/// 当前注册的 ASR 框架（与 model_manager::ModelFormat 对应）
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AsrFramework {
-    Gguf,
-    Onnx,
-    /// 未来：PyTorch ASR（torch 子进程服务）
-    PyTorch,
-}
-
-impl AsrFramework {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            AsrFramework::Gguf => "gguf",
-            AsrFramework::Onnx => "onnx",
-            AsrFramework::PyTorch => "pytorch",
-        }
-    }
+    slot: EngineSlot<dyn AsrEngine>,
 }
 
 impl AsrRegistry {
-    /// 注册表 format → registry framework 标识。
-    /// 新增框架（如 PyTorch）只需在此加一个 match 分支 + 注册表引擎行。
+    /// 描述符 format → registry framework 标识。
+    /// 新增框架（如 PyTorch）只需在此加一个 match 分支 + 上面注册一行。
     pub fn framework_for_format(f: &crate::model_manager::ModelFormat) -> Option<&'static str> {
         match f {
             crate::model_manager::ModelFormat::Gguf => Some("gguf"),
@@ -53,14 +36,14 @@ impl AsrRegistry {
         }
     }
 
-    /// 按模型名从注册表解析 framework（模型存在性 + kind 校验）
+    /// 按模型名从描述符解析 framework（模型存在性 + kind 校验）
     pub fn framework_for_model(&self, name: &str) -> Result<&'static str, String> {
-        let info = crate::model_manager::find_model_info(name)
+        let spec = crate::tts::spec::ModelSpec::find(name)
             .ok_or_else(|| format!("未知模型: {name}"))?;
-        if info.kind() != "asr" {
+        if spec.kind.as_str() != "asr" {
             return Err(format!("{name} 不是 ASR 模型"));
         }
-        Self::framework_for_format(info.format())
+        Self::framework_for_format(&spec.format)
             .ok_or_else(|| format!("{name} 的格式缺少对应引擎"))
     }
 
@@ -91,38 +74,28 @@ impl AsrRegistry {
 
     fn new() -> Self {
         Self {
-            engines: vec![
+            slot: EngineSlot::new(vec![
                 // gguf → llama-server（ASR 主引擎）
                 ("gguf", Arc::new(llama_server::LlamaAsrAdapter::new()) as Arc<dyn AsrEngine>),
                 // onnx → sherpa-onnx websocket server（低端设备引擎）
                 ("onnx", Arc::new(sherpa_asr::SherpaAsrAdapter::new()) as Arc<dyn AsrEngine>),
-            ],
+            ]),
         }
     }
 
     /// 按框架取引擎
     pub fn engine(&self, framework: &str) -> Option<Arc<dyn AsrEngine>> {
-        self.engines
-            .iter()
-            .find(|(f, _)| *f == framework)
-            .map(|(_, e)| e.clone())
+        self.slot.engine(framework)
     }
 
     /// 当前已加载的引擎（有且只有一个）
     pub fn active_engine(&self) -> Option<Arc<dyn AsrEngine>> {
-        self.engines
-            .iter()
-            .map(|(_, e)| e.clone())
-            .find(|e| e.is_loaded())
+        self.slot.active().map(|(_, e)| e)
     }
 
     /// 当前已加载的框架名（如 "gguf" / "onnx"），无则空
     pub fn active_framework(&self) -> &'static str {
-        self.engines
-            .iter()
-            .find(|(_, e)| e.is_loaded())
-            .map(|(f, _)| *f)
-            .unwrap_or("")
+        self.slot.active().map(|(f, _)| f).unwrap_or("")
     }
 
     /// 统一加载：卸载其他框架的引擎，再加载指定框架的模型。
@@ -146,13 +119,9 @@ impl AsrRegistry {
         // 幂等判定交给引擎层（模型名相同≠设备/参数相同），注册表只负责互斥与路由。
 
         // 2. 卸载其他框架的引擎（ASR 互斥：同一时间只一个）
-        for (other_f, other_e) in &self.engines {
-            if *other_f != framework && other_e.is_loaded() {
-                let _ = other_e.unload();
-            }
-        }
+        let _ = self.slot.unload_others(framework);
 
-        // 4. 加载目标引擎（带设备）
+        // 3. 加载目标引擎（带设备）
         engine.load_model_with_device(name, device)?;
         Ok((engine.framework(), engine.current_model()))
     }
@@ -173,19 +142,15 @@ impl AsrRegistry {
         // 幂等与身份验证交给引擎层（llama：running_matches 校验 model+采样+启动参数；
         // sherpa：模型+设备都相等才算幂等）。注册表只负责互斥与路由。
 
-        // 互斥：先卸载其他框架（stage 带出被卸载的模型名，便于日志追踪切换流程）
-        for (other_f, other_e) in &self.engines {
-            if *other_f != framework && other_e.is_loaded() {
-                let victim = other_e.current_model();
-                let stage = if victim.is_empty() {
-                    "unload".to_string()
-                } else {
-                    format!("unload:{victim}")
-                };
-                on_stage(&stage);
-                let _ = other_e.unload();
-            }
-        }
+        // 互斥：先卸载其他框架（stage 带出被卸载的模型名，卸载前上报，时序与重构前一致）
+        self.slot.unload_others_with(framework, &mut |_f, victim| {
+            let stage = if victim.is_empty() {
+                "unload".to_string()
+            } else {
+                format!("unload:{victim}")
+            };
+            on_stage(&stage);
+        });
 
         engine.load_model_with_stage_and_device(name, device, on_stage)?;
         Ok((engine.framework(), engine.current_model()))
@@ -215,13 +180,12 @@ impl AsrRegistry {
 
 // ─── 全局单例 ──────────────────────────────────────────────────────────────
 
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
-static REGISTRY: OnceLock<Arc<AsrRegistry>> = OnceLock::new();
+static REGISTRY: LazyLock<Arc<AsrRegistry>> = LazyLock::new(|| Arc::new(AsrRegistry::new()));
 
-/// 获取全局 ASR 引擎注册表（懒加载）
+/// 获取全局 ASR 引擎注册表（首次解引用时初始化）。
+/// 注意：首次初始化必须在非异步上下文完成（见方案 10.3.1：阻塞 HTTP client 构造禁止在 tokio 上下文析构）。
 pub fn registry() -> Arc<AsrRegistry> {
-    REGISTRY
-        .get_or_init(|| Arc::new(AsrRegistry::new()))
-        .clone()
+    REGISTRY.clone()
 }

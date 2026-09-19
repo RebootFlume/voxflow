@@ -27,221 +27,6 @@ pub enum ModelFormat {
     Onnx,   // ort 推理
 }
 
-#[derive(Clone)]
-pub struct ModelInfo {
-    name: &'static str,
-    kind: &'static str,    // "asr" | "tts"
-    format: ModelFormat,   // Gguf | Onnx
-    repo: &'static str,
-    size_gb: f64,
-    description_zh: &'static str,
-    description_en: &'static str,
-    available: bool,
-    /// CPU 模式体验分级："good"（可用）/ "slow"（能跑但慢）/ "unsupported"（不支持 CPU）
-    cpu: &'static str,
-    /// GitHub releases 下载地址（优先使用，不需要 HF 认证）
-    github_release: Option<&'static str>,
-    /// 引擎使用的目录名（与展示名不同，如 "Matcha-zh-baker" → "matcha-icefall-zh-baker"）。
-    /// 下载/查找/删除都用它，保证与 TTS 引擎一致。
-    engine_dir: Option<&'static str>,
-    /// 量化版本（GGUF: Q8_0 / bf16；ONNX: 无）——用于展示
-    quant: Option<&'static str>,
-}
-
-impl ModelInfo {
-    pub fn format(&self) -> &ModelFormat { &self.format }
-    #[allow(dead_code)]
-    pub fn kind(&self) -> &str { self.kind }
-    #[allow(dead_code)]
-    pub fn name(&self) -> &str { self.name }
-}
-
-static REGISTRY: &[ModelInfo] = &[
-    // ── ASR：llama-cpp-2 (GGUF) ──
-    ModelInfo {
-        name: "Qwen3-ASR-0.6B",
-        kind: "asr",
-        format: ModelFormat::Gguf,
-        repo: "ggml-org/Qwen3-ASR-0.6B-GGUF",
-        size_gb: 0.95,
-        description_zh: "默认识别模型 · GGUF 量化 · 更快 · 内存占用更低",
-        description_en: "Default ASR model · GGUF quantized · faster · lower memory",
-        available: true,
-        cpu: "good",
-        github_release: None,
-        engine_dir: Some("qwen3-asr-0.6b-gguf"),
-        quant: Some("Q8_0"),
-    },
-    ModelInfo {
-        name: "Qwen3-ASR-1.7B",
-        kind: "asr",
-        format: ModelFormat::Gguf,
-        repo: "ggml-org/Qwen3-ASR-1.7B-GGUF",
-        size_gb: 2.35,
-        description_zh: "更准 · GGUF 量化 · 需要更多内存/显存",
-        description_en: "More accurate · GGUF quantized · needs more memory",
-        available: true,
-        cpu: "slow",
-        github_release: None,
-        engine_dir: None,
-        quant: Some("Q8_0"),
-    },
-    // ── TTS：sherpa-onnx 纯端到端模型（子进程）──
-    // 8 个模型均为 E2E（无音素 G2P 依赖），经 sherpa-onnx-offline-tts.exe 推理。
-    // 下载源：GitHub releases（无需 HF 认证，速度快）
-    ModelInfo {
-        name: "Kokoro-v1_1",
-        kind: "tts",
-        format: ModelFormat::Onnx,
-        repo: "k2-fsa/kokoro-multi-lang-v1_1",
-        size_gb: 0.32,
-        description_zh: "Kokoro 多语言 v1.1 · 中英103音色 · 纯端到端 · sherpa-onnx 推荐",
-        description_en: "Kokoro multi-lang v1.1 · zh/en 103 voices · E2E · sherpa-onnx recommended",
-        available: true,
-        cpu: "good",
-        github_release: Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_1.tar.bz2"),
-        engine_dir: Some("kokoro-multi-lang-v1_1"),
-        quant: None,
-    },
-    ModelInfo {
-        name: "Kokoro-v1_0",
-        kind: "tts",
-        format: ModelFormat::Onnx,
-        repo: "k2-fsa/kokoro-multi-lang-v1_0",
-        size_gb: 0.32,
-        description_zh: "Kokoro 多语言 v1.0 · 中英53音色 · 纯端到端",
-        description_en: "Kokoro multi-lang v1.0 · zh/en 53 voices · E2E",
-        available: true,
-        cpu: "good",
-        github_release: Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2"),
-        engine_dir: Some("kokoro-multi-lang-v1_0"),
-        quant: None,
-    },
-    ModelInfo {
-        name: "Kokoro-en-v0_19",
-        kind: "tts",
-        format: ModelFormat::Onnx,
-        repo: "k2-fsa/kokoro-en-v0_19",
-        size_gb: 0.32,
-        description_zh: "Kokoro 英文 v0.19 · 11音色 · 纯端到端",
-        description_en: "Kokoro English v0.19 · 11 voices · E2E",
-        available: true,
-        cpu: "good",
-        github_release: Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2"),
-        engine_dir: Some("kokoro-en-v0_19"),
-        quant: None,
-    },
-    ModelInfo {
-        name: "Matcha-zh-baker",
-        kind: "tts",
-        format: ModelFormat::Onnx,
-        repo: "k2-fsa/matcha-icefall-zh-baker",
-        size_gb: 0.3,
-        description_zh: "Matcha 中文 · 高质量 · 纯端到端",
-        description_en: "Matcha Chinese · high quality · E2E",
-        available: true,
-        cpu: "good",
-        github_release: Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/matcha-icefall-zh-baker.tar.bz2"),
-        engine_dir: Some("matcha-icefall-zh-baker"),
-        quant: None,
-    },
-    ModelInfo {
-        name: "ZipVoice-distill",
-        kind: "tts",
-        format: ModelFormat::Onnx,
-        repo: "k2-fsa/sherpa-onnx-zipvoice-distill",
-        size_gb: 0.4,
-        description_zh: "ZipVoice 蒸馏 · 中英 · 语音克隆 · 纯端到端",
-        description_en: "ZipVoice distill · zh/en · voice clone · E2E",
-        available: true,
-        cpu: "good",
-        github_release: Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-zipvoice-distill-int8-zh-en-emilia.tar.bz2"),
-        engine_dir: Some("sherpa-onnx-zipvoice-distill"),
-        quant: None,
-    },
-    ModelInfo {
-        name: "PocketTTS-int8",
-        kind: "tts",
-        format: ModelFormat::Onnx,
-        repo: "k2-fsa/sherpa-onnx-pocket-tts-int8",
-        size_gb: 0.5,
-        description_zh: "Pocket TTS int8 · 快速低延迟 · 语音克隆 · 纯端到端",
-        description_en: "Pocket TTS int8 · fast · voice clone · E2E",
-        available: true,
-        cpu: "good",
-        github_release: Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-pocket-tts-int8-2026-01-26.tar.bz2"),
-        engine_dir: Some("sherpa-onnx-pocket-tts-int8"),
-        quant: None,
-    },
-    ModelInfo {
-        name: "Supertonic-3-int8",
-        kind: "tts",
-        format: ModelFormat::Onnx,
-        repo: "k2-fsa/sherpa-onnx-supertonic-3-tts-int8",
-        size_gb: 0.6,
-        description_zh: "Supertonic 3 · 31语言 · 高质量 · 纯端到端",
-        description_en: "Supertonic 3 · 31 languages · high quality · E2E",
-        available: true,
-        cpu: "good",
-        github_release: Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-supertonic-3-tts-int8-2026-05-11.tar.bz2"),
-        engine_dir: Some("sherpa-onnx-supertonic-3-tts-int8"),
-        quant: None,
-    },
-    ModelInfo {
-        name: "Kitten-nano-en",
-        kind: "tts",
-        format: ModelFormat::Onnx,
-        repo: "k2-fsa/kitten-nano-en-v0_1-fp16",
-        size_gb: 0.2,
-        description_zh: "Kitten nano · 轻量快速 · 英文 · 纯端到端",
-        description_en: "Kitten nano · lightweight · en · E2E",
-        available: true,
-        cpu: "good",
-        github_release: Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kitten-nano-en-v0_1-fp16.tar.bz2"),
-        engine_dir: Some("kitten-nano-en-v0_1-fp16"),
-        quant: None,
-    },
-    // ── ASR：sherpa-onnx 离线模型（低端设备/CPU）──
-    // 下载源：GitHub releases（asr-models tag），Rust 直接下载 tar.bz2 解压
-    ModelInfo {
-        name: "SenseVoice-int8",
-        kind: "asr",
-        format: ModelFormat::Onnx,
-        repo: "k2-fsa/sherpa-onnx",
-        size_gb: 0.23,
-        description_zh: "中文全能 · 中英日韩粤 5 语 · 情感/事件/时间戳",
-        description_en: "All-round Chinese · zh/en/ja/ko/yue · emotion/event/timestamps",
-        available: true,
-        cpu: "good",
-        github_release: Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2"),
-        engine_dir: Some("sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17"),
-        quant: None,
-    },
-    ModelInfo {
-        name: "Paraformer-zh-small",
-        kind: "asr",
-        format: ModelFormat::Onnx,
-        repo: "k2-fsa/sherpa-onnx",
-        size_gb: 0.1,
-        description_zh: "中文超小 · 74MB · 低端 CPU 设备首选",
-        description_en: "Tiny Chinese · 74MB · best for low-end CPU",
-        available: true,
-        cpu: "good",
-        github_release: Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-paraformer-zh-small-2024-03-09.tar.bz2"),
-        engine_dir: Some("sherpa-onnx-paraformer-zh-small-2024-03-09"),
-        quant: None,
-    },
-];
-
-fn find_model(name: &str) -> Option<&'static ModelInfo> {
-    REGISTRY.iter().find(|m| m.name == name)
-}
-
-/// 公共接口：按名称查找模型信息（供 lib.rs load_model 使用）
-pub fn find_model_info(name: &str) -> Option<&'static ModelInfo> {
-    find_model(name)
-}
-
 // ── 运行时配置 ──
 
 struct RuntimeConfig {
@@ -530,26 +315,25 @@ pub fn is_downloading(name: &str) -> bool {
 /// 现在引擎找引擎目录名（matcha-icefall-zh-baker）。应用启动时调用一次，
 /// 把旧目录完整迁移到新目录名，避免用户重新下载。
 pub fn start_download(app: AppHandle, name: &str) -> Result<(), String> {
-    let info = find_model(name)
-        .ok_or_else(|| format!("unknown model: {name}"))?
-        .clone();
-    if !info.available {
-        return Err(format!("engine not available yet: {}", info.name));
+    let spec = crate::tts::spec::ModelSpec::find(name)
+        .ok_or_else(|| format!("unknown model: {name}"))?;
+    if !spec.available {
+        return Err(format!("engine not available yet: {}", spec.name));
     }
 
     // 迁移旧布局：E2E 模型曾下载到展示名目录（如 models/Matcha-zh-baker），
     // 现在引擎找引擎目录名（matcha-icefall-zh-baker）。若旧目录已存在且完整，
     // 直接迁移到新目录名并返回“已就绪”，避免用户重新下载。
     let root = get_model_root();
-    let new_dir = resolve_download_dir(&root, &info.name);
-    let old_dir = root.join(&info.name);
+    let new_dir = resolve_download_dir(&root, &spec.name);
+    let old_dir = root.join(&spec.name);
     if old_dir != new_dir && old_dir.is_dir() && !new_dir.exists() {
         if is_complete(&old_dir) {
             if std::fs::rename(&old_dir, &new_dir).is_ok() {
                 eprintln!("[model] migrated {} -> {}", old_dir.display(), new_dir.display());
                 let _ = app.emit(
                     "sidecar://event",
-                    json!({"status": "model_downloaded", "model": info.name, "path": new_dir.display().to_string()}),
+                    json!({"status": "model_downloaded", "model": spec.name, "path": new_dir.display().to_string()}),
                 );
                 emit_models_state(&app);
                 return Ok(());
@@ -557,11 +341,11 @@ pub fn start_download(app: AppHandle, name: &str) -> Result<(), String> {
         }
     }
     if let Some(free) = free_bytes_for_root() {
-        let need = (info.size_gb * 1024f64.powi(3)) as u64;
+        let need = (spec.size_gb * 1024f64.powi(3)) as u64;
         if free < need {
             return Err(format!(
                 "disk full: need ~{}GB, free {:.1}GB",
-                info.size_gb,
+                spec.size_gb,
                 free as f64 / 1024f64.powi(3)
             ));
         }
@@ -569,16 +353,16 @@ pub fn start_download(app: AppHandle, name: &str) -> Result<(), String> {
     let cancel = Arc::new(AtomicBool::new(false));
     {
         let mut active = ACTIVE.lock();
-        if active.contains_key(info.name) {
+        if active.contains_key(spec.name) {
             return Ok(());
         }
-        active.insert(info.name.to_string(), cancel.clone());
+        active.insert(spec.name.to_string(), cancel.clone());
     }
     let app2 = app.clone();
-    let name_owned = info.name.to_string();
+    let name_owned = spec.name.to_string();
     thread::Builder::new()
         .name(format!("dl-{name_owned}"))
-        .spawn(move || run_download(app2, info, cancel))
+        .spawn(move || run_download(app2, spec, cancel))
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -592,7 +376,7 @@ pub fn request_cancel(name: &str) -> bool {
 }
 
 pub fn delete_model(name: &str) -> Result<u64, String> {
-    let _ = find_model(name).ok_or_else(|| format!("unknown model: {name}"))?;
+    let _ = crate::tts::spec::ModelSpec::find(name).ok_or_else(|| format!("unknown model: {name}"))?;
     if is_downloading(name) {
         return Err(format!("downloading: {name}"));
     }
@@ -754,8 +538,8 @@ fn build_client_sync() -> Result<hf_hub::HFClientSync, String> {
     builder.build_sync().map_err(|e| e.to_string())
 }
 
-fn run_download(app: AppHandle, info: ModelInfo, cancel: Arc<AtomicBool>) {
-    let name = info.name.to_string();
+fn run_download(app: AppHandle, spec: &'static crate::tts::spec::ModelSpec, cancel: Arc<AtomicBool>) {
+    let name = spec.name.to_string();
     // 下载目标目录：E2E 模型用引擎目录名（与 TTS 引擎查找一致）
     let dest = resolve_download_dir(&get_model_root(), &name);
     let _ = app.emit(
@@ -766,17 +550,17 @@ fn run_download(app: AppHandle, info: ModelInfo, cancel: Arc<AtomicBool>) {
     let result: Result<PathBuf, String> = (|| {
         std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
         // 优先从 GitHub releases 下载（无需 HF 认证，速度快）
-        if let Some(url) = info.github_release {
+        if let Some(url) = spec.github_release {
             return download_github_release(url, &dest, &name, &app, &cancel);
         }
         // 回退到 HuggingFace
         let client = build_client_sync()?;
-        let (owner, repo_name) = hf_hub::split_id(info.repo);
+        let (owner, repo_name) = hf_hub::split_id(spec.repo);
         let handler = IpcProgress::new(app.clone(), name.clone(), cancel.clone());
         let progress = hf_hub::progress::Progress::new(handler);
         // GGUF 模型只下载 Q8_0 量化版（模型 + mmproj），跳过 bf16 全精度与 safetensors 原始版
         // （bf16 单个 4G+，全量 snapshot 会白白下载 6G+；llama-server 只用 Q8_0）
-        let allow_q8: Option<Vec<String>> = match info.format() {
+        let allow_q8: Option<Vec<String>> = match spec.format {
             ModelFormat::Gguf => Some(vec!["*Q8_0.gguf".to_string()]),
             ModelFormat::Onnx => None,
         };
@@ -814,7 +598,7 @@ fn run_download(app: AppHandle, info: ModelInfo, cancel: Arc<AtomicBool>) {
     match result {
         Ok(p) => {
             // ZipVoice 需要额外下载 vocoder（vocos_24khz.onnx）到模型根目录
-            if info.name == "ZipVoice-distill" {
+            if spec.name == "ZipVoice-distill" {
                 let vocoder_dest = crate::model_manager::get_model_root().join("vocos_24khz.onnx");
                 if !vocoder_dest.exists() {
                     let _ = app.emit(
@@ -1035,18 +819,12 @@ fn resolve_sherpa_model_dir(root: &Path, name: &str, default: &Path) -> PathBuf 
 }
 
 /// 计算模型下载/查找的目标目录：优先用描述符的引擎目录名（engine_id，
-/// 与 TTS 引擎查找一致），否则回退到清单 engine_dir / 展示名目录。
+/// 与 TTS 引擎查找一致）；未收录模型回退到展示名目录。
 /// 修复「下载到展示名目录但引擎找引擎目录名」的不一致。
 fn resolve_download_dir(root: &Path, name: &str) -> PathBuf {
     // 1. 描述符（TTS 展示名 / 引擎 id / 目录名 归一化匹配）
     if let Some(spec) = crate::tts::spec::ModelSpec::find(name) {
         return root.join(spec.id);
-    }
-    // 2. 清单 engine_dir（ASR 等）
-    if let Some(info) = find_model(name) {
-        if let Some(dir) = info.engine_dir {
-            return root.join(dir);
-        }
     }
     root.join(name)
 }
@@ -1058,16 +836,16 @@ pub fn list_models_payload(kind: Option<&str>) -> Value {
     let hub = root.join("hub");
     let _ = std::fs::create_dir_all(&hub);
     let mut items: Vec<Value> = Vec::new();
-    for m in REGISTRY {
+    for spec in crate::tts::spec::SPECS {
         if let Some(k) = kind {
-            if m.kind != k {
+            if spec.kind.as_str() != k {
                 continue;
             }
         }
         // sherpa-onnx E2E 模型的目录名与展示名不同（如 Kokoro-v1_0 → kokoro-multi-lang-v1_0）
         // 统一用引擎目录名判定（与下载/删除/TTS 引擎一致）
-        let real_dir = resolve_download_dir(&root, m.name);
-        let state = if is_downloading(m.name) {
+        let real_dir = resolve_download_dir(&root, spec.name);
+        let state = if is_downloading(spec.name) {
             "downloading"
         } else if is_complete(&real_dir) {
             "downloaded"
@@ -1076,19 +854,19 @@ pub fn list_models_payload(kind: Option<&str>) -> Value {
         };
         let dir = real_dir;
         // 兼容旧布局残留：引擎目录不存在但展示名目录存在（如下载失败留了 Kokoro-v1_1）
-        let legacy_dir = root.join(m.name);
+        let legacy_dir = root.join(spec.name);
         let dir_exists = dir.is_dir() || (legacy_dir != dir && legacy_dir.is_dir());
         let mut obj = json!({
-            "name": m.name,
-            "kind": m.kind,
-            "format": format_str(&m.format),
-            "repo": m.repo,
-            "size_gb": m.size_gb,
-            "description_zh": m.description_zh,
-            "description_en": m.description_en,
-            "available": m.available,
-            "cpu": m.cpu,
-            "quant": m.quant,
+            "name": spec.name,
+            "kind": spec.kind.as_str(),
+            "format": format_str(&spec.format),
+            "repo": spec.repo,
+            "size_gb": spec.size_gb,
+            "description_zh": spec.description_zh,
+            "description_en": spec.description_en,
+            "available": spec.available,
+            "cpu": spec.cpu,
+            "quant": spec.quant,
             "path": dir.display().to_string(),
             "state": state,
             "dir_exists": dir_exists,
@@ -1098,10 +876,10 @@ pub fn list_models_payload(kind: Option<&str>) -> Value {
             let gb = (bytes as f64 / 1024f64.powi(3) * 100.0).round() / 100.0;
             obj["size_on_disk_gb"] = json!(gb);
             // 附带主模型文件路径，方便前端直接加载
-            if let Some(main_file) = find_main_model_file(&dir, &m.format) {
+            if let Some(main_file) = find_main_model_file(&dir, &spec.format) {
                 obj["model_path"] = json!(main_file.display().to_string());
                 // GGUF 模型额外附带 mmproj 路径
-                if m.format == ModelFormat::Gguf {
+                if spec.format == ModelFormat::Gguf {
                     if let Some(mmproj) = find_mmproj_file(&dir) {
                         obj["mmproj_path"] = json!(mmproj.display().to_string());
                     }
@@ -1109,15 +887,13 @@ pub fn list_models_payload(kind: Option<&str>) -> Value {
             }
         }
         // 能力字段（描述符驱动，前端语言/克隆 UI 据此渲染；见方案 4.4 决策 A）
-        if let Some(spec) = crate::tts::spec::ModelSpec::find(m.name) {
-            obj["languages"] = json!(spec.languages);
-            obj["language_mode"] = json!(language_mode_str(spec.language_mode));
-            obj["voice_mode"] = voice_mode_json(spec.voice_mode);
-            obj["supports_clone"] = json!(matches!(
-                spec.voice_mode,
-                crate::tts::spec::VoiceMode::Clone(_) | crate::tts::spec::VoiceMode::PresetAndClone(..)
-            ));
-        }
+        obj["languages"] = json!(spec.languages);
+        obj["language_mode"] = json!(language_mode_str(spec.language_mode));
+        obj["voice_mode"] = json!(voice_mode_json(spec.voice_mode));
+        obj["supports_clone"] = json!(matches!(
+            spec.voice_mode,
+            crate::tts::spec::VoiceMode::Clone(_) | crate::tts::spec::VoiceMode::PresetAndClone(..)
+        ));
         items.push(obj);
     }
     let disk_free_gb = free_bytes_for_root().map(|b| (b as f64 / 1024f64.powi(3) * 10.0).round() / 10.0);
@@ -1134,41 +910,6 @@ pub fn list_models_payload(kind: Option<&str>) -> Value {
 pub fn emit_models_state(app: &AppHandle) {
     let payload = list_models_payload(None);
     let _ = app.emit("sidecar://event", payload);
-}
-
-// ── 框架选择器支持 ──
-
-/// 获取指定 kind + format 的模型列表（供前端框架选择器过滤）
-#[allow(dead_code)]
-pub fn models_by_kind_and_format(kind: &str, format: &ModelFormat) -> Vec<&'static ModelInfo> {
-    REGISTRY.iter()
-        .filter(|m| m.kind == kind && m.format == *format && m.available)
-        .collect()
-}
-
-/// 获取指定 kind 的所有可用格式（供前端框架选择器显示选项）
-#[allow(dead_code)]
-pub fn available_formats_for_kind(kind: &str) -> Vec<&'static str> {
-    let mut formats = Vec::new();
-    for m in REGISTRY {
-        if m.kind == kind && m.available {
-            let s = format_str(&m.format);
-            if !formats.contains(&s) {
-                formats.push(s);
-            }
-        }
-    }
-    formats
-}
-
-/// 格式字符串转 ModelFormat 枚举
-#[allow(dead_code)]
-pub fn parse_format(s: &str) -> Option<ModelFormat> {
-    match s.to_lowercase().as_str() {
-        "gguf" => Some(ModelFormat::Gguf),
-        "onnx" => Some(ModelFormat::Onnx),
-        _ => None,
-    }
 }
 
 #[cfg(test)]

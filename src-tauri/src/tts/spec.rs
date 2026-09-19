@@ -537,8 +537,8 @@ pub static SPECS: &[ModelSpec] = &[
         format: ModelFormat::Onnx,
         repo: "k2-fsa/sherpa-onnx-pocket-tts-int8",
         size_gb: 0.5,
-        description_zh: "Pocket TTS int8 · 快速低延迟 · 语音克隆 · 纯端到端",
-        description_en: "Pocket TTS int8 · fast · voice clone · E2E",
+        description_zh: "Pocket TTS int8 · 快速低延迟 · 纯端到端（克隆未接线）",
+        description_en: "Pocket TTS int8 · fast · E2E (clone not wired)",
         available: true,
         cpu: "good",
         github_release: Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-pocket-tts-int8-2026-01-26.tar.bz2"),
@@ -733,14 +733,34 @@ mod tests {
         }
     }
 
-    /// 一致性：与 model_manager REGISTRY 对齐（每 spec 模型在旧注册表存在且 kind/format 一致）
+    /// 单一真源守卫：每条描述符都能经「展示名 / 引擎 id」两种别名查回自身
+    /// （旧的 `model_manager::REGISTRY` 对齐测试已随 REGISTRY 删除，见方案 §4.5）
     #[test]
-    fn test_parity_with_model_manager_registry() {
+    fn test_spec_alias_lookup_roundtrip() {
         for spec in SPECS {
-            let info = crate::model_manager::find_model_info(spec.name)
-                .unwrap_or_else(|| panic!("{}: 旧注册表缺该模型", spec.name));
-            assert_eq!(info.kind(), spec.kind.as_str(), "{} kind 不一致", spec.name);
-            assert_eq!(info.format(), &spec.format, "{} format 不一致", spec.name);
+            for alias in [spec.name, spec.id] {
+                let hit = ModelSpec::find(alias)
+                    .unwrap_or_else(|| panic!("{}: 别名 {alias} 查不到", spec.name));
+                assert_eq!(hit.id, spec.id, "{}: 别名 {alias} 命中其它条目", spec.name);
+            }
+        }
+    }
+
+    /// 行内一致性：kind 与 backend 变体必须匹配（防新增模型时复制粘贴错行）
+    #[test]
+    fn test_kind_matches_backend() {
+        for spec in SPECS {
+            let ok = matches!(
+                (spec.kind, &spec.backend),
+                (ModelKind::Asr, BackendSpec::Llama(_))
+                    | (ModelKind::Asr, BackendSpec::SherpaWs(_))
+                    | (ModelKind::Tts, BackendSpec::SherpaTts(_))
+            );
+            assert!(
+                ok,
+                "{}: kind={:?} 与 backend={:?} 不匹配",
+                spec.name, spec.kind, spec.backend
+            );
         }
     }
 
