@@ -58,6 +58,39 @@ pub fn main_model_file(dir: &Path) -> PathBuf {
 }
 
 /// 描述符 → argv（模型专用参数；`--output-filename` 与 text 由调用方追加，与旧实现一致）
+/// 描述符声明"必须存在"的文件里，当前磁盘上缺失的（返回人话名字，用于加载/合成前预检）。
+///
+/// 覆盖三处来源：`required_files`、`ArgSpec::File`（相对模型目录）、
+/// `ArgSpec::ModelsRootFile`（相对 models 根，如 ZipVoice/Matcha 的 vocoder）。
+/// `OptionalFile` / `JoinableFiles` 的语义本来就是"没有就不加参数"，不在检查范围。
+///
+/// 为什么要它：sherpa-onnx 自己的配置校验只给一句 `Errors in config!`（用户实际撞到的就是这条，
+/// 真因是 Matcha 缺 vocoder + 传了不存在的 `--matcha-data-dir`），由这里提前说清缺的是哪个文件。
+pub fn missing_files(spec: &SherpaTtsSpec, env: &ArgEnv) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    // 用 `exists()` 而非 `is_file()`：描述符里的路径**可以指向目录**
+    //（Kokoro / ZipVoice 的 `espeak-ng-data` 就是目录）——用 is_file() 会把存在的目录误判成缺失。
+    for f in spec.required_files {
+        if !env.model_dir.join(f).exists() {
+            out.push((*f).to_string());
+        }
+    }
+    for arg in spec.cli {
+        match arg {
+            ArgSpec::File(_, rel) if !env.model_dir.join(rel).exists() => {
+                out.push((*rel).to_string());
+            }
+            ArgSpec::ModelsRootFile(_, rel) if !env.models_root.join(rel).exists() => {
+                out.push(format!("{rel}（模型公共文件，需随模型一起下载）"));
+            }
+            _ => {}
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 pub fn build_argv(spec: &SherpaTtsSpec, env: &ArgEnv) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
     for arg in spec.cli {
@@ -150,6 +183,54 @@ mod tests {
         dir
     }
 
+    #[test]
+    fn missing_files_reports_vocoder_and_acoustic_model() {
+        // 用具名 fn 而非闭包：闭包无法表达 "两个入参引用与返回值同寿命"
+        fn env_of<'a>(dir: &'a Path, root: &'a Path) -> ArgEnv<'a> {
+            ArgEnv {
+                model_dir: dir,
+                models_root: root,
+                provider: "cpu",
+                num_threads: 2,
+                sid: 0,
+                language: "zh",
+                output: Path::new("<OUT>"),
+                reference_audio: None,
+                reference_text: None,
+            }
+        }
+
+        let spec = ModelSpec::find("matcha-icefall-zh-baker").expect("matcha spec 存在");
+        let BackendSpec::SherpaTts(ts) = &spec.backend else {
+            panic!("matcha 应是 sherpa 后端");
+        };
+
+        // 空目录 + 空模型根：vocoder（模型根）与声学模型/lexicon 都应被报出来
+        let dir = std::env::temp_dir().join("voxflow_missing_matcha");
+        let root = std::env::temp_dir().join("voxflow_missing_root");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        let missing = missing_files(&ts, &env_of(&dir, &root));
+        assert!(
+            missing.iter().any(|m| m.starts_with("vocos-22khz-univ.onnx")),
+            "缺 vocoder 必须报出来: {missing:?}"
+        );
+        assert!(missing.iter().any(|m| m == "model-steps-3.onnx"), "{missing:?}");
+        assert!(missing.iter().any(|m| m == "lexicon.txt"), "{missing:?}");
+
+        // 文件齐了之后不再报
+        for f in ["model-steps-3.onnx", "tokens.txt", "lexicon.txt"] {
+            std::fs::write(dir.join(f), b"x").unwrap();
+        }
+        std::fs::write(root.join("vocos-22khz-univ.onnx"), b"x").unwrap();
+        assert!(missing_files(&ts, &env_of(&dir, &root)).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// 黄金比对：8 个 TTS 模型的 argv 逐项冻结（顺序/flag/多候选 join 顺序/跳过语义）
     /// 迁移期曾与旧 cli_args 逐模型 diff 一致（8/8），此测试守护其不被改动。
     #[test]
@@ -201,11 +282,17 @@ mod tests {
                 ],
             ),
             (
+                // 修正：原来传的 `--matcha-data-dir=<DIR>/espeak-ng-data` 让 sherpa-onnx 忽略
+                // `--matcha-lexicon`（见 CLI --help 对该参数的说明），而本模型目录没有 espeak-ng-data
+                // ⇒ 合成时 CLI 直接报 "Errors in config!"。改为 vocoder（模型根，另下载）+ lexicon
+                // + `--tts-rule-fsts`（中文正则；通用 flag，非 matcha 前缀）。
                 "matcha-icefall-zh-baker",
                 &[
                     "--matcha-acoustic-model=<DIR>/model.onnx",
+                    "--matcha-vocoder=<ROOT>/vocos-22khz-univ.onnx",
                     "--matcha-tokens=<DIR>/tokens.txt",
-                    "--matcha-data-dir=<DIR>/espeak-ng-data",
+                    "--matcha-lexicon=<DIR>/lexicon.txt",
+                    "--tts-rule-fsts=<DIR>/date.fst,<DIR>/number.fst,<DIR>/phone.fst",
                     "--sid=0",
                     "--provider=cuda",
                     "--num-threads=4",

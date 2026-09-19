@@ -34,3 +34,7 @@ dist-bundle/
 
 # Python（护栏脚本运行产物）
 __pycache__/
+
+# 引擎 E2E 测试产出的试听用 WAV（tests/e2e_tts.rs 写在仓库根）
+matcha_test_output.wav
+kokoro_test_output.wav

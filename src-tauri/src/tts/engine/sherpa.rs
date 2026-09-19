@@ -161,6 +161,17 @@ impl SherpaTtsEngine {
             reference_audio: inner.reference_audio.as_deref(),
             reference_text: inner.reference_text.as_deref(),
         };
+        // 预检：sherpa-onnx 自己的校验只给一句 "Errors in config!"，这里先按描述符把该在的
+        // 文件查一遍，缺哪个直接点名（用户撞到的 Matcha 就是缺 vocoder + 传了不存在的 data-dir）
+        let missing = crate::tts::engine::argv::missing_files(tts_spec, &env);
+        if !missing.is_empty() {
+            return Err(AppError::InvalidInput(format!(
+                "模型 {} 缺少文件：{}；请到「模型与设备」重新下载该模型",
+                spec.name,
+                missing.join("、")
+            )));
+        }
+
         let mut args = build_argv(tts_spec, &env);
         args.push(format!("--output-filename={}", out_path.display()));
 

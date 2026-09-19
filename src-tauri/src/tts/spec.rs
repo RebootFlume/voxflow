@@ -601,7 +601,14 @@ pub static SPECS: &[ModelSpec] = &[
         cpu: "good",
         source: DownloadSource::GithubRelease("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/matcha-icefall-zh-baker.tar.bz2"),
         entries: &[],
-        extra_files: &[],
+        // vocoder 与模型分开下载（与 ZipVoice 同一处理）；必须落**模型根** —— 与下面
+        // `ModelsRootFile("--matcha-vocoder", …)` 的解析位置同处，也避免被 MainModelFile 误选。
+        extra_files: &[ExtraFile {
+            source: DownloadSource::GithubRelease(
+                "https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models/vocos-22khz-univ.onnx",
+            ),
+            dest_rel: "vocos-22khz-univ.onnx",
+        }],
         quant: None,
         // zh-baker 实为中文单语言（旧注册表 languages 含 en，P2 核对官方包后定）
         languages: &["zh", "en"],
@@ -610,13 +617,24 @@ pub static SPECS: &[ModelSpec] = &[
         backend: BackendSpec::SherpaTts(SherpaTtsSpec {
             cli: &[
                 ArgSpec::RuntimeVar("--matcha-acoustic-model", RuntimeKey::MainModelFile),
+                ArgSpec::ModelsRootFile("--matcha-vocoder", "vocos-22khz-univ.onnx"),
                 ArgSpec::File("--matcha-tokens", "tokens.txt"),
-                ArgSpec::File("--matcha-data-dir", "espeak-ng-data"),
+                // 中文 Matcha 走 lexicon。**绝不能**再传 `--matcha-data-dir`：
+                // sherpa-onnx 里它一旦给出就会忽略 `--matcha-lexicon`
+                //（见 `sherpa-onnx-offline-tts --help`），而本模型目录没有 espeak-ng-data
+                // ⇒ CLI 直接报 "Errors in config!"（用户实际撞到的就是这条）。
+                ArgSpec::File("--matcha-lexicon", "lexicon.txt"),
+                // 中文文本正则（数字/日期/电话）：通用 flag 是 `--tts-rule-fsts`，非 matcha 前缀
+                ArgSpec::JoinableFiles(
+                    "--tts-rule-fsts",
+                    &["date.fst", "number.fst", "phone.fst"],
+                    ',',
+                ),
                 ArgSpec::RuntimeVar("--sid", RuntimeKey::SpeakerId),
                 ArgSpec::RuntimeVar("--provider", RuntimeKey::Provider),
                 ArgSpec::RuntimeVar("--num-threads", RuntimeKey::NumThreads),
             ],
-            required_files: &["tokens.txt"],
+            required_files: &["model-steps-3.onnx", "tokens.txt", "lexicon.txt"],
         }),
     },
     ModelSpec {
