@@ -27,6 +27,8 @@ pub const DEFAULT_PORT: u16 = 8931;
 pub const HEALTH_PATH: &str = "/health";
 /// 默认转写 API 路径（OpenAI 兼容）
 pub const TRANSCRIBE_PATH: &str = "/v1/audio/transcriptions";
+/// 多模态 chat 端点：带「上文」的转写走这里（可同时送 text + input_audio 两个 part）
+pub const CHAT_PATH: &str = "/v1/chat/completions";
 /// 启动后等待就绪的最长时间
 pub const READY_TIMEOUT: Duration = Duration::from_secs(30);
 /// 健康检查轮询间隔
@@ -84,6 +86,10 @@ impl LlamaServerConfig {
     /// 转写 API URL
     pub fn transcribe_url(&self) -> String {
         format!("http://127.0.0.1:{}{}", self.port, TRANSCRIBE_PATH)
+    }
+    /// 带上文转写的 chat API URL
+    pub fn chat_url(&self) -> String {
+        format!("http://127.0.0.1:{}{}", self.port, CHAT_PATH)
     }
 }
 
@@ -584,6 +590,75 @@ impl LlamaServerEngine {
         Ok(extract_asr_text(&body.text))
     }
 
+    /// 带「上文」的转写：走 chat 端点，把前文文本与音频一起送模型（跨段记忆）。
+    ///
+    /// 为什么不用 `/v1/audio/transcriptions`：它只吃一个音频文件、无法附加上文。
+    /// 实测 `/v1/chat/completions` 接受 `text` + `input_audio` 两个 part，且模型会用上文
+    /// 纠正接缝处的同音字（「纯电」→「沉淀」）。
+    /// 任何失败（模型模板不支持 audio part / 解析失败）都回退到无上文的 `transcribe`，
+    /// 绝不因记忆功能降低可用性。
+    pub fn transcribe_with_context(
+        &self,
+        samples: &[f32],
+        sample_rate: u32,
+        ctx: &str,
+    ) -> InferenceResult<String> {
+        let ctx = ctx.trim();
+        if ctx.is_empty() {
+            return self.transcribe(samples, sample_rate);
+        }
+        if !self.is_loaded() {
+            return Err(InferenceError::NotInitialized);
+        }
+        let wav_bytes = encode_pcm_to_wav(samples, sample_rate)
+            .map_err(|e| InferenceError::InferenceFailed(format!("编码 WAV 失败: {e}")))?;
+        let audio_b64 = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(&wav_bytes)
+        };
+        // 提示词形状经实测选定：无 system 提示（system 会带偏输出），仅「上文：<前文>」+ 音频。
+        let body = serde_json::json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": format!("上文：{ctx}") },
+                    { "type": "input_audio", "input_audio": { "data": audio_b64, "format": "wav" } },
+                ],
+            }],
+            "temperature": 0,
+            "max_tokens": 1024,
+        });
+        let url = self.config.lock().chat_url();
+        let ask = |url: &str| -> Result<serde_json::Value, String> {
+            let resp = self
+                .client
+                .post(url)
+                .json(&body)
+                .send()
+                .map_err(|e| format!("HTTP 失败: {e}"))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().unwrap_or_default();
+                return Err(format!("llama-server 返回 {status}: {text}"));
+            }
+            resp.json::<serde_json::Value>()
+                .map_err(|e| format!("解析响应失败: {e}"))
+        };
+        let content = ask(&url).and_then(|v| {
+            v["choices"][0]["message"]["content"]
+                .as_str()
+                .map(|s| s.to_string())
+                .ok_or_else(|| "响应缺少 choices[0].message.content".to_string())
+        });
+        match content {
+            Ok(c) => Ok(extract_asr_text(&c)),
+            Err(e) => {
+                log::warn!("[llama-server] 带上文转写失败，回退无上文重试: {e}");
+                self.transcribe(samples, sample_rate)
+            }
+        }
+    }
+
     /// 当前加载的模型文件路径（换模型后同步更新）
     pub fn current_model_path(&self) -> PathBuf {
         self.config.lock().model_path.clone()
@@ -916,6 +991,17 @@ impl super::engine::AsrEngine for LlamaAsrAdapter {
     fn transcribe(&self, samples: &[f32], sample_rate: u32) -> Result<String, String> {
         self.engine
             .transcribe(samples, sample_rate)
+            .map_err(|e| e.to_string())
+    }
+
+    fn transcribe_with_context(
+        &self,
+        samples: &[f32],
+        sample_rate: u32,
+        ctx: &str,
+    ) -> Result<String, String> {
+        self.engine
+            .transcribe_with_context(samples, sample_rate, ctx)
             .map_err(|e| e.to_string())
     }
 

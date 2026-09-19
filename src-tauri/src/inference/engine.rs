@@ -57,6 +57,23 @@ pub trait AsrEngine: Send + Sync {
     /// 转写音频
     fn transcribe(&self, samples: &[f32], sample_rate: u32) -> Result<String, String>;
 
+    /// 带「上文」的转写：`ctx` = 前文文本（空 = 无上文，等同 `transcribe`）。
+    ///
+    /// 跨段记忆的落点：长音频分段后，每段把「已转写文本的尾部」作为上下文随音频一起送模型，
+    /// 让接缝处的同音字/半句话靠上文认对。实测（0.6B + 130s 实录，60s 处硬切）：
+    /// 无上文把「沉淀」认成「纯电」；给出**截断到接缝前**的上文（模型无从照抄）仍认对「沉淀」
+    /// ⇒ 是真实识别受益，不是复制。
+    ///
+    /// 默认实现忽略 `ctx`：不具备上下文能力的引擎（如 sherpa）行为与改动前完全一致。
+    fn transcribe_with_context(
+        &self,
+        samples: &[f32],
+        sample_rate: u32,
+        _ctx: &str,
+    ) -> Result<String, String> {
+        self.transcribe(samples, sample_rate)
+    }
+
     /// 估算当前模型显存占用（MB），用于显存监控（无权限时回退估算）
     fn vram_estimate_mb(&self) -> Option<u64>;
 }
