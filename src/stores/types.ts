@@ -62,7 +62,8 @@ export interface ModelItemState {
   engine?: string;
   /** 运行时包 key（gguf / onnx …，Rust 下发；用于运行门禁与包查询；缺省回退 format） */
   runtime_key?: string;
-  repo: string;
+  /** 来源标签（如 github.com/k2-fsa/sherpa-onnx、huggingface.co/…，Rust 推导；前端只展示） */
+  source: string;
   sizeGb: number;
   descriptionZh: string;
   descriptionEn: string;

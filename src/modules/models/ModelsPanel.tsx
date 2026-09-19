@@ -18,7 +18,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useAppStore, type ModelItemState } from "@/stores";
 import { t } from "@/lib/i18n";
 import { openPath, pickFolder, sendToSidecar } from "@/lib/tauri";
@@ -53,7 +52,6 @@ function SettingsPage() {
   const locale = useAppStore((s) => s.locale);
   const modelRoot = useAppStore((s) => s.models.modelRoot);
   const diskFreeGb = useAppStore((s) => s.models.diskFreeGb);
-  const mirror = useAppStore((s) => s.models.mirror);
   const proxy = useAppStore((s) => s.models.proxy);
   const downloading = useAppStore((s) => (s.models.items ?? []).some((i) => i.state === "downloading"));
   const [changing, setChanging] = useState(false);
@@ -126,26 +124,6 @@ function SettingsPage() {
         <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-xs text-muted-foreground">
           <span>
             {t(locale, "models.storage.diskFree")}: {diskFreeGb == null ? "—" : `${diskFreeGb} GB`}
-          </span>
-          <span className="flex items-center gap-2">
-            {t(locale, "models.mirror.title")}: 
-            <Select
-              value={mirror === "cn" ? "cn" : mirror && mirror !== "official" ? "custom" : "official"}
-              onValueChange={(v) => {
-                const endpoint = v === "official" ? "" : v === "cn" ? "https://hf-mirror.com" : v;
-                void sendToSidecar({ action: "set_mirror", endpoint });
-                useAppStore.getState().setMirror(v);
-                useAppStore.getState().addLog(`[settings] 🔄 下载镜像已切换: ${v === "official" ? "官方" : v === "cn" ? "HF 镜像" : v}`, "info");
-              }}
-            >
-              <SelectTrigger className="h-7 w-[200px] text-xs">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="official">{t(locale, "models.mirror.official")}</SelectItem>
-                <SelectItem value="cn">{t(locale, "models.mirror.cn")}</SelectItem>
-              </SelectContent>
-            </Select>
           </span>
         </div>
 
@@ -315,6 +293,14 @@ function ModelRow({ name }: { name: string }) {
             </Badge>
           )}
           <span className="ml-2 text-xs text-muted-foreground">{desc}</span>
+          {it.source && (
+            <span
+              className="ml-2 inline-block max-w-[320px] truncate align-bottom font-mono text-[11px] text-muted-foreground/70"
+              title={it.source}
+            >
+              {t(locale, "models.source.label")}: {it.source}
+            </span>
+          )}
         </div>
         <StatusBadge />
         <span className="text-xs text-muted-foreground tabular-nums">{formatModelSize(it)}</span>

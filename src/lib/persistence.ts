@@ -49,7 +49,6 @@ export async function loadConfig() {
       models: {
         ...store.models,
         modelRoot: parsed.models?.modelRoot ?? store.models.modelRoot,
-        mirror: parsed.models?.mirror ?? store.models.mirror,
         proxy: parsed.models?.proxy ?? store.models.proxy,
         huggingfaceToken: typeof parsed.models?.huggingfaceToken === "string" ? parsed.models.huggingfaceToken : store.models.huggingfaceToken,
         hasHfToken: typeof parsed.models?.huggingfaceToken === "string" ? parsed.models.huggingfaceToken.trim() !== "" : store.models.hasHfToken,
@@ -78,7 +77,7 @@ export async function saveConfig() {
       overlay: state.overlay,
       theme: state.theme,
       locale: state.locale,
-      models: { modelRoot: storageRoot, mirror: state.models.mirror, proxy: state.models.proxy, huggingfaceToken: state.models.huggingfaceToken },
+      models: { modelRoot: storageRoot, proxy: state.models.proxy, huggingfaceToken: state.models.huggingfaceToken },
       useRustEngine: state.useRustEngine,
     };
     await saveData("config.json", JSON.stringify(config, null, 2));

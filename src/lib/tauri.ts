@@ -124,7 +124,7 @@ export function rustListAudioDevices(): Promise<Record<string, unknown>> {
 /** 检测推理框架（libs）安装状态（三态：ready / incomplete / missing） */
 export function rustCheckRuntime(): Promise<{
   root: string;
-  packages: { framework: string; name: string; installed: boolean; state: "ready" | "incomplete" | "missing"; missing: string[]; dir: string }[];
+  packages: { framework: string; name: string; version: string; installed: boolean; state: "ready" | "incomplete" | "missing"; missing: string[]; dir: string }[];
 }> {
   return invoke("check_runtime");
 }

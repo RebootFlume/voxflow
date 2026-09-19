@@ -10,6 +10,8 @@ import { rustCheckRuntime, rustDownloadRuntime, rustVerifyRuntime } from "@/lib/
 interface RuntimePkg {
   framework: string;
   name: string;
+  /** 运行时版本标签（Rust 下发，如 b10622 / v1.13.6） */
+  version: string;
   installed: boolean;
   state: "ready" | "incomplete" | "missing";
   missing: string[];
@@ -153,6 +155,11 @@ export function FrameworkPanel() {
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <span className="text-sm font-medium">{pkg.name}</span>
+                        {pkg.version ? (
+                          <span className="font-mono text-[11px] text-muted-foreground" title={pkg.version}>
+                            {pkg.version}
+                          </span>
+                        ) : null}
                         {pkg.state === "ready" ? (
                           <Badge variant="secondary" className="text-[10px]">
                             {t(locale, "framework.installed")}

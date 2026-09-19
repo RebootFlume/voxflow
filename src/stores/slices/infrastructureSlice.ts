@@ -1,6 +1,8 @@
 export interface RuntimePkgState {
   framework: string;
   name: string;
+  /** 运行时版本标签（Rust 下发，如 b10622 / v1.13.6） */
+  version: string;
   installed: boolean;
   state: "ready" | "incomplete" | "missing";
   missing: string[];

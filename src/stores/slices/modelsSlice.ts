@@ -35,7 +35,6 @@ export interface ModelsSlice {
   startupPhase: "booting" | "ready";
   models: {
     modelRoot: string;
-    mirror: string;
     proxy: string;
     /** Hugging Face 下载 token（config.json 持久化；无 UI，用户手改文件） */
     huggingfaceToken: string;
@@ -48,7 +47,6 @@ export interface ModelsSlice {
   /** 引擎加载状态（集中管理） */
   engines: EngineRegistry;
   setModelRootLocal: (p: string) => void;
-  setMirror: (m: string) => void;
   setProxyLocal: (p: string) => void;
   setHfTokenLocal: (t: string) => void;
   applyModelsState: (payload: Record<string, unknown>) => void;
@@ -65,10 +63,9 @@ export interface ModelsSlice {
 
 export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: ModelsSlice) => Partial<ModelsSlice>)) => void): ModelsSlice => ({
   startupPhase: "booting",
-  models: { modelRoot: "", mirror: "", proxy: "", huggingfaceToken: "", hasHfToken: false, diskFreeGb: null, items: [], loadedModel: null, loadedDevice: null },
+  models: { modelRoot: "", proxy: "", huggingfaceToken: "", hasHfToken: false, diskFreeGb: null, items: [], loadedModel: null, loadedDevice: null },
   engines: { asr: idleEngine(), tts: idleEngine() },
   setModelRootLocal: (modelRoot) => set((s) => ({ models: { ...s.models, modelRoot } })),
-  setMirror: (mirror) => set((s) => ({ models: { ...s.models, mirror } })),
   setProxyLocal: (proxy) => set((s) => ({ models: { ...s.models, proxy } })),
   setHfTokenLocal: (huggingfaceToken) =>
     set((s) => ({ models: { ...s.models, huggingfaceToken, hasHfToken: huggingfaceToken.trim() !== "" } })),
@@ -80,7 +77,6 @@ export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: Mod
         ...s.models,
         modelRoot: typeof payload.model_root === "string" ? payload.model_root : s.models.modelRoot,
         diskFreeGb: typeof payload.disk_free_gb === "number" ? payload.disk_free_gb : s.models.diskFreeGb,
-        mirror: typeof payload.mirror === "string" ? payload.mirror : s.models.mirror,
         proxy: typeof payload.proxy === "string" ? payload.proxy : s.models.proxy,
         items: items.map((m: Record<string, unknown>) => {
           const prev = s.models.items.find((it) => it.name === m.name);
@@ -91,7 +87,7 @@ export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: Mod
             format: typeof m.format === "string" ? m.format : "",
             engine: typeof m.engine === "string" ? m.engine : undefined,
             runtime_key: typeof m.runtime_key === "string" ? m.runtime_key : undefined,
-            repo: String(m.repo ?? ""),
+            source: String(m.source ?? ""),
             sizeGb: Number(m.size_gb ?? 0),
             descriptionZh: String(m.description_zh ?? ""),
             descriptionEn: String(m.description_en ?? ""),
