@@ -7,11 +7,11 @@
 //!   2. 文本帧 "Done"：结束标记，服务器转写后回文本帧（JSON）
 //! - 模型：SenseVoice（--sense-voice-model） / Paraformer（--paraformer）均支持
 
-use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use crate::inference::device::PROBE_TIMEOUT;
 
 use parking_lot::Mutex;
 use tungstenite::Message;
@@ -142,7 +142,7 @@ impl SherpaAsrEngine {
         crate::inference::llama_server::kill_port_owner(DEFAULT_PORT);
         crate::inference::llama_server::wait_port_closed(DEFAULT_PORT, Duration::from_secs(3));
         // 外部进程（非本软件引擎，路径判定拒杀）仍占用 → 不杀，自动换空闲端口
-        let port = if TcpStream::connect(("127.0.0.1", DEFAULT_PORT)).is_ok() {
+        let port = if crate::inference::device::port_serving(DEFAULT_PORT, PROBE_TIMEOUT) {
             match crate::inference::llama_server::find_free_port(DEFAULT_PORT + 1) {
                 Some(p) => {
                     log::warn!("[sherpa] 端口 {DEFAULT_PORT} 被外部进程占用（不误杀），改用空闲端口 {p}");
@@ -198,7 +198,7 @@ impl SherpaAsrEngine {
                 .as_mut()
                 .map(|c| c.try_wait().map(|s| s.is_none()).unwrap_or(true))
                 .unwrap_or(false);
-            if child_alive && TcpStream::connect(("127.0.0.1", inner.port)).is_ok() {
+            if child_alive && crate::inference::device::port_serving(inner.port, PROBE_TIMEOUT) {
                 inner.state = SherpaState::Ready;
                 inner.device = device.to_ascii_lowercase();
                 return Ok(());
@@ -229,7 +229,7 @@ impl SherpaAsrEngine {
         if let Some(c) = inner.child.as_mut() {
             if let Ok(Some(_)) = c.try_wait() {
                 // child 说已退出 → 用端口二次确认（句柄过期时端口仍通）
-                let port_alive = TcpStream::connect(("127.0.0.1", inner.port)).is_ok();
+                let port_alive = crate::inference::device::port_serving(inner.port, PROBE_TIMEOUT);
                 if !port_alive {
                     // 真死了：复位状态，避免"假就绪"长期悬挂
                     inner.model = String::new();

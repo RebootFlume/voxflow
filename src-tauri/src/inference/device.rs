@@ -4,7 +4,7 @@
 //! 供所有引擎（llama-server / sherpa / 未来 C-API worker / pytorch）共用。
 //! 纯搬运，行为不变；`engine.rs` / `llama_server.rs` 以 re-export 保持旧调用点兼容。
 
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -126,16 +126,35 @@ pub(crate) fn kill_port_owner(port: u16) {
     }
 }
 
-/// 从 start 起找第一个空闲端口（探测：无法建立 TCP 连接即视为空闲）
-pub(crate) fn find_free_port(start: u16) -> Option<u16> {
-    (start..start + 200).find(|p| TcpStream::connect(("127.0.0.1", *p)).is_err())
+/// 连接探测的超时：无人监听时 `connect` 可能等 SYN 重传超时（本机实测 ≈2s，
+/// 被安全软件拦 SYN 的机器更久），所以任何"探活"都必须带超时。
+/// 与 `llama_server` 深度诊断用的 500ms 保持一致。
+pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// 端口是否有服务在监听（**带超时**的 connect 探测；探活语义）
+pub(crate) fn port_serving(port: u16, timeout: Duration) -> bool {
+    TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), timeout).is_ok()
 }
 
-/// 等待端口完全释放（旧进程刚杀后，避免 bind 冲突）
+/// 端口是否可被独占绑定（**瞬时**：被占用会立刻返回 AddrInUse）
+///
+/// 这才是"端口已释放"的正确判定：原实现用 connect 探测，遇到"仍被绑定未监听 /
+/// TIME_WAIT"的端口会误判为已释放（connect 连不上），而我们要问的正是
+/// "新进程现在能不能 bind"。
+pub(crate) fn port_bindable(port: u16) -> bool {
+    TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+/// 从 start 起找第一个可绑定端口（bind 探测，瞬时）
+pub(crate) fn find_free_port(start: u16) -> Option<u16> {
+    (start..start + 200).find(|p| port_bindable(*p))
+}
+
+/// 等待端口可被绑定（旧进程刚杀后，避免新进程 bind 冲突）
 pub(crate) fn wait_port_closed(port: u16, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if TcpStream::connect(("127.0.0.1", port)).is_err() {
+        if port_bindable(port) {
             return;
         }
         std::thread::sleep(Duration::from_millis(100));

@@ -138,10 +138,16 @@ pub const LOOPBACK_NO_PROXY: &str = "127.0.0.1,localhost,::1";
 
 /// 只访问回环的客户端（llama-server 健康检查/转写/chat）：**彻底禁用代理**。
 /// 比"白名单"更硬：任何 env / 显式代理都不会影响本地请求。
+///
+/// `connect_timeout` 也必须短（用统一的 `PROBE_TIMEOUT`）：本地引擎"还没起来"时，
+/// TCP 连接可能等 SYN 重传超时（本机实测 ≈2s），会让就绪轮询的每一次"未就绪"都被拖慢。
 pub fn loopback_client_builder(
     timeout: std::time::Duration,
 ) -> reqwest::blocking::ClientBuilder {
-    reqwest::blocking::Client::builder().timeout(timeout).no_proxy()
+    reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(crate::inference::device::PROBE_TIMEOUT)
+        .no_proxy()
 }
 
 /// 带显式代理的客户端 builder（下载用）：配置为空 → 同样彻底禁用代理（不落回 env 隐式行为）；
