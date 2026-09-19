@@ -1,4 +1,4 @@
-import type { EngineState, ModelItemState } from "../types";
+import type { EngineState, ModelEntryState, ModelItemState } from "../types";
 
 /** 引擎集中管理：每个功能（asr/tts）一个引擎状态 */
 export interface EngineRegistry {
@@ -28,6 +28,21 @@ function pickVoiceMode(v: unknown): ModelItemState["voice_mode"] {
     requires_text: typeof o.requires_text === "boolean" ? o.requires_text : undefined,
     overrides_preset: typeof o.overrides_preset === "boolean" ? o.overrides_preset : undefined,
   };
+}
+
+/** 精选条目数组：非数组 → []；逐项字符串/数值兜底，state 缺失回退 not_downloaded */
+function pickEntries(v: unknown): ModelEntryState[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .filter((e): e is Record<string, unknown> => typeof e === "object" && e !== null)
+    .map((e) => ({
+      id: String(e.id ?? ""),
+      labelZh: String(e.label_zh ?? ""),
+      labelEn: String(e.label_en ?? ""),
+      sizeGb: Number(e.size_gb ?? 0) || 0,
+      default: e.default === true,
+      state: (e.state as ModelEntryState["state"]) ?? "not_downloaded",
+    }));
 }
 
 export interface ModelsSlice {
@@ -96,6 +111,10 @@ export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: Mod
             quant: typeof m.quant === "string" ? m.quant : undefined,
             path: String(m.path ?? ""),
             dirExists: m.dir_exists === true,
+            // 精选条目：缺失 → []；active_entry 缺失/空串 → null（无安装或无条目）
+            entries: pickEntries(m.entries),
+            activeEntry:
+              typeof m.active_entry === "string" && m.active_entry !== "" ? m.active_entry : null,
             state: (m.state as ModelItemState["state"]) ?? "not_downloaded",
             modelPath: typeof m.model_path === "string" ? m.model_path : undefined,
             mmprojPath: typeof m.mmproj_path === "string" ? m.mmproj_path : undefined,

@@ -53,6 +53,17 @@ export interface EngineState {
   error: string | null;
 }
 
+/** 精选条目（Rust models_state 下发的「调试定死的文件组合」；同一模型可有多组） */
+export interface ModelEntryState {
+  id: string;
+  labelZh: string;
+  labelEn: string;
+  sizeGb: number;
+  /** 未指定条目时的默认条目（下载动作不传 entry 时 Rust 用它） */
+  default: boolean;
+  state: "downloaded" | "not_downloaded" | "downloading";
+}
+
 export interface ModelItemState {
   name: string;
   kind: "asr" | "tts";
@@ -73,6 +84,10 @@ export interface ModelItemState {
   quant?: string;
   path: string;
   dirExists?: boolean;
+  /** 精选条目（可能为空数组 = 无条目概念，UI 与单模型完全一致） */
+  entries: ModelEntryState[];
+  /** 当前目录里已安装的条目 id；未有安装或该模型无条目时为 null */
+  activeEntry: string | null;
   state: "not_downloaded" | "downloading" | "downloaded";
   modelPath?: string;
   mmprojPath?: string;

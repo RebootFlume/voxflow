@@ -18,6 +18,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useAppStore, type ModelItemState } from "@/stores";
 import { t } from "@/lib/i18n";
 import { openPath, pickFolder, sendToSidecar } from "@/lib/tauri";
@@ -36,13 +37,18 @@ const ENGINE_BADGE_CLASSES: Record<string, string> = {
   torch: "bg-orange-500/10 text-orange-600 dark:text-orange-400 border-orange-500/20",
 };
 
-/** 模型大小显示：已下载用真实磁盘占用，未下载用清单预估值 */
-function formatModelSize(it: ModelItemState): string {
-  const gb = it.sizeOnDiskGb ?? it.sizeGb;
+/** GB 数值显示（≥10 不留小数） */
+function formatGb(gb: number): string {
   return `${gb.toFixed(gb >= 10 ? 0 : 2)} GB`;
 }
 
+/** 模型大小显示：已下载用真实磁盘占用，未下载用清单预估值 */
+function formatModelSize(it: ModelItemState): string {
+  return formatGb(it.sizeOnDiskGb ?? it.sizeGb);
+}
+
 const EMPTY_ITEMS: ModelItemState[] = [];
+const EMPTY_ENTRIES: ModelItemState["entries"] = [];
 
 // ============================================================
 // 下载设置子页面
@@ -184,6 +190,14 @@ function ModelRow({ name }: { name: string }) {
   const item = useAppStore((s) => (s.models.items ?? []).find((i) => i.name === name));
   const asrDevice = useAppStore((s) => s.asr.device);
   const [expanded, setExpanded] = useState(false);
+  // 精选条目选择：初值 = 已装条目 ?? 默认条目 ?? 首个条目；下载/切换完成（activeEntry 变化）后同步
+  const entries = item?.entries ?? EMPTY_ENTRIES;
+  const [selectedEntryId, setSelectedEntryId] = useState(
+    () => item?.activeEntry ?? entries.find((e) => e.default)?.id ?? entries[0]?.id ?? "",
+  );
+  useEffect(() => {
+    if (item?.activeEntry) setSelectedEntryId(item.activeEntry);
+  }, [item?.activeEntry]);
 
   if (!item) return null;
   const it = item;
@@ -196,6 +210,19 @@ function ModelRow({ name }: { name: string }) {
   const isNotDownloaded = it.state === "not_downloaded" && !isLoaded;
   const desc = locale === "zh" ? it.descriptionZh : it.descriptionEn;
   const locked = !it.available;
+
+  // 条目 UI 仅在 1 个以上精选条目时启用；≤1 完全走既有单模型路径（不渲染下拉、下载不带 entry）
+  const hasEntryChoice = it.entries.length > 1;
+  const selectedEntry = hasEntryChoice ? it.entries.find((e) => e.id === selectedEntryId) : undefined;
+  // 选中条目 ≠ 当前已装条目、且其自身非下载中 → 动作区改由该条目状态决定
+  // （与 activeEntry 相同 / 条目下载中 → 一律保持既有 加载·卸载·删除·取消 逻辑）
+  const entryOverride =
+    selectedEntry && selectedEntry.id !== it.activeEntry && selectedEntry.state !== "downloading"
+      ? selectedEntry
+      : undefined;
+  const baseNotDownloaded = !entryOverride && isNotDownloaded;
+  const baseDownloaded = !entryOverride && isDownloaded && !isLoaded;
+  const baseLoaded = !entryOverride && isLoaded;
 
   // 状态图标
   function StatusIcon() {
@@ -228,8 +255,9 @@ function ModelRow({ name }: { name: string }) {
     return <Badge variant="outline">{t(locale, "models.state.not_downloaded")}</Badge>;
   }
 
-  async function doDownload() {
-    await sendToSidecar({ action: "download_model", model: it.name });
+  /** 下载/切换条目：entryId 缺省 = Rust 侧默认条目（无条目概念的模型走这条） */
+  async function doDownload(entryId?: string) {
+    await sendToSidecar({ action: "download_model", model: it.name, ...(entryId ? { entry: entryId } : {}) });
     refreshModels();
   }
   async function doCancel() {
@@ -302,6 +330,24 @@ function ModelRow({ name }: { name: string }) {
             </span>
           )}
         </div>
+        {hasEntryChoice && (
+          <span className="flex shrink-0 items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+            <span className="text-[11px] text-muted-foreground">{t(locale, "models.entry.label")}</span>
+            <Select value={selectedEntry?.id ?? it.entries[0].id} onValueChange={setSelectedEntryId}>
+              <SelectTrigger className="h-7 w-[260px] text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {it.entries.map((e) => (
+                  <SelectItem key={e.id} value={e.id}>
+                    {`${locale === "zh" ? e.labelZh : e.labelEn} · ${formatGb(e.sizeGb)} GB`}
+                    {it.activeEntry === e.id ? ` ${t(locale, "models.entry.current")}` : ""}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </span>
+        )}
         <StatusBadge />
         <span className="text-xs text-muted-foreground tabular-nums">{formatModelSize(it)}</span>
         {expanded ? <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" /> : <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />}
@@ -333,8 +379,28 @@ function ModelRow({ name }: { name: string }) {
 
           {locked ? null : (
             <div className="flex items-center gap-2">
+              {/* 选中「非当前已装」条目 → 动作区由该条目状态决定 */}
+              {/* 该模型已加载：条目写盘会失败（文件被引擎占用）→ 一并给出卸载入口，避免死路 */}
+              {entryOverride && isLoaded && (
+                <Button size="sm" variant="outline" disabled={anyLoading} onClick={() => void doUnload()}>
+                  <Power className="mr-1.5 h-3.5 w-3.5" />
+                  {t(locale, "models.action.unload")}
+                </Button>
+              )}
+              {entryOverride && entryOverride.state === "downloaded" && (
+                <Button size="sm" onClick={() => void doDownload(entryOverride.id)}>
+                  <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+                  {t(locale, "models.entry.switch")}
+                </Button>
+              )}
+              {entryOverride && entryOverride.state === "not_downloaded" && (
+                <Button size="sm" onClick={() => void doDownload(entryOverride.id)}>
+                  <Download className="mr-1.5 h-3.5 w-3.5" />
+                  {t(locale, "models.action.download", { size: formatGb(entryOverride.sizeGb) })}
+                </Button>
+              )}
               {/* 未下载 → 下载按钮（有残留目录时附加删除按钮） */}
-              {isNotDownloaded && (
+              {baseNotDownloaded && (
                 <>
                   <Button size="sm" onClick={() => void doDownload()}>
                     <Download className="mr-1.5 h-3.5 w-3.5" />
@@ -356,7 +422,7 @@ function ModelRow({ name }: { name: string }) {
                 </Button>
               )}
               {/* 已下载未加载 → 加载 + 删除 */}
-              {isDownloaded && !isLoaded && (
+              {baseDownloaded && (
                 <>
                   <Button size="sm" disabled={anyLoading || cpuUnsupported} title={cpuUnsupported ? t(locale, "models.cpuUnsupported") : undefined} onClick={() => void doLoad()}>
                     <Upload className="mr-1.5 h-3.5 w-3.5" />
@@ -369,7 +435,7 @@ function ModelRow({ name }: { name: string }) {
                 </>
               )}
               {/* 已加载 → 卸载 + 切换 */}
-              {isLoaded && (
+              {baseLoaded && (
                 <>
                   <Button size="sm" variant="outline" disabled={anyLoading} onClick={() => void doUnload()}>
                     <Power className="mr-1.5 h-3.5 w-3.5" />
