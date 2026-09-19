@@ -9,9 +9,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::inference::slot::{EngineSlot, SlotEngine};
-use crate::model_manager::{ModelFormat, find_main_model_file};
+use crate::model_manager::find_main_model_file;
 use crate::tts::engine::sherpa::SherpaTtsEngine;
-use crate::tts::spec::{BackendSpec, ModelSpec};
+use crate::tts::spec::{ModelKind, ModelSpec};
 use crate::tts::traits::TtsEngine;
 
 /// TtsEngine 接入 EngineSlot 最小接口（按 trait 对象实现，避免与 ASR 的 blanket impl 冲突）
@@ -48,12 +48,10 @@ impl TtsRegistry {
         }
     }
 
-    /// 描述符 → 框架标识（路由依据；加新框架在此扩展，模型差异全在 spec）
+    /// 描述符 → 引擎注册键（路由依据）。
+    /// 只接受 TTS 域描述符（kind 与键都是数据）；加新框架无需改此处。
     fn framework_for(spec: &ModelSpec) -> Option<&'static str> {
-        match spec.backend {
-            BackendSpec::SherpaTts(_) => Some("sherpa"),
-            _ => None,
-        }
+        (spec.kind == ModelKind::Tts).then_some(spec.framework)
     }
 
     /// 加载模型（唯一权威路由）：spec 查找 → 框架 → 互斥卸载其他 → 引擎加载。
@@ -74,8 +72,8 @@ impl TtsRegistry {
 
         // 主模型文件（models_root / spec.id / model.onnx 等）
         let dir = crate::model_manager::get_model_root().join(spec.id);
-        let main_file = find_main_model_file(&dir, &ModelFormat::Onnx)
-            .ok_or_else(|| format!("模型 {} 缺少 ONNX 文件", spec.name))?;
+        let main_file = find_main_model_file(&dir, spec.framework)
+            .ok_or_else(|| format!("模型 {} 缺少主模型文件", spec.name))?;
 
         engine.load(&main_file, device).map_err(|e| e.to_string())?;
         Ok((framework, spec.name.to_string()))

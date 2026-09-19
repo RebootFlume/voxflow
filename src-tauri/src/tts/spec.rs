@@ -10,7 +10,6 @@
 //! - 描述符查找接受 展示名 / id / 目录名 归一化匹配（find_by_name）。
 //! - 同一表内不允许两个条目归一化后相同（schema 校验测试保证）。
 
-use crate::model_manager::ModelFormat;
 
 /// 模型种类
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,7 +156,9 @@ pub struct ModelSpec {
     /// 展示名（前端显示 / 查找别名）
     pub name: &'static str,
     pub kind: ModelKind,
-    pub format: ModelFormat,
+    /// 引擎注册键（与 `model_manager::FRAMEWORKS.id` 对应）："gguf" | "onnx" | "sherpa"。
+    /// 引擎路由 / 运行时包 / 文件发现全部由它查表 —— 新增框架不再需要改 match。
+    pub framework: &'static str,
     /// 下载源 repo（HF / GitHub 展示用）
     pub repo: &'static str,
     pub size_gb: f64,
@@ -231,7 +232,7 @@ pub static SPECS: &[ModelSpec] = &[
         id: "qwen3-asr-0.6b-gguf",
         name: "Qwen3-ASR-0.6B",
         kind: ModelKind::Asr,
-        format: ModelFormat::Gguf,
+        framework: "gguf",
         repo: "ggml-org/Qwen3-ASR-0.6B-GGUF",
         size_gb: 0.95,
         description_zh: "默认识别模型 · GGUF 量化 · 更快 · 内存占用更低",
@@ -253,7 +254,7 @@ pub static SPECS: &[ModelSpec] = &[
         id: "Qwen3-ASR-1.7B",
         name: "Qwen3-ASR-1.7B",
         kind: ModelKind::Asr,
-        format: ModelFormat::Gguf,
+        framework: "gguf",
         repo: "ggml-org/Qwen3-ASR-1.7B-GGUF",
         size_gb: 2.35,
         description_zh: "更准 · GGUF 量化 · 需要更多内存/显存",
@@ -276,7 +277,7 @@ pub static SPECS: &[ModelSpec] = &[
         id: "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17",
         name: "SenseVoice-int8",
         kind: ModelKind::Asr,
-        format: ModelFormat::Onnx,
+        framework: "onnx",
         repo: "k2-fsa/sherpa-onnx",
         size_gb: 0.23,
         description_zh: "中文全能 · 中英日韩粤 5 语 · 情感/事件/时间戳",
@@ -296,7 +297,7 @@ pub static SPECS: &[ModelSpec] = &[
         id: "sherpa-onnx-paraformer-zh-small-2024-03-09",
         name: "Paraformer-zh-small",
         kind: ModelKind::Asr,
-        format: ModelFormat::Onnx,
+        framework: "onnx",
         repo: "k2-fsa/sherpa-onnx",
         size_gb: 0.1,
         description_zh: "中文超小 · 74MB · 低端 CPU 设备首选",
@@ -317,7 +318,7 @@ pub static SPECS: &[ModelSpec] = &[
         id: "kokoro-multi-lang-v1_1",
         name: "Kokoro-v1_1",
         kind: ModelKind::Tts,
-        format: ModelFormat::Onnx,
+        framework: "sherpa",
         repo: "k2-fsa/kokoro-multi-lang-v1_1",
         size_gb: 0.32,
         description_zh: "Kokoro 多语言 v1.1 · 中英103音色 · 纯端到端 · sherpa-onnx 推荐",
@@ -366,7 +367,7 @@ pub static SPECS: &[ModelSpec] = &[
         id: "kokoro-multi-lang-v1_0",
         name: "Kokoro-v1_0",
         kind: ModelKind::Tts,
-        format: ModelFormat::Onnx,
+        framework: "sherpa",
         repo: "k2-fsa/kokoro-multi-lang-v1_0",
         size_gb: 0.32,
         description_zh: "Kokoro 多语言 v1.0 · 中英53音色 · 纯端到端",
@@ -415,7 +416,7 @@ pub static SPECS: &[ModelSpec] = &[
         id: "kokoro-en-v0_19",
         name: "Kokoro-en-v0_19",
         kind: ModelKind::Tts,
-        format: ModelFormat::Onnx,
+        framework: "sherpa",
         repo: "k2-fsa/kokoro-en-v0_19",
         size_gb: 0.32,
         description_zh: "Kokoro 英文 v0.19 · 11音色 · 纯端到端",
@@ -465,7 +466,7 @@ pub static SPECS: &[ModelSpec] = &[
         id: "matcha-icefall-zh-baker",
         name: "Matcha-zh-baker",
         kind: ModelKind::Tts,
-        format: ModelFormat::Onnx,
+        framework: "sherpa",
         repo: "k2-fsa/matcha-icefall-zh-baker",
         size_gb: 0.3,
         description_zh: "Matcha 中文 · 高质量 · 纯端到端",
@@ -494,7 +495,7 @@ pub static SPECS: &[ModelSpec] = &[
         id: "sherpa-onnx-zipvoice-distill",
         name: "ZipVoice-distill",
         kind: ModelKind::Tts,
-        format: ModelFormat::Onnx,
+        framework: "sherpa",
         repo: "k2-fsa/sherpa-onnx-zipvoice-distill",
         size_gb: 0.4,
         description_zh: "ZipVoice 蒸馏 · 中英 · 语音克隆 · 纯端到端",
@@ -534,7 +535,7 @@ pub static SPECS: &[ModelSpec] = &[
         id: "sherpa-onnx-pocket-tts-int8",
         name: "PocketTTS-int8",
         kind: ModelKind::Tts,
-        format: ModelFormat::Onnx,
+        framework: "sherpa",
         repo: "k2-fsa/sherpa-onnx-pocket-tts-int8",
         size_gb: 0.5,
         description_zh: "Pocket TTS int8 · 快速低延迟 · 纯端到端（克隆未接线）",
@@ -571,7 +572,7 @@ pub static SPECS: &[ModelSpec] = &[
         id: "sherpa-onnx-supertonic-3-tts-int8",
         name: "Supertonic-3-int8",
         kind: ModelKind::Tts,
-        format: ModelFormat::Onnx,
+        framework: "sherpa",
         repo: "k2-fsa/sherpa-onnx-supertonic-3-tts-int8",
         size_gb: 0.6,
         description_zh: "Supertonic 3 · 31语言 · 高质量 · 纯端到端",
@@ -620,7 +621,7 @@ pub static SPECS: &[ModelSpec] = &[
         id: "kitten-nano-en-v0_1-fp16",
         name: "Kitten-nano-en",
         kind: ModelKind::Tts,
-        format: ModelFormat::Onnx,
+        framework: "sherpa",
         repo: "k2-fsa/kitten-nano-en-v0_1-fp16",
         size_gb: 0.2,
         description_zh: "Kitten nano · 轻量快速 · 英文 · 纯端到端",
@@ -760,6 +761,23 @@ mod tests {
                 ok,
                 "{}: kind={:?} 与 backend={:?} 不匹配",
                 spec.name, spec.kind, spec.backend
+            );
+            // framework 必须是已登记的引擎注册键（防拼错；新增框架加 FRAMEWORKS 行即可）
+            assert!(
+                crate::model_manager::framework_spec(spec.framework).is_some(),
+                "{}: framework={} 未登记于 FRAMEWORKS",
+                spec.name, spec.framework
+            );
+            // framework 与 backend 族必须一致（防复制粘贴改错）
+            let fw_ok = match &spec.backend {
+                BackendSpec::Llama(_) => spec.framework == "gguf",
+                BackendSpec::SherpaWs(_) => spec.framework == "onnx",
+                BackendSpec::SherpaTts(_) => spec.framework == "sherpa",
+            };
+            assert!(
+                fw_ok,
+                "{}: framework={} 与 backend={:?} 不一致",
+                spec.name, spec.framework, spec.backend
             );
         }
     }

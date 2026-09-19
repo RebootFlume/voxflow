@@ -16,8 +16,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use tungstenite::Message;
 
-use crate::model_manager::ModelFormat;
-use crate::tts::spec::ModelSpec;
+use crate::tts::spec::{BackendSpec, ModelSpec};
 
 /// websocket server 可执行文件名
 const SHERPA_WS_EXE: &str = "sherpa-onnx-offline-websocket-server.exe";
@@ -113,7 +112,7 @@ impl SherpaAsrEngine {
 
         let spec = ModelSpec::find(model_name)
             .ok_or_else(|| format!("unknown model: {model_name}"))?;
-        if spec.format != ModelFormat::Onnx {
+        if !matches!(spec.backend, BackendSpec::SherpaWs(_)) {
             return Err(format!("{model_name} 不是 sherpa 模型"));
         }
         let model_dir = crate::model_manager::model_dir(model_name);
@@ -121,7 +120,7 @@ impl SherpaAsrEngine {
             return Err(format!("模型 {model_name} 目录不存在: {}", model_dir.display()));
         }
         // 找主 onnx 文件 + tokens.txt
-        let main_file = crate::model_manager::find_main_model_file(&model_dir, &ModelFormat::Onnx)
+        let main_file = crate::model_manager::find_main_model_file(&model_dir, spec.framework)
             .ok_or_else(|| format!("模型 {model_name} 缺少 ONNX 文件"))?;
         let tokens = model_dir.join("tokens.txt");
         if !tokens.exists() {

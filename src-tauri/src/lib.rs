@@ -219,10 +219,15 @@ fn dispatch_sidecar_action(
                 emit_error(&app, msg.clone());
                 return Ok(serde_json::json!({"status": "error", "msg": msg}));
             }
-            // 通知前端开始加载
-            let _ = app.emit("sidecar://event", serde_json::json!({"status": "model_loading", "model": name}));
             // 查找模型描述符（单一真源：tts::spec::SPECS）
-            let spec = match crate::tts::spec::ModelSpec::find(name) {
+            let found = crate::tts::spec::ModelSpec::find(name);
+            // 通知前端开始加载（附 kind：前端据此路由 asr/tts 引擎状态，无需按模型名猜）
+            let _ = app.emit("sidecar://event", serde_json::json!({
+                "status": "model_loading",
+                "model": name,
+                "kind": found.map(|s| s.kind.as_str()).unwrap_or(""),
+            }));
+            let spec = match found {
                 Some(i) => i,
                 None => {
                     let msg = format!("unknown model: {name}");
@@ -232,11 +237,16 @@ fn dispatch_sidecar_action(
             };
             let dir = model_manager::model_dir(name);
             // 根据格式查找主模型文件
-            let main_file = match model_manager::find_main_model_file(&dir, &spec.format) {
+            let main_file = match model_manager::find_main_model_file(&dir, spec.framework) {
                 Some(f) => f,
                 None => {
-                    let msg = format!("model file not found for {name} (format: {:?})", spec.format);
-                    let _ = app.emit("sidecar://event", serde_json::json!({"status": "model_not_downloaded", "model": name, "msg": msg}));
+                    let msg = format!("model file not found for {name} (framework: {})", spec.framework);
+                    let _ = app.emit("sidecar://event", serde_json::json!({
+                        "status": "model_not_downloaded",
+                        "model": name,
+                        "msg": msg,
+                        "kind": spec.kind.as_str(),
+                    }));
                     return Ok(serde_json::json!({"status": "error", "msg": msg}));
                 }
             };
@@ -253,6 +263,7 @@ fn dispatch_sidecar_action(
                         Ok((_fw, loaded_name)) => {
                             let _ = app.emit("sidecar://event", serde_json::json!({
                                 "status": "model_loaded",
+                                "kind": spec.kind.as_str(),
                                 "model": loaded_name,
                                 "device": device,
                             }));
@@ -261,6 +272,7 @@ fn dispatch_sidecar_action(
                             eprintln!("[load_model] ASR 加载失败({}): {e}", spec.id);
                             let _ = app.emit("sidecar://event", serde_json::json!({
                                 "status": "model_error",
+                                "kind": spec.kind.as_str(),
                                 "model": name,
                                 "msg": format!("{prefix}: {e}"),
                             }));
@@ -370,43 +382,40 @@ fn get_vram_status_sync() -> serde_json::Value {
     // 关键：进程不存在（引擎已卸载/释放）时绝不能回退到"模型目录大小"估算——
     // 那会在引擎死后假报占用。只有引擎 is_loaded()（子进程活着）却查不到
     // nvidia-smi 明细（无权限）时，才用目录大小近似。
-    let llama_mb = vram_of_process("llama-server")
-        .or_else(|| {
-            let eng = crate::inference::llama_server::global_engine();
-            if !eng.is_loaded() {
-                return None; // 引擎已卸载：显存已释放，不再估算
-            }
-            // 引擎活着但查不到明细（无权限）→ 用模型目录大小近似
-            let p = eng.current_model_path();
-            p.parent().map(|d| dir_size_mb(d)).flatten()
+    // 各框架进程显存（按 PID 查询），框架清单来自 model_manager::FRAMEWORKS
+    // （新增框架无需改此处）。关键：引擎已卸载时不得回退到"模型目录大小"估算——
+    // 那会在引擎死后假报占用；只有引擎 is_loaded() 却查不到 nvidia-smi 明细（无权限）
+    // 时才用目录大小近似（见 active_engine_dir_mb）。
+    let mut by_engine: std::collections::BTreeMap<&'static str, Option<u64>> =
+        std::collections::BTreeMap::new();
+    for fw in crate::model_manager::FRAMEWORKS {
+        let mb = fw
+            .process_name
+            .and_then(vram_of_process)
+            .or_else(|| active_engine_dir_mb(fw.id))
+            .or_else(|| registry_vram_mb_if_active(fw.id));
+        let slot = by_engine.entry(fw.engine).or_insert(None);
+        if mb.is_some() {
+            *slot = mb; // 非空优先（同一展示名可能对应多个注册键）
+        }
+    }
+    let frameworks: serde_json::Map<String, serde_json::Value> = by_engine
+        .into_iter()
+        .map(|(k, v)| {
+            (
+                k.to_string(),
+                v.map(|m| serde_json::json!({ "mb": m }))
+                    .unwrap_or_else(|| serde_json::json!(null)),
+            )
         })
-        .or_else(|| registry_vram_mb_if_active("gguf"));
-    let sherpa_mb = vram_of_process("sherpa-onnx-offline-websocket-server")
-        .or_else(|| {
-            let eng = crate::inference::sherpa_asr::global_engine();
-            if !eng.is_loaded() {
-                return None; // 引擎已卸载：显存已释放，不再估算
-            }
-            let model = eng.model();
-            if model.is_empty() {
-                None
-            } else {
-                pathbuf_size_mb(crate::model_manager::model_dir(&model))
-            }
-        })
-        .or_else(|| registry_vram_mb_if_active("onnx"));
+        .collect();
 
     serde_json::json!({
         "available": gpu.get("available").and_then(|v| v.as_bool()).unwrap_or(false),
         "gpu_name": gpu.get("gpuName").cloned().unwrap_or(serde_json::Value::String(String::new())),
         "total_mb": total_mb,
         "used_mb": used_mb,
-        "frameworks": {
-            "llama": llama_mb.map(|m| serde_json::json!({ "mb": m }))
-                .unwrap_or_else(|| serde_json::json!(null)),
-            "sherpa": sherpa_mb.map(|m| serde_json::json!({ "mb": m }))
-                .unwrap_or_else(|| serde_json::json!(null)),
-        },
+        "frameworks": serde_json::Value::Object(frameworks),
     })
 }
 
@@ -419,6 +428,21 @@ fn registry_vram_mb_if_active(framework: &'static str) -> Option<u64> {
     } else {
         None
     }
+}
+
+/// 引擎活着但拿不到 nvidia-smi 明细时的近似：已加载模型的目录大小（MB）。
+/// 引擎未加载 → None（显存已释放，绝不估算）。通用实现，不按框架写分支。
+fn active_engine_dir_mb(framework: &'static str) -> Option<u64> {
+    let r = crate::inference::registry::registry();
+    let e = r.engine(framework)?;
+    if !e.is_loaded() {
+        return None;
+    }
+    let model = e.current_model();
+    if model.is_empty() {
+        return None;
+    }
+    dir_size_mb(&crate::model_manager::model_dir(&model))
 }
 
 /// 查询指定进程名的显存占用（MB）——按 PID 匹配 nvidia-smi
@@ -485,11 +509,6 @@ fn dir_size_mb(dir: &std::path::Path) -> Option<u64> {
     } else {
         None
     }
-}
-
-/// 目录大小（MB）——PathBuf 版本
-fn pathbuf_size_mb(dir: std::path::PathBuf) -> Option<u64> {
-    dir_size_mb(&dir)
 }
 
 /// Rust 原生音频解码（不依赖 Python）
@@ -576,7 +595,7 @@ async fn rust_start_llama_server(
     // 通知前端开始加载（UI 立即进入 loading）
     let _ = app.emit(
         "sidecar://event",
-        serde_json::json!({ "status": "model_loading", "model": model }),
+        serde_json::json!({ "status": "model_loading", "model": model, "kind": "asr" }),
     );
 
     // 后台线程加载（阻塞操作不占主线程）
@@ -590,6 +609,7 @@ async fn rust_start_llama_server(
                 "sidecar://event",
                 serde_json::json!({
                     "status": "model_progress",
+                    "kind": "asr",
                     "model": model2,
                     "stage": stage,
                 }),
@@ -606,6 +626,7 @@ async fn rust_start_llama_server(
                     "sidecar://event",
                     serde_json::json!({
                         "status": "model_ready",
+                        "kind": "asr",
                         "model": model2,
                         "device": device2,
                         "detail": v,
@@ -616,7 +637,7 @@ async fn rust_start_llama_server(
             Err(e) => {
                 let _ = app2.emit(
                     "sidecar://event",
-                    serde_json::json!({ "status": "model_error", "model": model2, "msg": e }),
+                    serde_json::json!({ "status": "model_error", "model": model2, "msg": e, "kind": "asr" }),
                 );
             }
         }
@@ -681,6 +702,7 @@ async fn rust_load_asr(
 
     let _ = app.emit("sidecar://event", serde_json::json!({
         "status": "model_loading", "reqId": req, "kind": "asr",
+        "kind": "asr",
         "model": model, "device": device, "framework": fw_opt,
     }));
 
@@ -700,6 +722,7 @@ async fn rust_load_asr(
                 let mut on_stage = |s: &str| {
                     let _ = app2.emit("sidecar://event", serde_json::json!({
                         "status": "model_progress", "reqId": req, "kind": "asr",
+                        "kind": "asr",
                         "model": model2, "device": device2, "stage": s,
                     }));
                 };

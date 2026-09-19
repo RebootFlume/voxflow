@@ -27,24 +27,14 @@ pub struct AsrRegistry {
 }
 
 impl AsrRegistry {
-    /// 描述符 format → registry framework 标识。
-    /// 新增框架（如 PyTorch）只需在此加一个 match 分支 + 上面注册一行。
-    pub fn framework_for_format(f: &crate::model_manager::ModelFormat) -> Option<&'static str> {
-        match f {
-            crate::model_manager::ModelFormat::Gguf => Some("gguf"),
-            crate::model_manager::ModelFormat::Onnx => Some("onnx"),
-        }
-    }
-
-    /// 按模型名从描述符解析 framework（模型存在性 + kind 校验）
+    /// 按模型名解析引擎注册键（模型存在性 + kind 校验；键来自描述符数据，无需 match）
     pub fn framework_for_model(&self, name: &str) -> Result<&'static str, String> {
         let spec = crate::tts::spec::ModelSpec::find(name)
             .ok_or_else(|| format!("未知模型: {name}"))?;
         if spec.kind.as_str() != "asr" {
             return Err(format!("{name} 不是 ASR 模型"));
         }
-        Self::framework_for_format(&spec.format)
-            .ok_or_else(|| format!("{name} 的格式缺少对应引擎"))
+        Ok(spec.framework)
     }
 
     /// 按模型名加载 ASR（唯一权威路由：查注册表 format → 互斥 → 引擎加载）。

@@ -20,11 +20,89 @@ use tauri::{AppHandle, Emitter};
 
 // ── 注册表（对策 python-backend/voxflow/registry.py） ──
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum ModelFormat {
-    Gguf,   // llama-cpp-2 推理
-    Onnx,   // ort 推理
+/// 主模型文件挑选策略
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilePolicy {
+    /// 取最大的候选文件（GGUF；`uses_mmproj` 框架排除 mmproj）
+    Largest,
+    /// 优先非量化（`_q*` 视为 QDQ 量化），全量化时退回最大（ONNX）
+    PreferUnquantized,
+}
+
+/// 框架描述符（引擎级元数据：文件发现 / 下载过滤 / 显存诊断）
+///
+/// **新增推理框架 = 加一条数据 + 实现引擎 + 注册一行**，不再需要改任何 match 分支。
+/// `id` 是引擎注册键（与 `ModelSpec.framework`、registry 注册行一致）。
+pub struct FrameworkSpec {
+    /// 引擎注册键："gguf" | "onnx" | "sherpa"
+    pub id: &'static str,
+    /// 前端展示名（分组 / 标签 / 显存 JSON key）："llama" | "sherpa" | "torch"
+    pub engine: &'static str,
+    /// 运行时包键（RUNTIME_PACKAGES.framework）："gguf" | "onnx"
+    pub runtime_key: &'static str,
+    /// 主模型文件扩展名
+    pub main_exts: &'static [&'static str],
+    pub file_policy: FilePolicy,
+    /// 是否附带 mmproj（llama 的视觉/音频投影塔）
+    pub uses_mmproj: bool,
+    /// 下载允许的量化文件模式（None = 不过滤）
+    pub quant_allow: Option<&'static [&'static str]>,
+    /// 显存诊断：常驻进程名（None = 无常驻进程）
+    pub process_name: Option<&'static str>,
+}
+
+pub static FRAMEWORKS: &[FrameworkSpec] = &[
+    FrameworkSpec {
+        id: "gguf",
+        engine: "llama",
+        runtime_key: "gguf",
+        main_exts: &[".gguf"],
+        file_policy: FilePolicy::Largest,
+        uses_mmproj: true,
+        quant_allow: Some(&["*Q8_0.gguf"]),
+        process_name: Some("llama-server"),
+    },
+    FrameworkSpec {
+        id: "onnx",
+        engine: "sherpa",
+        runtime_key: "onnx",
+        main_exts: &[".onnx"],
+        file_policy: FilePolicy::PreferUnquantized,
+        uses_mmproj: false,
+        quant_allow: None,
+        process_name: Some("sherpa-onnx-offline-websocket-server"),
+    },
+    FrameworkSpec {
+        id: "sherpa",
+        engine: "sherpa",
+        runtime_key: "onnx",
+        main_exts: &[".onnx"],
+        file_policy: FilePolicy::PreferUnquantized,
+        uses_mmproj: false,
+        quant_allow: None,
+        // TTS 合成是一次性子进程：无常驻进程可探
+        process_name: None,
+    },
+];
+
+/// 按引擎注册键查框架描述符
+pub fn framework_spec(id: &str) -> Option<&'static FrameworkSpec> {
+    FRAMEWORKS.iter().find(|f| f.id == id)
+}
+
+/// 主模型文件扩展名（未知框架 → 空表，调用方按「未找到」处理）
+pub fn main_exts(framework: &str) -> &'static [&'static str] {
+    framework_spec(framework).map(|f| f.main_exts).unwrap_or(&[])
+}
+
+/// 运行时包键（未知框架 → None）
+pub fn runtime_key(framework: &str) -> Option<&'static str> {
+    framework_spec(framework).map(|f| f.runtime_key)
+}
+
+/// 是否附带 mmproj（未知框架 → false）
+pub fn uses_mmproj(framework: &str) -> bool {
+    framework_spec(framework).map(|f| f.uses_mmproj).unwrap_or(false)
 }
 
 // ── 运行时配置 ──
@@ -169,23 +247,28 @@ fn find_model_files(d: &Path, depth: usize, exts: &[&str]) -> Vec<PathBuf> {
     found
 }
 
-/// 查找主模型文件（GGUF: *.gguf 排除 mmproj；ONNX: 优先非量化的标准 FP32 模型）
-/// 策略：ONNX 优先返回 `model.onnx`/`model_fp16.onnx` 等标准模型，避开 `model_q*` 等 QDQ 量化模型
-/// （`ort 2.0 + onnxruntime 1.28` 加载 Q8F16 QDQ 模型会 `STATUS_ACCESS_VIOLATION` 崩溃）。
-pub fn find_main_model_file(dir: &Path, format: &ModelFormat) -> Option<PathBuf> {
-    let exts = match format {
-        ModelFormat::Gguf => vec![".gguf"],
-        ModelFormat::Onnx => vec![".onnx"],
-    };
-    let files = find_model_files(dir, 0, &exts);
-    match format {
-        ModelFormat::Gguf => {
-            // 排除 mmproj 文件，取最大的那个作为主模型
-            files.into_iter()
-                .filter(|f| !f.file_name().unwrap_or_default().to_string_lossy().to_lowercase().contains("mmproj"))
-                .max_by_key(|f| f.metadata().map(|m| m.len()).unwrap_or(0))
-        }
-        ModelFormat::Onnx => {
+/// 查找主模型文件（策略来自框架描述符：扩展名 / 是否排除 mmproj / 量化偏好）
+///
+/// `PreferUnquantized`（ONNX）：优先返回 `model.onnx` / `model_fp16.onnx` 等标准模型，
+/// 避开 `model_q*` 等 QDQ 量化模型 —— 历史上 `ort 2.0 + onnxruntime 1.28` 加载 Q8F16 QDQ
+/// 会 `STATUS_ACCESS_VIOLATION` 崩溃；现虽改走 sherpa CLI，该偏好仍保留。
+pub fn find_main_model_file(dir: &Path, framework: &str) -> Option<PathBuf> {
+    let spec = framework_spec(framework)?;
+    let files = find_model_files(dir, 0, spec.main_exts);
+    match spec.file_policy {
+        FilePolicy::Largest => files
+            .into_iter()
+            .filter(|f| {
+                !spec.uses_mmproj
+                    || !f
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_lowercase()
+                        .contains("mmproj")
+            })
+            .max_by_key(|f| f.metadata().map(|m| m.len()).unwrap_or(0)),
+        FilePolicy::PreferUnquantized => {
             let is_qdq = |p: &PathBuf| {
                 p.file_name()
                     .unwrap_or_default()
@@ -193,7 +276,6 @@ pub fn find_main_model_file(dir: &Path, format: &ModelFormat) -> Option<PathBuf>
                     .to_lowercase()
                     .contains("_q")
             };
-            // 优先非量化的标准模型（model.onnx / model_fp16.onnx 等）
             if let Some(p) = files
                 .iter()
                 .filter(|p| !is_qdq(p))
@@ -202,9 +284,7 @@ pub fn find_main_model_file(dir: &Path, format: &ModelFormat) -> Option<PathBuf>
             {
                 return Some(p);
             }
-            // 回退：只有量化模型时，取最大的（由 tts.rs 加载时根据需要选择）
-            files.into_iter()
-                .max_by_key(|f| f.metadata().map(|m| m.len()).unwrap_or(0))
+            files.into_iter().max_by_key(|f| f.metadata().map(|m| m.len()).unwrap_or(0))
         }
     }
 }
@@ -225,11 +305,10 @@ fn is_complete(dir: &Path) -> bool {
     if dir.join("config.json").exists() {
         return true;
     }
-    // 检测 2：递归查找模型文件
-    let gguf_files = find_model_files(dir, 0, &[".gguf"]);
-    if !gguf_files.is_empty() { return true; }
-    let onnx_files = find_model_files(dir, 0, &[".onnx"]);
-    if !onnx_files.is_empty() { return true; }
+    // 检测 2：递归查找模型文件（扩展名来自框架描述符表）
+    if FRAMEWORKS.iter().any(|f| !find_model_files(dir, 0, f.main_exts).is_empty()) {
+        return true;
+    }
     // 检测 3：HF 缓存 blobs（兼容 kokoro 等库自行下载到 hub/models--<name>/blobs/）
     let hub = dir.parent().map(|p| p.join("hub")).unwrap_or_default();
     let hf_name = format!(
@@ -560,10 +639,9 @@ fn run_download(app: AppHandle, spec: &'static crate::tts::spec::ModelSpec, canc
         let progress = hf_hub::progress::Progress::new(handler);
         // GGUF 模型只下载 Q8_0 量化版（模型 + mmproj），跳过 bf16 全精度与 safetensors 原始版
         // （bf16 单个 4G+，全量 snapshot 会白白下载 6G+；llama-server 只用 Q8_0）
-        let allow_q8: Option<Vec<String>> = match spec.format {
-            ModelFormat::Gguf => Some(vec!["*Q8_0.gguf".to_string()]),
-            ModelFormat::Onnx => None,
-        };
+        let allow_q8: Option<Vec<String>> = framework_spec(spec.framework)
+            .and_then(|f| f.quant_allow)
+            .map(|pats| pats.iter().map(|p| p.to_string()).collect());
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client
                 .model(owner, repo_name)
@@ -763,12 +841,6 @@ fn download_single_file(
 
 // ── models_state 事件 ──
 
-fn format_str(f: &ModelFormat) -> &'static str {
-    match f {
-        ModelFormat::Gguf => "gguf",
-        ModelFormat::Onnx => "onnx",
-    }
-}
 
 /// 语言模式 → 前端字符串（描述符能力字段）
 fn language_mode_str(m: crate::tts::spec::LanguageMode) -> &'static str {
@@ -859,7 +931,10 @@ pub fn list_models_payload(kind: Option<&str>) -> Value {
         let mut obj = json!({
             "name": spec.name,
             "kind": spec.kind.as_str(),
-            "format": format_str(&spec.format),
+            "format": runtime_key(spec.framework).unwrap_or(spec.framework),
+            // 新增（只增不改）：前端据此分组/门禁，不再自行做 format→framework 推导
+            "engine": framework_spec(spec.framework).map(|f| f.engine).unwrap_or(""),
+            "runtime_key": runtime_key(spec.framework).unwrap_or(spec.framework),
             "repo": spec.repo,
             "size_gb": spec.size_gb,
             "description_zh": spec.description_zh,
@@ -876,10 +951,10 @@ pub fn list_models_payload(kind: Option<&str>) -> Value {
             let gb = (bytes as f64 / 1024f64.powi(3) * 100.0).round() / 100.0;
             obj["size_on_disk_gb"] = json!(gb);
             // 附带主模型文件路径，方便前端直接加载
-            if let Some(main_file) = find_main_model_file(&dir, &spec.format) {
+            if let Some(main_file) = find_main_model_file(&dir, spec.framework) {
                 obj["model_path"] = json!(main_file.display().to_string());
                 // GGUF 模型额外附带 mmproj 路径
-                if spec.format == ModelFormat::Gguf {
+                if uses_mmproj(spec.framework) {
                     if let Some(mmproj) = find_mmproj_file(&dir) {
                         obj["mmproj_path"] = json!(mmproj.display().to_string());
                     }
@@ -934,6 +1009,11 @@ mod e2e_list_tests {
         assert_eq!(kokoro["voice_mode"]["count"], 53);
         assert_eq!(kokoro["supports_clone"], false);
 
+        // 前端数据契约（只增不改）：engine / runtime_key 由 Rust 下发，前端不再做 format→框架推导
+        assert_eq!(kokoro["format"], "onnx");
+        assert_eq!(kokoro["runtime_key"], "onnx");
+        assert_eq!(kokoro["engine"], "sherpa");
+
         let zip = models
             .iter()
             .find(|m| m["name"] == "ZipVoice-distill")
@@ -950,6 +1030,17 @@ mod e2e_list_tests {
             .expect("应含 PocketTTS-int8");
         assert_eq!(pocket["voice_mode"]["type"], "fixed");
         assert_eq!(pocket["supports_clone"], false);
+
+        // ASR 模型同样携带三字段（gguf → engine llama）
+        let asr = list_models_payload(Some("asr"));
+        let asr_models = asr["models"].as_array().expect("models 数组");
+        let qwen = asr_models
+            .iter()
+            .find(|m| m["name"] == "Qwen3-ASR-0.6B")
+            .expect("应含 Qwen3-ASR-0.6B");
+        assert_eq!(qwen["format"], "gguf");
+        assert_eq!(qwen["runtime_key"], "gguf");
+        assert_eq!(qwen["engine"], "llama");
     }
 
     fn dev_root() -> PathBuf {
