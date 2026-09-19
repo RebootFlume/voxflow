@@ -755,7 +755,6 @@ function VoiceSettingsPage() {
   const ttsClone = useAppStore((s) => s.ttsClone);
   const updateTts = useAppStore((s) => s.updateTts);
   const updateTtsClone = useAppStore((s) => s.updateTtsClone);
-  const modelItems = useAppStore((s) => s.models.items);
   const [speakers, setSpeakers] = useState<{ sid: number; name: string }[]>([]);
   const [numSpeakers, setNumSpeakers] = useState(0);
   /** 试听：合成中标志（局部态，与任务列表解耦）+ 失败信息 */
@@ -796,11 +795,6 @@ function VoiceSettingsPage() {
   /** 试听文本跟随合成语言（不是 UI locale） */
   const sampleText = t(locale, tts.language === "zh" ? "tts.preview.sample.zh" : "tts.preview.sample.en");
 
-  /** 清单里支持克隆的 TTS 模型（当前模型不支持时用于引导切换） */
-  const cloneModels = useMemo(
-    () => modelItems.filter((m) => m.kind === "tts" && m.supports_clone === true),
-    [modelItems],
-  );
 
   const voiceLangs = useMemo(() => {
     const langs = new Set<string>();
@@ -1127,33 +1121,13 @@ function VoiceSettingsPage() {
                 <p className="text-sm font-medium">
                   {t(locale, "tts.voice.clone.unsupportedTitle", { model: tts.model })}
                 </p>
-                <p className="text-xs text-muted-foreground">{t(locale, "tts.voice.clone.unsupportedDesc")}</p>
-                {cloneModels.length > 0 ? (
-                  <div className="space-y-1.5">
-                    <span className="text-xs text-muted-foreground">{t(locale, "tts.voice.clone.cloneModels")}</span>
-                    {cloneModels.map((m) => (
-                      <div key={m.name} className="flex items-center justify-between gap-2 rounded-md border px-3 py-1.5">
-                        <span className="min-w-0 flex-1 truncate text-xs">{m.name}</span>
-                        {m.state === "downloaded" ? (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="h-7 shrink-0"
-                            onClick={() => void loadTtsModel(m.name, tts.device)}
-                          >
-                            {t(locale, "tts.voice.clone.switch")}
-                          </Button>
-                        ) : (
-                          <Button variant="ghost" size="sm" className="h-7 shrink-0" onClick={goModelManager}>
-                            {t(locale, "tts.gotoModels")}
-                          </Button>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-xs text-muted-foreground">{t(locale, "tts.voice.clone.noCloneModels")}</p>
-                )}
+                {/* 不列"可切到哪些克隆模型"：由用户自己决定用哪个模型（后续接入 PyTorch 等更多
+                    引擎后更不该由这里替他选）。只说明"需要支持克隆的模型" + 一个去模型页的入口
+                    （与上面的 noModel 分支同一动作，不预设他该选哪个）。 */}
+                <p className="text-xs text-muted-foreground">{t(locale, "tts.voice.clone.needModel")}</p>
+                <Button variant="outline" size="sm" className="h-8" onClick={goModelManager}>
+                  {t(locale, "tts.gotoModels")}
+                </Button>
               </div>
             ) : null}
 
@@ -1366,25 +1340,25 @@ function SynthesizePage() {
       <Card>
         <CardContent className="space-y-1 p-4">
           <div className="flex h-10 items-center gap-4">
-            <span className="w-20 shrink-0 text-sm font-medium">Model</span>
+            <span className="w-20 shrink-0 text-sm font-medium">{t(locale, "tts.model")}</span>
             <div className="flex flex-1 items-center">
               <ModelStatusBadge status={ttsModelStatus} modelName={tts.model} />
             </div>
           </div>
           <div className="flex h-10 items-center gap-4">
-            <span className="w-20 shrink-0 text-sm font-medium">Language</span>
+            <span className="w-20 shrink-0 text-sm font-medium">{t(locale, "tts.language")}</span>
             <div className="flex flex-1 items-center">
               <LanguageSelector />
             </div>
           </div>
           <div className="flex h-10 items-center gap-4">
-            <span className="w-20 shrink-0 text-sm font-medium">Voice</span>
+            <span className="w-20 shrink-0 text-sm font-medium">{t(locale, "tts.voice.label")}</span>
             <div className="flex flex-1 items-center gap-2 text-sm">
               <span>{tts.voice ? `sid ${tts.voice}` : t(locale, "tts.voice.default")}</span>
             </div>
           </div>
           <div className="flex h-10 items-center gap-4">
-            <span className="w-20 shrink-0 text-sm font-medium">Export</span>
+            <span className="w-20 shrink-0 text-sm font-medium">{t(locale, "tts.exportDir")}</span>
             <div className="flex flex-1 items-center gap-2">
               <span className="flex-1 truncate rounded-md border bg-muted px-3 py-1.5 text-xs font-mono">{exportDir || t(locale, "tts.exportDir.empty")}</span>
               <Button variant="outline" size="sm" className="h-8 shrink-0" onClick={() => void browseDir()}>
