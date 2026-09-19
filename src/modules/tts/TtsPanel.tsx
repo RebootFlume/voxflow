@@ -7,9 +7,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Progress } from "@/components/ui/progress";
 import { ModelSelector } from "@/components/ModelSelector";
 import { ModelStatusBadge } from "@/components/ModelStatusBadge";
-import { useAppStore } from "@/stores";
+import { useAppStore, type TtsTask } from "@/stores";
 import { t, type Locale } from "@/lib/i18n";
 import type { TtsVoiceMode } from "@/stores/slices/ttsSlice";
 import {
@@ -17,6 +18,7 @@ import {
   rustClearTtsCloneVoice,
   rustSetTtsLanguage,
   rustSynthesize,
+  rustCancelTts,
   rustRecordTtsReference,
   rustTranscribeLlama,
   rustTtsVoicesList,
@@ -1341,7 +1343,10 @@ function SynthesizePage() {
   const ttsModelStatus = useAppStore((s) => s.ttsModelStatus);
   const tasks = useAppStore((s) => s.ttsTasks);
   const [text, setText] = useState("");
-  const [busy, setBusy] = useState(false);
+  /** 正在等 `rust_synthesize` 返回的任务 id：派发 effect 的去重锁（串行队列下最多一个在飞） */
+  const inFlightRef = useRef<number | null>(null);
+  /** 队列里还有未跑完的任务（只驱动按钮 spinner，不参与 disabled —— 合成中仍可继续排队） */
+  const queued = tasks.some((t) => t.status === "pending" || t.status === "synthesizing");
   const audio = useAudioPreview();
   const { speakers } = useTtsSpeakers();
   /** 引擎是否就绪：两个信号取"或"——`engines.tts`（modelState 约定的权威字段）与旧徽章
@@ -1366,50 +1371,95 @@ function SynthesizePage() {
     if (picked && typeof picked === "string") setExportDir(picked);
   }, [exportDir, setExportDir]);
 
-  // 合成
-  async function doSynthesize() {
+  // 入队：只登记 pending 任务并清空输入（不 await），真正派发交给下面的串行派发 effect
+  function enqueueSynthesize() {
     const trimmed = text.trim();
     if (!trimmed) return;
     const st = useAppStore.getState();
-
-    st.addLog(`[synthesize] start: "${trimmed.slice(0, 40)}" voice=${tts.voice} dir=${exportDir || "-"}`, "info");
-    st.addTtsTask({
-      text: trimmed,
-      voice: tts.voice,
-      status: "synthesizing",
-    });
-    // addTtsTask 之后从 store 重新取任务 id（避免闭包里 store.ttsTasks 快照滞后导致回写不到，从而一直转圈）
-    const taskId = useAppStore.getState().ttsTasks[useAppStore.getState().ttsTasks.length - 1]?.id ?? 0;
+    st.addLog(`[synthesize] queued: "${trimmed.slice(0, 40)}" voice=${tts.voice} dir=${st.io.exportDir || "-"}`, "info");
+    st.addTtsTask({ text: trimmed, voice: tts.voice, status: "pending" });
     setText("");
-    setBusy(true);
-
-    // Rust 原生引擎：直接调用 Tauri invoke
-      try {
-        const result = await rustSynthesize(trimmed, tts.voice, exportDir);
-        const cur = useAppStore.getState();
-        cur.addLog(`[synthesize] done: ${result.saved_path as string} size=${String(result.size as unknown as string)}`, "success");
-        if (taskId) {
-          cur.updateTtsTask(taskId, {
-            status: "done",
-            savedPath: String((result as { saved_path?: string }).saved_path || ""),
-            fileSize: String((result as { size?: string }).size || ""),
-          });
-        }
-      } catch (e) {
-        const cur = useAppStore.getState();
-        const msg = String(e);
-        cur.addLog(`[synthesize] failed: ${msg}`, "error");
-        if (taskId) {
-          cur.updateTtsTask(taskId, { status: "error", error: msg });
-        }
-      }
   }
 
-  // 检查 busy 状态
+  // 串行派发：没有 synthesizing 任务时取最早的 pending 发出去，一次只发一个 rust_synthesize。
+  // inFlightRef 是去重锁——await 期间 tasks 变化会让本 effect 重跑，没锁就会对同一任务双发。
   useEffect(() => {
-    if (!busy) return;
-    if (tasks.every((t) => t.status !== "synthesizing")) setBusy(false);
-  }, [tasks, busy]);
+    const st = useAppStore.getState();
+    if (inFlightRef.current !== null) return;
+    if (st.ttsTasks.some((t) => t.status === "synthesizing")) return;
+    const next = st.ttsTasks.find((t) => t.status === "pending");
+    if (!next) return;
+
+    inFlightRef.current = next.id;
+    // 导出目录在派发时读：排队期间用户可能改目录，按"开始合成那一刻"的目录落盘
+    const dir = st.io.exportDir;
+    st.updateTtsTask(next.id, { status: "synthesizing" });
+    st.addLog(`[synthesize] start: "${next.text.slice(0, 40)}" voice=${next.voice} dir=${dir || "-"}`, "info");
+    void runTtsTask(next, dir);
+  }, [tasks]);
+
+  /** 跑一个已派发的任务并落终态；终态写入会改动 tasks ⇒ 上面的 effect 重跑并自动派下一个 */
+  async function runTtsTask(task: TtsTask, dir: string) {
+    try {
+      const res = (await rustSynthesize(task.text, task.voice, dir)) as {
+        saved_path?: string;
+        size?: string;
+        cancelled?: boolean;
+      };
+      const cur = useAppStore.getState();
+      if (res.cancelled === true) {
+        // 段边界取消：invoke 正常返回但没有产物 ⇒ 终态"已取消"
+        cur.addLog(`[synthesize] cancelled: "${task.text.slice(0, 40)}"`, "warn");
+        cur.updateTtsTask(task.id, { status: "cancelled", cancelling: false, progress: undefined });
+      } else {
+        cur.addLog(`[synthesize] done: ${String(res.saved_path || "")} size=${String(res.size || "")}`, "success");
+        cur.updateTtsTask(task.id, {
+          status: "done",
+          cancelling: false,
+          savedPath: String(res.saved_path || ""),
+          fileSize: String(res.size || ""),
+        });
+      }
+    } catch (e) {
+      const cur = useAppStore.getState();
+      const msg = String(e);
+      cur.addLog(`[synthesize] failed: ${msg}`, "error");
+      cur.updateTtsTask(task.id, { status: "error", error: msg, cancelling: false });
+    } finally {
+      inFlightRef.current = null;
+    }
+  }
+
+  // 取消：排队中 = 本地直接置已取消（不发 IPC）；合成中 = 标记"取消中"并请求 Rust 段边界取消
+  function cancelTask(task: TtsTask) {
+    const st = useAppStore.getState();
+    if (task.status === "pending") {
+      st.updateTtsTask(task.id, { status: "cancelled" });
+      st.addLog(`[synthesize] cancelled (queued): "${task.text.slice(0, 40)}"`, "info");
+      return;
+    }
+    if (task.status !== "synthesizing" || task.cancelling) return;
+    st.updateTtsTask(task.id, { cancelling: true });
+    st.addLog(`[synthesize] cancel requested: "${task.text.slice(0, 40)}"`, "info");
+    // Rust 取消是段边界生效（最多等当前一段跑完）⇒ 终态由 runTtsTask 在 invoke 返回时写入
+    void rustCancelTts()
+      .then((r) => {
+        if (r.cancelled) return;
+        const cur = useAppStore.getState();
+        cur.addLog("[synthesize] cancel ignored: no active synthesis", "warn");
+        // 合成恰好已结束（invoke 已返回）⇒ 撤销"取消中"，终态由 runTtsTask 写入
+        if (cur.ttsTasks.find((t) => t.id === task.id)?.status === "synthesizing") {
+          cur.updateTtsTask(task.id, { cancelling: false });
+        }
+      })
+      .catch((e) => {
+        const cur = useAppStore.getState();
+        cur.addLog(`[synthesize] cancel failed: ${String(e)}`, "error");
+        if (cur.ttsTasks.find((t) => t.id === task.id)?.status === "synthesizing") {
+          cur.updateTtsTask(task.id, { cancelling: false });
+        }
+      });
+  }
 
   // 播放（应用内，见 useAudioPreview）
   function playAudio(task: typeof tasks[0]) {
@@ -1461,7 +1511,7 @@ function SynthesizePage() {
             onChange={(e) => setText(e.target.value)}
             placeholder={t(locale, "tts.inputPlaceholder")}
             className="min-h-[100px]"
-            onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) void doSynthesize(); }}
+            onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) enqueueSynthesize(); }}
           />
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -1475,10 +1525,10 @@ function SynthesizePage() {
             )}
             <Button
               size="sm"
-              onClick={() => void doSynthesize()}
-              disabled={!text.trim() || busy || !canSynth}
+              onClick={enqueueSynthesize}
+              disabled={text.trim() === "" || !canSynth}
             >
-              {busy ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Play className="mr-1.5 h-3.5 w-3.5" />}
+              {queued ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Play className="mr-1.5 h-3.5 w-3.5" />}
               {t(locale, "tts.synthesize")}
             </Button>
           </div>
@@ -1495,40 +1545,71 @@ function SynthesizePage() {
           <CardContent>
             <ScrollArea className="max-h-[400px]">
               <div className="space-y-2">
-                {[...tasks].reverse().map((task) => (
-                  <div key={task.id} className="rounded-lg border p-3 space-y-1">
-                    <div className="flex items-start justify-between gap-2">
-                      <p className="text-sm flex-1 line-clamp-2">{task.text}</p>
-                      <Button variant="ghost" size="icon" className="h-6 w-6 shrink-0" onClick={() => useAppStore.getState().removeTtsTask(task.id)}>
-                        <Trash2 className="h-3 w-3" />
-                      </Button>
-                    </div>
-                    <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                      <span>sid {task.voice}</span>
-                      <span>·</span>
-                      {task.fileSize && <><span>·</span><span>{task.fileSize}</span></>}
-                      {task.status === "synthesizing" && (
-                        <Badge variant="secondary" className="gap-1">
-                          <Loader2 className="h-3 w-3 animate-spin" /> {t(locale, "tts.synthesizing")}
-                        </Badge>
-                      )}
-                      {task.status === "error" && (
-                        <Badge variant="destructive">{task.error}</Badge>
-                      )}
-                      {task.status === "done" && (
-                        <Button variant="ghost" size="sm" className="h-6 px-2" onClick={() => playAudio(task)}>
-                          <Play className="h-3 w-3" />
-                          {audio.playing === task.savedPath ? t(locale, "tts.stop") : t(locale, "tts.play")}
+                {[...tasks].reverse().map((task) => {
+                  /** 分段进度百分比（chunk/chunks 与 sidecar 的 progress 同义，由段数自算避免两份来源漂移） */
+                  const pct = task.progress ? Math.round((task.progress.chunk / task.progress.chunks) * 100) : 0;
+                  return (
+                    <div key={task.id} className="rounded-lg border p-3 space-y-1">
+                      <div className="flex items-start justify-between gap-2">
+                        <p className="text-sm flex-1 line-clamp-2">{task.text}</p>
+                        <Button variant="ghost" size="icon" className="h-6 w-6 shrink-0" onClick={() => useAppStore.getState().removeTtsTask(task.id)}>
+                          <Trash2 className="h-3 w-3" />
                         </Button>
+                      </div>
+                      <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                        <span>sid {task.voice}</span>
+                        <span>·</span>
+                        {task.fileSize && <><span>·</span><span>{task.fileSize}</span></>}
+                        {task.status === "synthesizing" && (
+                          <Badge variant="secondary" className="gap-1">
+                            <Loader2 className="h-3 w-3 animate-spin" /> {t(locale, task.cancelling ? "tts.task.cancelling" : "tts.task.synthesizing")}
+                          </Badge>
+                        )}
+                        {task.status === "pending" && (
+                          <Badge variant="outline">{t(locale, "tts.task.pending")}</Badge>
+                        )}
+                        {task.status === "cancelled" && (
+                          <Badge variant="outline">{t(locale, "tts.task.cancelled")}</Badge>
+                        )}
+                        {task.status === "error" && (
+                          <Badge variant="destructive">{task.error || t(locale, "tts.task.error")}</Badge>
+                        )}
+                        {task.status === "done" && (
+                          <Button variant="ghost" size="sm" className="h-6 px-2" onClick={() => playAudio(task)}>
+                            <Play className="h-3 w-3" />
+                            {audio.playing === task.savedPath ? t(locale, "tts.stop") : t(locale, "tts.play")}
+                          </Button>
+                        )}
+                        {(task.status === "pending" || task.status === "synthesizing") && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-6 px-2"
+                            disabled={task.cancelling === true}
+                            onClick={() => cancelTask(task)}
+                          >
+                            <X className="h-3 w-3" />
+                            {t(locale, "tts.task.cancel")}
+                          </Button>
+                        )}
+                      </div>
+                      {task.status === "synthesizing" && task.progress && (
+                        <div className="space-y-1">
+                          <Progress value={pct} className="h-1.5" />
+                          <div className="flex justify-between text-[11px] text-muted-foreground">
+                            <span>{t(locale, "tts.task.progress", { chunk: task.progress.chunk, chunks: task.progress.chunks })}</span>
+                            <span>{pct}%</span>
+                          </div>
+                        </div>
+                      )}
+                      {task.savedPath && (
+                        <p className="text-[11px] text-emerald-600 dark:text-emerald-400 truncate" title={task.savedPath}>
+                          ✓ {t(locale, "tts.saved")}
+                        </p>
                       )}
                     </div>
-                    {task.savedPath && (
-                      <p className="text-[11px] text-emerald-600 dark:text-emerald-400 truncate" title={task.savedPath}>
-                        ✓ {t(locale, "tts.saved")}
-                      </p>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </ScrollArea>
           </CardContent>

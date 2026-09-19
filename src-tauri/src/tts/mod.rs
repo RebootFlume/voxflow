@@ -11,6 +11,7 @@
 //! P4：能力字段（languages / language_mode / voice_mode / supports_clone）由
 //! `models_state` 事件承载（model_manager::list_models_payload），不再走独立命令。
 
+pub mod chunk;
 pub mod commands;
 pub mod engine;
 pub mod reference_audio;

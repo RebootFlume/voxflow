@@ -28,6 +28,8 @@ export interface TtsSlice {
   setTtsModelStatus: (s: TtsSlice["ttsModelStatus"]) => void;
   addTtsTask: (task: Omit<TtsTask, "id">) => number;
   updateTtsTask: (id: number, patch: Partial<TtsTask>) => void;
+  /** 把补丁写到当前处于 synthesizing 的任务（串行队列下最多一个；没有则不动 = 忽略迟到事件） */
+  updateSynthesizingTask: (patch: Partial<TtsTask>) => void;
   removeTtsTask: (id: number) => void;
   updateTtsClone: (patch: Partial<TtsSlice["ttsClone"]>) => void;
 }
@@ -48,6 +50,11 @@ export const createTtsSlice = (set: (partial: Partial<TtsSlice> | ((s: TtsSlice)
   updateTtsTask: (id, patch) =>
     set((s) => ({
       ttsTasks: s.ttsTasks.map((t) => (t.id === id ? { ...t, ...patch } : t)),
+    })),
+  // tts_progress 事件只带分段数字、不带任务 id（Rust 只跑一个合成）⇒ 按状态定位唯一的目标任务
+  updateSynthesizingTask: (patch) =>
+    set((s) => ({
+      ttsTasks: s.ttsTasks.map((t) => (t.status === "synthesizing" ? { ...t, ...patch } : t)),
     })),
   removeTtsTask: (id) =>
     set((s) => ({ ttsTasks: s.ttsTasks.filter((t) => t.id !== id) })),

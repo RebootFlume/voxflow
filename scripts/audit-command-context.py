@@ -39,6 +39,7 @@ EXEMPT: dict[str, str] = {
     "get_data_root_info": "读取数据根配置（小文件）",
     "rust_storage_model_root": "写入模型根配置（小文件）",
     "check_runtime": "仅路径存在性检查（无 HTTP/进程/大文件）",
+    "rust_cancel_tts": "只翻一个 AtomicBool（无 IO/进程/等待）；R1/R2 命中来自 load/store 通用方法名与引擎同名函数求并集的已知误报",
 }
 
 # 允许阻塞的后台边界：据此判定"阻塞工作已交给后台"

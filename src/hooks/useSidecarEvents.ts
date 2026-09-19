@@ -521,6 +521,13 @@ export function useSidecarEvents() {
           store.updateTranscribeTask(ePath, { status: "error", error: eMsg });
           break;
         }
+        // ---- TTS 合成分段进度（只认正在 synthesizing 的那个任务；试听路径触发的进度自动落到空集上被忽略） ----
+        case "tts_progress": {
+          const chunk = typeof payload.chunk === "number" ? payload.chunk : 0;
+          const chunks = typeof payload.chunks === "number" ? payload.chunks : 0;
+          if (chunk > 0 && chunks > 0) store.updateSynthesizingTask({ progress: { chunk, chunks } });
+          break;
+        }
         default:
           break;
       }

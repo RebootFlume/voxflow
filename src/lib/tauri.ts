@@ -211,6 +211,12 @@ export function rustSynthesize(
   return invoke("rust_synthesize", { text, voice, exportDir });
 }
 
+/** Rust 引擎：取消当前正在进行的 TTS 合成（段边界生效，最多等当前一段跑完）。
+ *  返回 cancelled=true 表示确实有一个进行中的合成被标记取消。 */
+export function rustCancelTts(): Promise<{ cancelled: boolean }> {
+  return invoke("rust_cancel_tts");
+}
+
 /** Rust 原生音频设备枚举 */
 export function rustListAudioDevices(): Promise<Record<string, unknown>> {
   return invoke("rust_list_audio_devices");

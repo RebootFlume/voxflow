@@ -31,7 +31,11 @@ export interface TtsTask {
   id: number;
   text: string;
   voice: string;
-  status: "pending" | "synthesizing" | "done" | "error";
+  status: "pending" | "synthesizing" | "done" | "error" | "cancelled";
+  /** 分段进度（sidecar 的 tts_progress 事件回填；仅在 synthesizing 期间有意义） */
+  progress?: { chunk: number; chunks: number };
+  /** 已请求取消（Rust 侧段边界生效，等待本次 invoke 带着 cancelled:true 返回） */
+  cancelling?: boolean;
   savedPath?: string;
   fileSize?: string;
   error?: string;

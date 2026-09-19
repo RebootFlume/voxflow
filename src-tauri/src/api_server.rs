@@ -305,13 +305,19 @@ fn handle_tts(body: &[u8], cfg: &ApiConfig) -> tiny_http::Response<Cursor<Vec<u8
     let Some(engine) = tts.active() else {
         return json_response(500, error_json(500, "TTS model not loaded"));
     };
-    match engine.synthesize(input, voice) {
-        Ok(audio) => {
-            if audio.samples.is_empty() {
+    // 与 UI 侧同一条实现（长文本分段 + 拼接）；HTTP 侧无取消入口 ⇒ 用一次性令牌（恒不取消）
+    let chunks = crate::tts::chunk::split_text(input, crate::tts::chunk::MAX_CHARS_PER_CHUNK);
+    if chunks.is_empty() {
+        return json_response(400, error_json(400, "empty text"));
+    }
+    let no_cancel = crate::app_state::TtsCancel::default();
+    match crate::tts::commands::synthesize_chunks(&engine, &no_cancel, &chunks, voice, |_, _| {}) {
+        Ok((samples, sample_rate, _cancelled)) => {
+            if samples.is_empty() {
                 return json_response(500, error_json(500, "TTS returned empty audio"));
             }
             // 3. 编码为 WAV（采样率与 PCM 一致）
-            match wav_from_i16(&audio.samples, audio.sample_rate) {
+            match wav_from_i16(&samples, sample_rate) {
                 Ok(wav_bytes) => {
                     let len = wav_bytes.len();
                     tiny_http::Response::new(
