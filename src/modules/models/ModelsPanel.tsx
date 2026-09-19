@@ -245,9 +245,7 @@ function ModelRow({ name }: { name: string }) {
           <Loader2 className="h-3 w-3 animate-spin" />
           {it.extracting
             ? t(locale, "models.state.extracting")
-            : it.percent != null
-              ? `${it.percent}%`
-              : t(locale, "models.state.downloading")}
+            : t(locale, "models.state.downloading", { percent: it.percent ?? 0 })}
         </Badge>
       );
     }

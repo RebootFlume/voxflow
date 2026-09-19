@@ -182,14 +182,13 @@ export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: Mod
           it.name === model
             ? {
                 ...it,
-                // 下载成功 → 直接标记 downloaded（不再等下次轮询扫描磁盘）；取消 → 回 not_downloaded
-                state: ok
-                  ? ("downloaded" as const)
-                  : status === "model_download_cancelled"
-                    ? ("not_downloaded" as const)
-                    : it.state,
+                // 成功 → downloaded（不等下次扫描磁盘）；取消/失败/未知 → not_downloaded。
+                // 关键：失败时**不能保留旧状态**——曾出现"progress 把状态置为 downloading，
+                // 随后 error 保留了它"导致永久转圈（本机实测踩到）。
+                state: ok ? ("downloaded" as const) : ("not_downloaded" as const),
                 extracting: false,
                 cancelRequested: !ok,
+                percent: ok ? it.percent : null,
               }
             : it,
         ),

@@ -416,6 +416,26 @@ fn free_bytes_for_root() -> Option<u64> {
 static ACTIVE: once_cell::sync::Lazy<Mutex<HashMap<String, (Arc<AtomicBool>, String)>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
 
+/// 模型下载进度事件的**唯一构造点**——字段名即前端协议（`percent` / `downloaded_bytes` / `total_bytes`）。
+///
+/// 曾经 Rust 发 `progress`/`downloaded`/`total`，前端读 `percent`/`downloaded_bytes`/`total_bytes`
+/// ⇒ 百分比永远是 null：界面显示不确定态转圈 + 字面 `{percent}`，字节数也不显示（本机实测踩到）。
+/// 集中构造 + 单测锁字段，避免再次漂移。
+fn download_progress_event(
+    model: &str,
+    percent: u32,
+    downloaded_bytes: Option<u64>,
+    total_bytes: Option<u64>,
+) -> serde_json::Value {
+    json!({
+        "status": "model_download_progress",
+        "model": model,
+        "percent": percent,
+        "downloaded_bytes": downloaded_bytes.unwrap_or(0),
+        "total_bytes": total_bytes.unwrap_or(0),
+    })
+}
+
 pub fn is_downloading(name: &str) -> bool {
     ACTIVE.lock().contains_key(name)
 }
@@ -849,13 +869,7 @@ fn download_model_files(
                         manifest_files.push((file.name.to_string(), md.len()));
                         let _ = app.emit(
                             "sidecar://event",
-                            json!({
-                                "status": "model_download_progress",
-                                "model": spec.name,
-                                "progress": e,
-                                "downloaded": md.len(),
-                                "total": md.len(),
-                            }),
+                            download_progress_event(spec.name, e, Some(md.len()), Some(md.len())),
                         );
                         continue;
                     }
@@ -871,13 +885,7 @@ fn download_model_files(
             };
             let _ = app.emit(
                 "sidecar://event",
-                json!({
-                    "status": "model_download_progress",
-                    "model": spec.name,
-                    "progress": pct,
-                    "downloaded": downloaded,
-                    "total": got.unwrap_or(0),
-                }),
+                download_progress_event(spec.name, pct, Some(downloaded), got),
             );
         };
         let headers: Vec<(&str, String)> = hf_auth_header(url, &token).into_iter().collect();
@@ -986,7 +994,7 @@ fn run_download(
                 };
                 let _ = app.emit(
                     "sidecar://event",
-                    json!({ "status": "model_download_progress", "model": name.clone(), "progress": 0u32 }),
+                    download_progress_event(&name, 0, None, None),
                 );
                 match download_single_file(url, &extra_dest, &name, &app, &cancel) {
                     Ok(()) => eprintln!("[download] extra file downloaded: {}", extra_dest.display()),
@@ -1107,13 +1115,7 @@ fn download_progress_emitter(app: AppHandle, model_name: &str) -> impl Fn(u64, O
         };
         let _ = app.emit(
             "sidecar://event",
-            json!({
-                "status": "model_download_progress",
-                "model": model_name.as_str(),
-                "progress": pct,
-                "downloaded": downloaded,
-                "total": total.unwrap_or(0),
-            }),
+            download_progress_event(&model_name, pct, Some(downloaded), total),
         );
     }
 }
@@ -1351,6 +1353,21 @@ pub fn emit_models_state(app: &AppHandle) {
 #[cfg(test)]
 mod e2e_list_tests {
     use super::*;
+
+    /// 进度事件字段名是**前后端协议**：Rust 与前端 store 必须一致
+    /// （曾因 progress/percent 漂移导致百分比永远为 null、界面永久转圈）
+    #[test]
+    fn download_progress_event_fields_are_frozen() {
+        let v = download_progress_event("M", 42, Some(10), Some(20));
+        assert_eq!(v["status"], "model_download_progress");
+        assert_eq!(v["model"], "M");
+        assert_eq!(v["percent"], 42);
+        assert_eq!(v["downloaded_bytes"], 10);
+        assert_eq!(v["total_bytes"], 20);
+        let z = download_progress_event("M", 0, None, None);
+        assert_eq!(z["downloaded_bytes"], 0);
+        assert_eq!(z["total_bytes"], 0);
+    }
 
     fn tmp_model_dir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("voxflow_mm_{tag}_{}", std::process::id()));

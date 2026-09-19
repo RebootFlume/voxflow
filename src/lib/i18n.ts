@@ -280,7 +280,7 @@ const DICTS: Record<Locale, Dict> = {
     "models.entry.switch": "切换",
     "models.state.in_use": "已加载",
     "models.state.downloaded": "已下载",
-    "models.state.downloading": "下载中 {percent}",
+    "models.state.downloading": "下载中 {percent}%",
     "models.state.extracting": "正在解压安装…",
     "models.state.not_downloaded": "未下载",
     "models.action.download": "下载 {size} GB",
