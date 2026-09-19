@@ -12,6 +12,14 @@ use tauri::Emitter;
 
 use crate::inference::runtime_paths;
 
+/// 试启动就绪判定方式（数据驱动：新增框架只加一条数据行 + 一个变体值，不改函数）
+pub enum SmokeProbe {
+    /// 起进程后轮询 HTTP 健康端点，成功即就绪
+    HttpHealth { path: &'static str },
+    /// 无服务端点：等进程退出且 stderr 命中任一关键词（= exe+DLL 链完好）
+    StderrKeywords { exit_and_stderr_contains_any: &'static [&'static str] },
+}
+
 /// libs 压缩包发布信息（GitHub release 资产名 + 版本）
 /// 更新引擎时改这里 + 发布新压缩包到 GitHub release。
 pub struct RuntimePkg {
@@ -35,6 +43,12 @@ pub struct RuntimePkg {
     pub target_dir: &'static str,
     /// 校验文件（存在即认为已安装）
     pub marker: &'static str,
+    /// 试启动随机端口基线（避开默认端口与已运行实例）
+    pub port_base: u16,
+    /// 试启动参数（`$PORT` 占位符在运行时替换为实际端口）
+    pub smoke_args: &'static [&'static str],
+    /// 试启动就绪判定方式
+    pub smoke_probe: SmokeProbe,
 }
 
 /// sherpa-onnx 自带的 CUDA 运行库资产（我们发布，固定版本）：
@@ -85,6 +99,9 @@ pub const RUNTIME_PACKAGES: &[RuntimePkg] = &[
         inner_dir: "llama-b10622-bin-win-cuda-12.4-x64",
         target_dir: "llama-cpp",
         marker: "llama-server.exe",
+        port_base: 0,
+        smoke_args: &["--port", "$PORT", "--no-webui"],
+        smoke_probe: SmokeProbe::HttpHealth { path: "/health" },
     },
     RuntimePkg {
         framework: "onnx",
@@ -98,6 +115,19 @@ pub const RUNTIME_PACKAGES: &[RuntimePkg] = &[
         target_dir: "sherpa-onnx",
         // 官方 sherpa 包根 = bin/include/lib，exe 在 bin/ 下（相对 marker，校验/启动按此解析）
         marker: "bin/sherpa-onnx-offline-websocket-server.exe",
+        port_base: 50,
+        smoke_args: &["--port", "$PORT"],
+        smoke_probe: SmokeProbe::StderrKeywords {
+            // 逐字搬自原 sherpa 分支的判定清单（缺模型/参数配置类错误）
+            exit_and_stderr_contains_any: &[
+                "does not exist",
+                "recognizer config",
+                "Invalid integer option",
+                "tokens:",
+                "ParseOptions",
+                "parse-options",
+            ],
+        },
     },
 ];
 
@@ -128,10 +158,9 @@ fn url_extension(url: &str) -> String {
 /// 同时校验 aux_files（如 CUDA 运行库）完整 —— 主程序在但运行库缺失 = 未完成安装，
 /// 前端据此显示"需要修复/重新下载"（否则 CUDA 会静默回退 CPU）。
 pub fn is_runtime_installed(pkg: &RuntimePkg) -> bool {
-    let dir = match pkg.framework {
-        "gguf" => runtime_paths::llama_runtime_dir(),
-        "onnx" => runtime_paths::sherpa_runtime_dir(),
-        _ => return false,
+    // 框架未收录 → 与旧行为一致：视为未安装
+    let Some(dir) = dir_for_framework(pkg.framework) else {
+        return false;
     };
     if !dir.join(pkg.marker).exists() {
         return false;
@@ -240,13 +269,19 @@ pub fn verify_runtime_full(framework: &str) -> serde_json::Value {
     }
 }
 
+/// 框架 → 运行时目录（单一真源：RUNTIME_PACKAGES 的 target_dir）。
+/// 新增框架只加数据行；未收录的框架返回 None，由调用方决定回退。
+fn dir_for_framework(framework: &str) -> Option<PathBuf> {
+    RUNTIME_PACKAGES
+        .iter()
+        .find(|p| p.framework == framework)
+        .map(|p| libs_root().join(p.target_dir))
+}
+
 /// 某框架的运行时目录（与推理启动同一路径解析）
 pub fn runtime_dir_for(pkg: &RuntimePkg) -> PathBuf {
-    match pkg.framework {
-        "gguf" => runtime_paths::llama_runtime_dir(),
-        "onnx" => runtime_paths::sherpa_runtime_dir(),
-        _ => libs_root(),
-    }
+    // 未收录 → 与旧行为一致的兜底（libs 根）
+    dir_for_framework(pkg.framework).unwrap_or_else(libs_root)
 }
 
 /// 下载单文件，进度映射到全局区间 [span_start, span_end]（主包+附件合并成一条 0→100，
@@ -510,29 +545,27 @@ fn place_extracted(src: &Path, dest: &Path) -> Result<(), String> {
 
 /// 试启动验证框架（不带模型）
 /// 目的：确认 exe + DLL 链能真正启动（文件在 ≠ 能跑；缺 DLL 会秒退/无法加载）。
-/// - llama-server: 无 -m 也能起 HTTP 服务，/health 返回 OK → 就绪即通过
-/// - sherpa websocket server: 必须有模型配置才能起服务；无模型启动会走到
-///   recognizer 配置校验并报"缺模型"退出 —— 能执行到这一步 = exe+DLL 链完好。
-///   判据：退出时 stderr 是"缺模型/参数配置"错误（非 DLL 加载失败）。
+/// 参数与就绪判定全部来自 RuntimePkg 数据（port_base / smoke_args / smoke_probe），本函数无框架分支：
+/// - HttpHealth: 无模型也能起 HTTP 服务，健康端点返回 OK → 就绪即通过（如 llama-server /health）
+/// - StderrKeywords: 必须有模型配置才能起服务；无模型启动会走到 recognizer 配置校验并报"缺模型"
+///   退出 —— 能执行到这一步 = exe+DLL 链完好。判据：退出时 stderr 命中任一给定关键词（非 DLL 加载失败）。
 fn smoke_test_runtime(pkg: &RuntimePkg) -> Result<(), String> {
     let dir = runtime_dir_for(pkg);
     let exe = dir.join(pkg.marker);
     if !exe.exists() {
         return Err(format!("{} 不存在", exe.display()));
     }
-    // 随机端口（避开默认 8931/9002 与已运行实例冲突）
-    let port = 20000 + (std::process::id() as u16 % 1000) + match pkg.framework {
-        "gguf" => 0,
-        "onnx" => 50,
-        _ => 100,
-    };
+    // 随机端口（避开默认 8931/9002 与已运行实例冲突；基线来自数据表的 port_base）
+    let port = 20000 + (std::process::id() as u16 % 1000) + pkg.port_base;
     let mut cmd = std::process::Command::new(&exe);
     crate::process_hidden::hide_console_window(&mut cmd);
-    if pkg.framework == "gguf" {
-        cmd.args(["--port", &port.to_string(), "--no-webui"]);
-    } else {
-        cmd.args(["--port", &port.to_string()]);
-    }
+    // 试启动参数来自数据表；"$PORT" 占位符替换为实际端口，其余原样、顺序不变
+    let port_arg = port.to_string();
+    cmd.args(
+        pkg.smoke_args
+            .iter()
+            .map(|a| if *a == "$PORT" { port_arg.as_str() } else { *a }),
+    );
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         // 接住 stderr：sherpa 的"缺模型"诊断走 stderr，需读取判断退出原因
@@ -550,7 +583,15 @@ fn smoke_test_runtime(pkg: &RuntimePkg) -> Result<(), String> {
         String::from_utf8_lossy(&buf).to_string()
     });
 
-    // 轮询最多 6 秒：等就绪（llama /health）或进程退出（sherpa）
+    // 就绪判定方式来自数据表：HttpHealth → 轮询健康端点；StderrKeywords → 退出 + stderr 关键词
+    let (health_path, stderr_keywords) = match &pkg.smoke_probe {
+        SmokeProbe::HttpHealth { path } => (Some(*path), None),
+        SmokeProbe::StderrKeywords { exit_and_stderr_contains_any } => {
+            (None, Some(*exit_and_stderr_contains_any))
+        }
+    };
+
+    // 轮询最多 6 秒：等就绪（HTTP 健康端点）或进程退出（无服务端点框架）
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
     let mut ready = false;
     let mut exited: Option<std::process::ExitStatus> = None;
@@ -559,9 +600,9 @@ fn smoke_test_runtime(pkg: &RuntimePkg) -> Result<(), String> {
             exited = Some(st);
             break;
         }
-        if pkg.framework == "gguf" {
+        if let Some(path) = health_path {
             if let Ok(resp) = reqwest::blocking::Client::new()
-                .get(format!("http://127.0.0.1:{}/health", port))
+                .get(format!("http://127.0.0.1:{}{}", port, path))
                 .timeout(std::time::Duration::from_millis(800))
                 .send()
             {
@@ -578,17 +619,12 @@ fn smoke_test_runtime(pkg: &RuntimePkg) -> Result<(), String> {
     let stderr_text = stderr_handle.join().unwrap_or_default();
 
     if ready {
-        return Ok(()); // llama /health 就绪
+        return Ok(()); // 健康端点就绪
     }
-    // sherpa：退出且 stderr 是"缺模型/参数配置"错误 → DLL 链完好，通过
+    // 无服务端点框架：退出且 stderr 命中任一关键词 → DLL 链完好，通过
     //   （缺 DLL 时进程无法加载 → CreateProcess/加载器错误或空白秒退，走不到参数解析）
-    if pkg.framework != "gguf" {
-        let missing_model = stderr_text.contains("does not exist")
-            || stderr_text.contains("recognizer config")
-            || stderr_text.contains("Invalid integer option")
-            || stderr_text.contains("tokens:")
-            || stderr_text.contains("ParseOptions")
-            || stderr_text.contains("parse-options");
+    if let Some(kws) = stderr_keywords {
+        let missing_model = kws.iter().any(|kw| stderr_text.contains(kw));
         if missing_model && exited.is_some() {
             return Ok(());
         }
