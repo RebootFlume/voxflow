@@ -43,6 +43,7 @@ export function useAudioPreview() {
   const stop = useCallback(() => {
     if (stopCurrent === teardown) stopCurrent = null;
     teardown();
+    setError("");
   }, [teardown]);
 
   useEffect(
@@ -91,8 +92,10 @@ export function useAudioPreview() {
       } catch (e) {
         if (stopCurrent === teardown) stopCurrent = null;
         teardown();
-        setError(String(e));
-        return String(e);
+        // Rust 侧返回的已是完整句子（"读取音频失败：…"）⇒ 不要 "Error: " 前缀
+        const msg = e instanceof Error ? e.message : String(e);
+        setError(msg);
+        return msg;
       }
     },
     [playing, stop, teardown],
