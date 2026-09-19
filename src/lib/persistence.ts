@@ -41,13 +41,9 @@ export async function loadConfig() {
     useAppStore.setState({
       asr: { ...store.asr, ...parsed.asr },
       tts: { ...store.tts, ...parsed.tts },
-      // 克隆音色：只恢复可复现的部分（active/audioPath/referenceText），运行态字段回默认
-      ttsClone: {
-        ...store.ttsClone,
-        ...(parsed.ttsClone ?? {}),
-        status: "idle",
-        error: "",
-      },
+      // 克隆音色**不从 config 恢复**：它是纯运行态，权威在 `tts-voices/voices.json`，
+      // 由模型就绪时的恢复路径按 `active_id` 下发（见 useSidecarEvents）。启动时未加载模型
+      // 就显示"克隆已生效"是假象——引擎里根本没有参考音频。
       api: { ...store.api, ...parsed.api, endpoints: { ...store.api.endpoints, ...parsed.api?.endpoints } },
       overlay: { ...store.overlay, ...parsed.overlay },
       theme: { ...store.theme, ...parsed.theme },
@@ -79,13 +75,7 @@ export async function saveConfig() {
     const config = {
       asr: { hotkey: state.asr.hotkey, model: state.asr.model, device: state.asr.device, framework: state.asr.framework },
       tts: state.tts,
-      // 克隆音色：落盘只保留可复现场景需要的四项（status/error 属运行态）
-      ttsClone: {
-        active: state.ttsClone.active,
-        name: state.ttsClone.name,
-        audioPath: state.ttsClone.audioPath,
-        referenceText: state.ttsClone.referenceText,
-      },
+      // 克隆音色不落 config（纯运行态）；权威与选中项都在 tts-voices/voices.json
       api: { host: state.api.host, port: state.api.port, apiKey: state.api.apiKey },
       io: { exportDir: state.io.exportDir },
       overlay: state.overlay,
@@ -202,7 +192,7 @@ export async function initPersistence() {
 
   // 监听配置变化 → 防抖保存
   let configTimer: ReturnType<typeof setTimeout> | null = null;
-  const watchConfigKeys = ["asr", "tts", "ttsClone", "api", "io", "overlay", "theme", "locale", "models", "useRustEngine"] as const;
+  const watchConfigKeys = ["asr", "tts", "api", "io", "overlay", "theme", "locale", "models", "useRustEngine"] as const;
   useAppStore.subscribe((state, prev) => {
     const changed = watchConfigKeys.some((k) => state[k] !== prev[k]);
     if (changed) {

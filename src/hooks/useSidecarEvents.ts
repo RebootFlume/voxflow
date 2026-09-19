@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { onSidecarEvent, rustListTtsSpeakers, rustSetTtsCloneVoice, rustTtsVoicesList, rustTtsVoiceUse, sendToSidecar } from "@/lib/tauri";
+import { onSidecarEvent, rustListTtsSpeakers, rustTtsVoicesList, rustTtsVoiceUse, sendToSidecar } from "@/lib/tauri";
 import { applyEngineStatus, applyAsrFrameworkFromRust, syncAsrFrameworkFromLoaded, resolveModelKind, runtimeKeyOf, ttsSupportsClone } from "@/lib/modelState";
 import { useAppStore, type EngineState } from "@/stores";
 import { t } from "@/lib/i18n";
@@ -260,8 +260,8 @@ export function useSidecarEvents() {
                 }
               })();
 
-              // TTS 就绪后恢复选中音色：优先音色库记录的 active_id（voice_use 会一并下发参数），
-              // 无 active_id 时保留原来的「按持久化 audioPath 恢复」兜底。
+              // TTS 就绪后恢复选中音色：**唯一来源是音色库的 active_id**（voice_use 会一并把
+              // 参考音频下发给引擎）。库里没有 active_id ⇒ 就是没选中音色，保持不激活。
               // 按模型去重：model_ready / model_loaded 双事件只恢复一次
               if (cloneRestoredFor !== model) {
                 cloneRestoredFor = model;
@@ -279,7 +279,7 @@ export function useSidecarEvents() {
                     useAppStore
                       .getState()
                       .addLog(`[tts] 当前模型（${model}）不支持克隆，跳过音色恢复`, "info");
-                    useAppStore.getState().updateTtsClone({ active: false, status: "idle", error: "" });
+                    useAppStore.getState().resetTtsClone();
                     return;
                   }
                   if (activeId) {
@@ -293,26 +293,17 @@ export function useSidecarEvents() {
                     });
                     return;
                   }
-                  const clone = useAppStore.getState().ttsClone;
-                  if (
-                    clone.active &&
-                    typeof clone.audioPath === "string" &&
-                    clone.audioPath !== ""
-                  ) {
-                    await rustSetTtsCloneVoice(clone.audioPath, clone.referenceText);
-                    // 兜底路径同样要落"已生效"：否则 active=true 配 status="idle" 自相矛盾
-                    useAppStore.getState().updateTtsClone({ status: "ok", error: "" });
-                  }
+                  // 不再有"按持久化 audioPath 恢复"的兜底：克隆音色不落 config，路径只可能来自
+                  // 本次会话刚应用过的音色（那种情况下 active_id 必然也在库里）。库里没有
+                  // active_id ⇒ 就是"没有选中音色"，保持不激活。
+                  useAppStore.getState().resetTtsClone();
                 })().catch((e) => {
                   // 失败时不能继续显示"克隆已激活"：当前模型不支持克隆 / 未就绪、
                   // 参考音频或音色条目已被删除、便携版整体搬目录导致路径失效
                   // （装/便携两种数据根见 data_root）
                   useAppStore.getState().addLog(`[tts] 恢复克隆音色失败: ${String(e)}`, "error");
-                  useAppStore.getState().updateTtsClone({
-                    active: false,
-                    status: "error",
-                    error: String(e),
-                  });
+                  useAppStore.getState().resetTtsClone();
+                  useAppStore.getState().updateTtsClone({ status: "error", error: String(e) });
                 });
               }
             } else if (kind === "asr") {

@@ -19,7 +19,9 @@ export interface TtsSlice {
   /** 语音克隆状态 */
   ttsClone: {
     active: boolean;
-    /** 生效中的克隆音色名（音色库里的 name）；展示用，空 = 名字未知 */
+    /** 生效中的克隆音色名（音色库里的 name）；展示用，空 = 名字未知。
+     *  整个 `ttsClone` 都是**运行态**：不进 config.json，权威与选中项在
+     *  `tts-voices/voices.json`（模型就绪时按 `active_id` 恢复）。 */
     name: string;
     audioPath: string;
     referenceText: string;
@@ -34,6 +36,9 @@ export interface TtsSlice {
   updateSynthesizingTask: (patch: Partial<TtsTask>) => void;
   removeTtsTask: (id: number) => void;
   updateTtsClone: (patch: Partial<TtsSlice["ttsClone"]>) => void;
+  /** 停用克隆音色：active=false 的同时**清掉 name/audioPath/referenceText**。
+   *  不变量：不激活 ⇒ 不留上一份克隆的痕迹（否则"停用了却还记着名字"会误导后续读取方）。 */
+  resetTtsClone: () => void;
 }
 
 export const createTtsSlice = (set: (partial: Partial<TtsSlice> | ((s: TtsSlice) => Partial<TtsSlice>)) => void): TtsSlice => ({
@@ -44,6 +49,10 @@ export const createTtsSlice = (set: (partial: Partial<TtsSlice> | ((s: TtsSlice)
   updateTts: (patch) => set((s) => ({ tts: { ...s.tts, ...patch } })),
   setTtsModelStatus: (ttsModelStatus) => set({ ttsModelStatus }),
   updateTtsClone: (patch) => set((s) => ({ ttsClone: { ...s.ttsClone, ...patch } })),
+  resetTtsClone: () =>
+    set({
+      ttsClone: { active: false, name: "", audioPath: "", referenceText: "", status: "idle", error: "" },
+    }),
   addTtsTask: (task) => {
     const id = Date.now();
     set((s) => ({ ttsTasks: [...s.ttsTasks, { ...task, id }] }));

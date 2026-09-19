@@ -212,6 +212,7 @@ function useVoiceLibrary(): VoiceLibraryApi {
   const locale = useAppStore((s) => s.locale);
   const cloneActive = useAppStore((s) => s.ttsClone.active);
   const updateTtsClone = useAppStore((s) => s.updateTtsClone);
+  const resetTtsClone = useAppStore((s) => s.resetTtsClone);
   const [voices, setVoices] = useState<TtsVoiceItem[]>([]);
   const [activeVoiceId, setActiveVoiceId] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -429,7 +430,7 @@ function useVoiceLibrary(): VoiceLibraryApi {
       try {
         await rustClearTtsCloneVoice();
       } catch { /* 引擎可能本来就没参数，忽略 */ }
-      updateTtsClone({ active: false, name: "", audioPath: "", referenceText: "", status: "idle", error: "" });
+      resetTtsClone();
     }
     if (modal?.kind === "edit" && modal.id === v.id) resetModal();
     await refresh();
@@ -767,7 +768,7 @@ function VoiceSettingsPage() {
   const tts = useAppStore((s) => s.tts);
   const ttsClone = useAppStore((s) => s.ttsClone);
   const updateTts = useAppStore((s) => s.updateTts);
-  const updateTtsClone = useAppStore((s) => s.updateTtsClone);
+  const resetTtsClone = useAppStore((s) => s.resetTtsClone);
   const { speakers, numSpeakers } = useTtsSpeakers();
   /** 试听：合成中标志（局部态，与任务列表解耦）+ 失败信息 */
   const [previewBusy, setPreviewBusy] = useState(false);
@@ -880,7 +881,7 @@ function VoiceSettingsPage() {
     try {
       await rustClearTtsCloneVoice();
     } catch { /* ignore */ }
-    updateTtsClone({ active: false, audioPath: "", referenceText: "", status: "idle", error: "" });
+    resetTtsClone();
   }
 
   return (
