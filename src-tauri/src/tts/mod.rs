@@ -15,6 +15,7 @@ pub mod commands;
 pub mod engine;
 pub mod reference_audio;
 pub mod registry;
+pub mod voices;
 pub mod spec;
 pub mod traits;
 

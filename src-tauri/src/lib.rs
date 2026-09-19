@@ -606,7 +606,7 @@ async fn rust_record_tts_reference(
     use crate::tts::reference_audio;
     let secs = reference_audio::clamp_seconds(seconds.unwrap_or(reference_audio::DEFAULT_SECONDS));
     tauri::async_runtime::spawn_blocking(move || {
-        let dir = crate::data_root::get_data_root(&app).join("tts-reference");
+        let dir = crate::data_root::get_data_root(&app).join(crate::tts::voices::DIR_NAME);
         reference_audio::record_to(&dir, secs)
     })
     .await
@@ -1098,6 +1098,11 @@ pub fn run() {
             tts::commands::rust_set_tts_clone_voice,
             tts::commands::rust_clear_tts_clone_voice,
             tts::commands::rust_list_tts_speakers,
+            tts::commands::rust_tts_voices_list,
+            tts::commands::rust_tts_voice_add,
+            tts::commands::rust_tts_voice_update,
+            tts::commands::rust_tts_voice_remove,
+            tts::commands::rust_tts_voice_use,
             rust_test_tts_model,
             persistence::read_data_file,
             persistence::write_data_file,

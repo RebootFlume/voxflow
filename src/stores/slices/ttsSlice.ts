@@ -1,5 +1,8 @@
 import type { TtsTask } from "../types";
 
+/** 音色设置页的顶层模式（两个同级入口，选择随 tts 一起持久化） */
+export type TtsVoiceMode = "preset" | "clone";
+
 export interface TtsSlice {
   tts: {
     model: string;
@@ -8,6 +11,8 @@ export interface TtsSlice {
     voice: string;
     /** 推理框架 = 运行时包 key（Rust payload 的 runtime_key，如 onnx）；接入新框架后由此切换 */
     framework: string;
+    /** 音色设置页当前模式：内置预设音色 / 克隆音色（默认 preset） */
+    voiceMode: TtsVoiceMode;
   };
   ttsModelStatus: "idle" | "loading" | "ready" | "error";
   ttsTasks: TtsTask[];
@@ -28,7 +33,7 @@ export interface TtsSlice {
 }
 
 export const createTtsSlice = (set: (partial: Partial<TtsSlice> | ((s: TtsSlice) => Partial<TtsSlice>)) => void): TtsSlice => ({
-  tts: { model: "", device: "cpu", language: "zh", voice: "default", framework: "onnx" },
+  tts: { model: "", device: "cpu", language: "zh", voice: "default", framework: "onnx", voiceMode: "preset" },
   ttsModelStatus: "idle",
   ttsTasks: [],
   ttsClone: { active: false, audioPath: "", referenceText: "", status: "idle", error: "" },

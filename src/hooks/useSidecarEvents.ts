@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { onSidecarEvent, rustSetTtsCloneVoice, sendToSidecar } from "@/lib/tauri";
+import { onSidecarEvent, rustSetTtsCloneVoice, rustTtsVoicesList, rustTtsVoiceUse, sendToSidecar } from "@/lib/tauri";
 import { applyEngineStatus, applyAsrFrameworkFromRust, syncAsrFrameworkFromLoaded, resolveModelKind, runtimeKeyOf } from "@/lib/modelState";
 import { useAppStore, type EngineState } from "@/stores";
 import { t } from "@/lib/i18n";
@@ -232,18 +232,41 @@ export function useSidecarEvents() {
               if (typeof payload.framework === "string") {
                 store.setEngineStatus("tts", { framework: payload.framework });
               }
-              // TTS 就绪后恢复已持久化的克隆音色（模型切换/重启都会丢，需要重新下发参数）
-              const clone = useAppStore.getState().ttsClone;
-              if (
-                clone.active &&
-                typeof clone.audioPath === "string" &&
-                clone.audioPath !== "" &&
-                cloneRestoredFor !== model
-              ) {
+              // TTS 就绪后恢复选中音色：优先音色库记录的 active_id（voice_use 会一并下发参数），
+              // 无 active_id 时保留原来的「按持久化 audioPath 恢复」兜底。
+              // 按模型去重：model_ready / model_loaded 双事件只恢复一次
+              if (cloneRestoredFor !== model) {
                 cloneRestoredFor = model;
-                void rustSetTtsCloneVoice(clone.audioPath, clone.referenceText).catch((e) => {
-                  // 失败时不能继续显示"克隆已激活"：参考音频可能已被删除，
-                  // 或便携版整体搬目录导致持久化的绝对路径失效（装/便携两种数据根见 data_root）
+                void (async () => {
+                  const lib = await rustTtsVoicesList().catch((e) => {
+                    // 音色库不可读（目录缺失等）→ 记日志后走持久化音频兜底
+                    useAppStore.getState().addLog(`[tts] 读取音色库失败，改用持久化音频恢复: ${String(e)}`, "warn");
+                    return null;
+                  });
+                  const activeId = lib?.active_id ?? null;
+                  if (activeId) {
+                    await rustTtsVoiceUse(activeId);
+                    const v = lib?.voices.find((x) => x.id === activeId);
+                    useAppStore.getState().updateTtsClone({
+                      active: true,
+                      status: "ok",
+                      error: "",
+                      ...(v ? { audioPath: v.audio_path, referenceText: v.reference_text } : {}),
+                    });
+                    return;
+                  }
+                  const clone = useAppStore.getState().ttsClone;
+                  if (
+                    clone.active &&
+                    typeof clone.audioPath === "string" &&
+                    clone.audioPath !== ""
+                  ) {
+                    await rustSetTtsCloneVoice(clone.audioPath, clone.referenceText);
+                  }
+                })().catch((e) => {
+                  // 失败时不能继续显示"克隆已激活"：当前模型不支持克隆 / 未就绪、
+                  // 参考音频或音色条目已被删除、便携版整体搬目录导致路径失效
+                  // （装/便携两种数据根见 data_root）
                   useAppStore.getState().addLog(`[tts] 恢复克隆音色失败: ${String(e)}`, "error");
                   useAppStore.getState().updateTtsClone({
                     active: false,

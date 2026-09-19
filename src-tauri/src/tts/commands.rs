@@ -114,16 +114,22 @@ pub async fn rust_set_tts_clone_voice(
 
 /// 清除语音克隆参数（回到预设音色模式）
 ///
+/// 两处都要清，缺一不可：
+/// - 引擎侧（`clear_clone_voice`）——否则合成仍带着参考音；
+/// - 音色库的 `active_id`——否则下次 TTS 模型就绪时按它恢复，会把用户**刚取消的克隆装回来**。
+///
 /// async + 阻塞池：引擎状态变更（与 set_clone_voice 同上下文，避免异步体内触达引擎）。
 #[tauri::command]
 pub async fn rust_clear_tts_clone_voice(
     state: State<'_, AppState>,
+    app: AppHandle,
 ) -> Result<serde_json::Value, String> {
     let registry = state.tts.clone();
     tauri::async_runtime::spawn_blocking(move || {
         if let Some(engine) = registry.lock().active() {
             engine.clear_clone_voice();
         }
+        crate::tts::voices::clear_active(&voices_dir(&app))?;
         Ok(serde_json::json!({ "status": "ok" }))
     })
     .await
@@ -271,6 +277,146 @@ pub async fn rust_list_tts_speakers(
     })
     .await
     .map_err(|e| format!("list speakers task failed: {e}"))?
+}
+
+// ─── 克隆音色库（录音/上传 → 命名 + 说明 → 条目 → 试用即用）──────────────────
+//
+// 用户诉求（对标 Voicebox）：音色要能"攒起来"——录/传一个、起名字写说明、存成条目，
+// 之后在条目之间挑，点一下就用；而不是每次重新录一遍、重新贴一遍参考文本。
+
+/// 音色库目录（数据根下 `tts-voices/`；安装版/便携版由 data_root 统一处理）
+fn voices_dir(app: &AppHandle) -> std::path::PathBuf {
+    crate::data_root::get_data_root(app).join(crate::tts::voices::DIR_NAME)
+}
+
+fn voice_json(dir: &std::path::Path, v: &crate::tts::voices::Voice) -> serde_json::Value {
+    serde_json::json!({
+        "id": v.id,
+        "name": v.name,
+        "note": v.note,
+        "reference_text": v.reference_text,
+        "audio_path": crate::tts::voices::path_of(dir, v).to_string_lossy(),
+        "created_ms": v.created_ms,
+    })
+}
+
+/// 列出音色库（含当前选中 id）
+#[tauri::command]
+pub async fn rust_tts_voices_list(app: AppHandle) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = voices_dir(&app);
+        let lib = crate::tts::voices::load(&dir);
+        let voices: Vec<serde_json::Value> =
+            lib.voices.iter().map(|v| voice_json(&dir, v)).collect();
+        Ok(serde_json::json!({
+            "dir": dir.to_string_lossy(),
+            "active_id": lib.active_id,
+            "voices": voices,
+        }))
+    })
+    .await
+    .map_err(|e| format!("list voices task failed: {e}"))?
+}
+
+/// 把一个音频（录音草稿或用户上传）收进音色库：命名后成为可复用条目
+#[tauri::command]
+pub async fn rust_tts_voice_add(
+    app: AppHandle,
+    source_path: String,
+    name: String,
+    note: String,
+    reference_text: String,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = voices_dir(&app);
+        let voice = crate::tts::voices::add(
+            &dir,
+            std::path::Path::new(&source_path),
+            &name,
+            &note,
+            &reference_text,
+        )?;
+        Ok(serde_json::json!({ "id": voice.id }))
+    })
+    .await
+    .map_err(|e| format!("add voice task failed: {e}"))?
+}
+
+/// 改名 / 改说明 / 改参考文本
+#[tauri::command]
+pub async fn rust_tts_voice_update(
+    app: AppHandle,
+    id: String,
+    name: String,
+    note: String,
+    reference_text: String,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = voices_dir(&app);
+        crate::tts::voices::update(&dir, &id, &name, &note, &reference_text)?;
+        Ok(serde_json::json!({ "ok": true }))
+    })
+    .await
+    .map_err(|e| format!("update voice task failed: {e}"))?
+}
+
+/// 删除条目。若删的正是当前选中：**先清引擎的克隆参数，再删库**
+/// （否则库里没了、引擎还在用旧的参考音合成）。
+#[tauri::command]
+pub async fn rust_tts_voice_remove(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    let registry = state.tts.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = voices_dir(&app);
+        let lib = crate::tts::voices::load(&dir);
+        if lib.active_id.as_deref() == Some(id.as_str()) {
+            if let Some(engine) = registry.lock().active() {
+                engine.clear_clone_voice();
+            }
+        }
+        crate::tts::voices::remove(&dir, &id)?;
+        Ok(serde_json::json!({ "ok": true }))
+    })
+    .await
+    .map_err(|e| format!("remove voice task failed: {e}"))?
+}
+
+/// 应用某个音色：**先把参数成功下发给引擎，才记为"当前选中"**。
+///
+/// 顺序不可反（否则库里显示已选中、引擎里根本没有这份参数 = 谎报）；
+/// 引擎侧能力校验（非克隆模型拒绝）失败时，这里直接返回错误、不落库。
+#[tauri::command]
+pub async fn rust_tts_voice_use(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    let registry = state.tts.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = voices_dir(&app);
+        let lib = crate::tts::voices::load(&dir);
+        let voice = lib
+            .voices
+            .iter()
+            .find(|v| v.id == id)
+            .cloned()
+            .ok_or_else(|| format!("音色不存在: {id}"))?;
+        let path = crate::tts::voices::path_of(&dir, &voice);
+        {
+            let guard = registry.lock();
+            let engine = guard.active().ok_or("TTS 模型未加载")?;
+            engine
+                .set_clone_voice(&path, &voice.reference_text)
+                .map_err(|e| e.to_string())?;
+        }
+        crate::tts::voices::set_active(&dir, &id)?;
+        Ok(serde_json::json!({ "ok": true, "name": voice.name }))
+    })
+    .await
+    .map_err(|e| format!("use voice task failed: {e}"))?
 }
 
 // ─── 辅助 ──────────────────────────────────────────────────────────────────

@@ -111,6 +111,62 @@ export function rustClearTtsCloneVoice(): Promise<Record<string, unknown>> {
   return invoke("rust_clear_tts_clone_voice");
 }
 
+// ============================================================
+// 音色库（Voicebox 式：录音/上传 → 命名入库 → 库内点击使用）
+// ============================================================
+
+/** 音色库条目（落盘在 Rust 侧音色库目录，前端只读展示） */
+export interface TtsVoiceItem {
+  id: string;
+  name: string;
+  /** 说明（可空） */
+  note: string;
+  /** 参考音频对应文本（克隆模型 requires_text 时必填） */
+  reference_text: string;
+  /** 入库后的音频绝对路径（试听用） */
+  audio_path: string;
+  created_ms: number;
+}
+
+/** 列出音色库：dir = 落盘目录，active_id = 当前选中音色（无选中为 null） */
+export function rustTtsVoicesList(): Promise<{
+  dir: string;
+  active_id: string | null;
+  voices: TtsVoiceItem[];
+}> {
+  return invoke("rust_tts_voices_list");
+}
+
+/** 把录音/上传的源文件收进音色库并命名（返回新条目 id） */
+export function rustTtsVoiceAdd(
+  sourcePath: string,
+  name: string,
+  note: string,
+  referenceText: string,
+): Promise<{ id: string }> {
+  return invoke("rust_tts_voice_add", { sourcePath, name, note, referenceText });
+}
+
+/** 修改音色条目的名称 / 说明 / 参考文本（音频不变） */
+export function rustTtsVoiceUpdate(
+  id: string,
+  name: string,
+  note: string,
+  referenceText: string,
+): Promise<{ ok: true }> {
+  return invoke("rust_tts_voice_update", { id, name, note, referenceText });
+}
+
+/** 删除音色条目 */
+export function rustTtsVoiceRemove(id: string): Promise<{ ok: true }> {
+  return invoke("rust_tts_voice_remove", { id });
+}
+
+/** 下发该音色到引擎并记为当前选中；失败（模型不支持克隆 / 未加载）即未选中 */
+export function rustTtsVoiceUse(id: string): Promise<{ ok: true; name: string }> {
+  return invoke("rust_tts_voice_use", { id });
+}
+
 /**
  * 录制 TTS 克隆参考音频（16kHz 单声道 wav）。
  * seconds 由 Rust 钳制到 3–30；peak = 峰值，< 0.01 视为基本静音（UI 提示重录）。
