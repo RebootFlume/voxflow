@@ -30,7 +30,10 @@ export interface TranscribeTask {
 export interface TtsTask {
   id: number;
   text: string;
+  /** 传给引擎的音色标识（预设模型是 sid；克隆模型该值被忽略） */
   voice: string;
+  /** 展示用的音色名（入队那一刻的界面文案：预设名 / 克隆音色名 / 默认音色） */
+  voiceLabel?: string;
   status: "pending" | "synthesizing" | "done" | "error" | "cancelled";
   /** 分段进度（sidecar 的 tts_progress 事件回填；仅在 synthesizing 期间有意义） */
   progress?: { chunk: number; chunks: number };

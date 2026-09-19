@@ -291,6 +291,7 @@ function useVoiceLibrary(): VoiceLibraryApi {
       await rustTtsVoiceUse(v.id);
       updateTtsClone({
         active: true,
+        name: v.name,
         audioPath: v.audio_path,
         referenceText: v.reference_text,
         status: "ok",
@@ -1340,6 +1341,7 @@ function LanguageSelector() {
 function SynthesizePage() {
   const locale = useAppStore((s) => s.locale);
   const tts = useAppStore((s) => s.tts);
+  const ttsClone = useAppStore((s) => s.ttsClone);
   const ttsModelStatus = useAppStore((s) => s.ttsModelStatus);
   const tasks = useAppStore((s) => s.ttsTasks);
   const [text, setText] = useState("");
@@ -1354,9 +1356,11 @@ function SynthesizePage() {
    *  单看一个信号可能在"引擎已就绪但事件漏收"时把按钮永久禁掉 ⇒ 任一为就绪即允许。 */
   const ttsEngineReady = useAppStore((s) => s.engines.tts.status === "ready");
   const canSynth = ttsEngineReady || ttsModelStatus === "ready";
-  /** 音色展示：名字优先（`speakers.json`，如 "xiaobei (晓北)"）；查不到名字（模型未加载 /
-   *  sid 不在当前模型列表）就显示「默认音色」——不能把一个裸 sid 当成"当前音色"展示。 */
+  /** 音色展示：**克隆生效时显示克隆音色名**（此时引擎用的是参考音频，sid 无关）；
+   *  否则按 sid 去 `speakers.json` 查名字；两者都拿不到（未加载模型 / sid 不在当前列表）
+   *  ⇒ 「默认音色」——不能把裸 sid 当成"当前音色"展示。 */
   const voiceText = (() => {
+    if (ttsClone.active) return ttsClone.name || t(locale, "tts.voice.mode.clone");
     const name = speakers.find((s) => String(s.sid) === tts.voice)?.name;
     return name ? name + " · sid " + tts.voice : t(locale, "tts.voice.default");
   })();
@@ -1377,7 +1381,7 @@ function SynthesizePage() {
     if (!trimmed) return;
     const st = useAppStore.getState();
     st.addLog(`[synthesize] queued: "${trimmed.slice(0, 40)}" voice=${tts.voice} dir=${st.io.exportDir || "-"}`, "info");
-    st.addTtsTask({ text: trimmed, voice: tts.voice, status: "pending" });
+    st.addTtsTask({ text: trimmed, voice: tts.voice, voiceLabel: voiceText, status: "pending" });
     setText("");
   }
 
@@ -1557,7 +1561,7 @@ function SynthesizePage() {
                         </Button>
                       </div>
                       <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                        <span>sid {task.voice}</span>
+                        <span>{task.voiceLabel ?? "sid " + task.voice}</span>
                         <span>·</span>
                         {task.fileSize && <><span>·</span><span>{task.fileSize}</span></>}
                         {task.status === "synthesizing" && (

@@ -19,6 +19,8 @@ export interface TtsSlice {
   /** 语音克隆状态 */
   ttsClone: {
     active: boolean;
+    /** 生效中的克隆音色名（音色库里的 name）；展示用，空 = 名字未知 */
+    name: string;
     audioPath: string;
     referenceText: string;
     status: "idle" | "setting" | "ok" | "error";
@@ -38,7 +40,7 @@ export const createTtsSlice = (set: (partial: Partial<TtsSlice> | ((s: TtsSlice)
   tts: { model: "", device: "cpu", language: "zh", voice: "", framework: "onnx", voiceMode: "preset" },
   ttsModelStatus: "idle",
   ttsTasks: [],
-  ttsClone: { active: false, audioPath: "", referenceText: "", status: "idle", error: "" },
+  ttsClone: { active: false, name: "", audioPath: "", referenceText: "", status: "idle", error: "" },
   updateTts: (patch) => set((s) => ({ tts: { ...s.tts, ...patch } })),
   setTtsModelStatus: (ttsModelStatus) => set({ ttsModelStatus }),
   updateTtsClone: (patch) => set((s) => ({ ttsClone: { ...s.ttsClone, ...patch } })),

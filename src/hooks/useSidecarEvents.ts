@@ -289,7 +289,7 @@ export function useSidecarEvents() {
                       active: true,
                       status: "ok",
                       error: "",
-                      ...(v ? { audioPath: v.audio_path, referenceText: v.reference_text } : {}),
+                      ...(v ? { name: v.name, audioPath: v.audio_path, referenceText: v.reference_text } : {}),
                     });
                     return;
                   }
