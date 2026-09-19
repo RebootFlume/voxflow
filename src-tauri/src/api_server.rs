@@ -471,3 +471,77 @@ fn extract_disposition_field(headers: &str, field: &str) -> Option<String> {
 fn find_subseq(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
+
+// ─── 测试 ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tts::registry::TtsRegistry;
+
+    /// 最小 ApiConfig：不调 `start()`，不监听端口（纯 handler 级测试）。
+    fn test_cfg(tts: Arc<Mutex<TtsRegistry>>) -> ApiConfig {
+        ApiConfig {
+            host: "127.0.0.1".into(),
+            port: 0,
+            api_key: String::new(),
+            tts,
+        }
+    }
+
+    /// OpenAI 兼容 TTS 请求体（`handle_tts` 真正读取的字段：input / voice）。
+    fn speech_body(input: &str, voice: &str) -> Vec<u8> {
+        serde_json::to_vec(&json!({"input": input, "voice": voice})).expect("body 序列化")
+    }
+
+    /// 状态码 + 已解析 JSON body（`handle_tts` 的 body 是内存 Cursor，可无损取出）。
+    fn status_and_json(resp: tiny_http::Response<Cursor<Vec<u8>>>) -> (u16, serde_json::Value) {
+        let status = resp.status_code().0;
+        let cursor = resp.into_reader();
+        let value = serde_json::from_slice(cursor.get_ref()).expect("响应体应为 JSON");
+        (status, value)
+    }
+
+    /// §5.1 硬约束：`try_lock` 503 语义保留 —— 引擎忙（锁被持有）必须立刻 503，
+    /// 既不能阻塞等待，也不能降级成 500。改回阻塞/别的状态码时此测试必须失败。
+    #[test]
+    fn tts_busy_returns_503() {
+        let tts = Arc::new(Mutex::new(TtsRegistry::new()));
+        let cfg = test_cfg(tts.clone());
+        let busy = tts.lock(); // 模拟 UI 主线程正持有引擎
+
+        let (status, body) = status_and_json(handle_tts(&speech_body("你好", "45"), &cfg));
+
+        assert_eq!(
+            status, 503,
+            "引擎忙必须 503（try_lock 语义），实际 {status}，body={body}"
+        );
+        assert_eq!(body["error"]["code"], json!(503));
+        assert_eq!(body["error"]["message"], "TTS engine busy");
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+
+        drop(busy);
+    }
+
+    /// 反向断言（不得误报 503）：锁空闲时走正常路径 —— 未加载模型应 500，
+    /// 而不是把「无模型」误判成「引擎忙」。无需真实模型 / 网络 / 端口。
+    #[test]
+    fn tts_unlocked_is_not_503() {
+        let tts = Arc::new(Mutex::new(TtsRegistry::new()));
+        let cfg = test_cfg(tts.clone());
+
+        // 前置：锁确实空闲（排除 try_lock 偶发失败导致的假 503）
+        assert!(tts.try_lock().is_some(), "测试前置：锁应为空闲");
+
+        let (status, body) = status_and_json(handle_tts(&speech_body("你好", "45"), &cfg));
+
+        assert_ne!(status, 503, "锁空闲时不应报引擎忙，body={body}");
+        assert_eq!(status, 500, "未加载模型应 500，body={body}");
+        assert_eq!(body["error"]["code"], json!(500));
+        assert_eq!(body["error"]["message"], "TTS model not loaded");
+        assert!(
+            cfg.tts.try_lock().is_some(),
+            "handler 返回后不应残留锁（guard 已释放）"
+        );
+    }
+}
