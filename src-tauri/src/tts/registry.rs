@@ -66,13 +66,14 @@ impl TtsRegistry {
             .engine(framework)
             .ok_or_else(|| format!("框架 {framework} 未注册"))?;
 
-        // 互斥：先卸载其他框架的引擎
-        self.slot.unload_others(framework);
-
         // 主模型文件（models_root / spec.id / model.onnx 等）
+        // 注意：**先解析再卸载**——解析失败（缺文件）时用户原来加载的模型不受影响。
         let dir = crate::model_manager::get_model_root().join(spec.id);
         let main_file = crate::model_manager::main_model_file(spec, &dir)
             .ok_or_else(|| format!("模型 {} 缺少主模型文件", spec.name))?;
+
+        // 互斥：先卸载其他框架的引擎
+        self.slot.unload_others(framework);
 
         engine.load(&main_file, device).map_err(|e| e.to_string())?;
         Ok((framework, spec.name.to_string()))

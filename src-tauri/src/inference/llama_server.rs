@@ -11,6 +11,7 @@
 //!
 //! 重要：默认 ctx 大小会让 8GB 显存爆掉（→ 慢 500 倍），必须显式限制。
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -34,6 +35,49 @@ pub const CHAT_PATH: &str = "/v1/chat/completions";
 pub const DEFAULT_CTX_SIZE: u32 = 2048;
 /// 启动后等待就绪的最长时间
 pub const READY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 子进程 stderr 保留行数（失败诊断用：显存/GPU 错误的特征行通常在最尾部）
+const STDERR_TAIL_LINES: usize = 40;
+
+/// "显存不足"特征（小写匹配）——命中即判定为 GPU 分配失败
+const OOM_STDERR_PATTERNS: [&str; 6] = [
+    "out of memory",
+    "failed to allocate",
+    "unable to allocate",
+    "cudamalloc",
+    "cuda_error_out_of_memory",
+    "insufficient memory",
+];
+
+/// 其它 GPU 运行错误特征（驱动/显卡问题）
+const GPU_STDERR_PATTERNS: [&str; 2] = ["cuda error", "cuda_error"];
+
+/// 从子进程 stderr 尾部判定失败性质（纯函数，单测锁）：`Some(("oom"|"gpu", 命中原行))`。
+///
+/// 目的：显存不足时 llama.cpp 会在启动阶段直接失败，但旧实现只报「启动超时/立即退出」，
+/// 用户干等 30s 也拿不到可操作信息。分类后直接给出「显存不足 + 需要/可用 + 建议」。
+fn classify_gpu_failure(lines: &[String]) -> Option<(&'static str, String)> {
+    let hit = |patterns: &[&str]| -> Option<String> {
+        lines
+            .iter()
+            .find(|line| {
+                let low = line.to_ascii_lowercase();
+                patterns.iter().any(|p| low.contains(p))
+            })
+            .map(|line| line.trim().to_string())
+    };
+    if let Some(line) = hit(&OOM_STDERR_PATTERNS) {
+        return Some(("oom", line));
+    }
+    hit(&GPU_STDERR_PATTERNS).map(|line| ("gpu", line))
+}
+
+/// MiB → 展示串（None = 无法判定，不显示假数字）
+fn fmt_mb(value: Option<u64>) -> String {
+    value
+        .map(|mb| format!("{mb} MiB"))
+        .unwrap_or_else(|| "未知".to_string())
+}
 /// 健康检查轮询间隔
 pub const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -141,6 +185,8 @@ pub struct LlamaSnapshot {
 pub struct LlamaServerEngine {
     config: Mutex<LlamaServerConfig>,
     child: Mutex<Option<Child>>,
+    /// 本次加载的子进程 stderr 尾部（失败诊断用，见 `with_gpu_hint`）
+    last_stderr: Arc<Mutex<VecDeque<String>>>,
     /// 本进程最后一次成功 spawn 的配置（用于接管身份验证）
     launched: Mutex<Option<LaunchRec>>,
     /// 单线程 HTTP 客户端（Tauri 主线程同步调用）
@@ -166,6 +212,7 @@ impl LlamaServerEngine {
             config: Mutex::new(config),
             child: Mutex::new(None),
             launched: Mutex::new(None),
+            last_stderr: Arc::new(Mutex::new(VecDeque::new())),
             client,
         }
     }
@@ -236,6 +283,25 @@ impl LlamaServerEngine {
         }
     }
 
+    /// 把 stderr 尾部的 GPU 特征行转成可操作结论并附在失败信息后（无特征则附最后一行）。
+    fn with_gpu_hint(&self, base: String) -> String {
+        let tail: Vec<String> = self.last_stderr.lock().iter().cloned().collect();
+        match classify_gpu_failure(&tail) {
+            Some(("oom", line)) => format!(
+                "{base}。显存不足：GPU 分配失败（需要 {}，当前可用 {}）——建议改用 CPU 加载，或关闭占显存的程序。llama-server: {line}",
+                fmt_mb(self.vram_estimate_mb()),
+                fmt_mb(crate::vram::gpu_free_mb()),
+            ),
+            Some((_, line)) => {
+                format!("{base}。GPU 运行错误（可能是驱动/显卡问题）。llama-server: {line}")
+            }
+            None => match tail.last() {
+                Some(line) if !line.trim().is_empty() => format!("{base}。llama-server: {}", line.trim()),
+                _ => base,
+            },
+        }
+    }
+
     /// 启动子进程 + 等待健康检查通过
     pub fn load(&self) -> InferenceResult<()> {
         let cfg = self.config.lock().clone();
@@ -251,6 +317,8 @@ impl LlamaServerEngine {
     ) -> InferenceResult<()> {
         // 0. 记录新配置（后续 transcribe / health 用新端口和路径）
         *self.config.lock() = cfg.clone();
+        // 本轮加载的失败诊断缓冲：清掉上一轮的 stderr 尾巴，避免误判成本轮原因
+        self.last_stderr.lock().clear();
 
         // 1. 已有 server 在跑：只有「模型 + 采样 + 本进程启动参数」全部验证一致才接管，
         //    否则杀掉重启 —— 杜绝把残留的旧模型/默认采样进程当成目标模型（假成功/整句乱码）。
@@ -369,6 +437,7 @@ impl LlamaServerEngine {
         // （各框架实现可映射自己的内部日志到这些通用码，前端只认这一套）
         let (stage_tx, stage_rx) = std::sync::mpsc::channel::<String>();
         if let Some(stderr) = child.stderr.take() {
+            let tail_buf = Arc::clone(&self.last_stderr);
             std::thread::Builder::new()
                 .name("llama-stderr-parser".into())
                 .spawn(move || {
@@ -376,6 +445,14 @@ impl LlamaServerEngine {
                     let reader = std::io::BufReader::new(stderr);
                     for line in reader.lines() {
                         let Ok(line) = line else { break };
+                        // 失败诊断：滚动保留最后若干行（显存/GPU 错误特征在最尾部）
+                        {
+                            let mut tail = tail_buf.lock();
+                            if tail.len() >= STDERR_TAIL_LINES {
+                                tail.pop_front();
+                            }
+                            tail.push_back(line.clone());
+                        }
                         // llama-server 日志 → 通用阶段（框架无关）
                         if line.contains("loading model '") || line.contains("loaded multimodal model") {
                             let _ = stage_tx.send("loading".into());
@@ -403,9 +480,12 @@ impl LlamaServerEngine {
             if let Some(c) = self.child.lock().as_mut() {
                 if let Ok(Some(_)) = c.try_wait() {
                     *self.child.lock() = None;
-                    return Err(InferenceError::LoadFailed(
-                        "llama-server 启动后立即退出：可能端口被外部进程占用，或模型路径/GPU 问题".to_string(),
-                    ));
+                    // 子进程已退出 ⇒ stderr 管道 EOF，读线程正在收尾；等它把最后几行落进缓冲再判定
+                    std::thread::sleep(Duration::from_millis(60));
+                    return Err(InferenceError::LoadFailed(self.with_gpu_hint(
+                        "llama-server 启动后立即退出：可能端口被外部进程占用，或模型路径/GPU 问题"
+                            .to_string(),
+                    )));
                 }
             }
             // 端口在服务且子进程存活 → 真就绪
@@ -433,10 +513,10 @@ impl LlamaServerEngine {
             let _ = c.kill();
             let _ = c.wait();
         }
-        Err(InferenceError::LoadFailed(format!(
+        Err(InferenceError::LoadFailed(self.with_gpu_hint(format!(
             "llama-server 启动超时（{}s）",
             READY_TIMEOUT.as_secs()
-        )))
+        ))))
     }
 
     /// 停止子进程
@@ -452,6 +532,24 @@ impl LlamaServerEngine {
         wait_port_closed(port, Duration::from_secs(3));
         *self.launched.lock() = None;
         Ok(())
+    }
+
+    /// 显存预估（MiB）：权重 + mmproj + KV(按 ctx 与 GGUF 几何) + 固定开销。
+    ///
+    /// 旧实现取「模型目录大小」——把文件体积当显存，系统性少算 KV + CUDA 上下文（实测差 ~1.3 GiB）。
+    pub fn vram_estimate_mb(&self) -> Option<u64> {
+        let cfg = self.config.lock().clone();
+        if cfg.n_gpu_layers == 0 {
+            return None; // 纯 CPU：不占显存
+        }
+        let weights = std::fs::metadata(&cfg.model_path).ok()?.len();
+        let mmproj = if cfg.mmproj_offload {
+            std::fs::metadata(&cfg.mmproj_path).map(|m| m.len()).unwrap_or(0)
+        } else {
+            0
+        };
+        let geom = crate::vram::read_gguf_kv_geometry(&cfg.model_path);
+        Some(crate::vram::estimate_vram_mb(weights, mmproj, geom, cfg.ctx_size))
     }
 
     /// 引擎是否"已加载"（所有权语义）：
@@ -836,7 +934,6 @@ pub fn load_asr_model_with_stage(
     device: &str,
     on_stage: &mut dyn FnMut(&str),
 ) -> InferenceResult<String> {
-    *LAST_REQUESTED.lock() = Some((name.to_string(), device.to_string()));
     let engine = global_engine();
     let mut cfg = llama_config_for_model(name, device)?;
 
@@ -867,6 +964,9 @@ pub fn load_asr_model_with_stage(
 
     engine.load_with_config(cfg, on_stage)?;
     on_stage("ready");
+    // 只在成功后记录「最近请求」：装不上的模型不能写进去，
+    // 否则热键/文件/API 兜底会反复重试同一个装不上的模型（每次都等满超时）。
+    *LAST_REQUESTED.lock() = Some((name.to_string(), device.to_string()));
     Ok(engine.model_name().unwrap_or_else(|| name.to_string()))
 }
 
@@ -1022,26 +1122,41 @@ impl super::engine::AsrEngine for LlamaAsrAdapter {
     }
 
     fn vram_estimate_mb(&self) -> Option<u64> {
-        // 预估（真值由 lib.rs 的按进程查询给出）：权重 + mmproj + KV(按 ctx 与 GGUF 几何) + 固定开销。
-        // 旧实现取「模型目录大小」—— 把文件体积当显存，系统性少算 KV + CUDA 上下文（实测差 ~1.3 GiB）。
-        let cfg = self.engine.config();
-        if cfg.n_gpu_layers == 0 {
-            return None; // 纯 CPU：不占显存
-        }
-        let weights = std::fs::metadata(&cfg.model_path).ok()?.len();
-        let mmproj = if cfg.mmproj_offload {
-            std::fs::metadata(&cfg.mmproj_path).map(|m| m.len()).unwrap_or(0)
-        } else {
-            0
-        };
-        let geom = crate::vram::read_gguf_kv_geometry(&cfg.model_path);
-        Some(crate::vram::estimate_vram_mb(weights, mmproj, geom, cfg.ctx_size))
+        // 单一实现在内层引擎（加载失败诊断也要用同一份数字）
+        self.engine.vram_estimate_mb()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 失败分类是"显存不足"这类结论的唯一入口：既要认出特征，也不能把正常日志误判
+    #[test]
+    fn test_classify_gpu_failure() {
+        let oom = vec![
+            "ggml_backend_cuda_buffer_type_alloc_buffer: allocating 1000.00 MiB".to_string(),
+            "failed to allocate buffer of size 1048576000".to_string(),
+        ];
+        assert_eq!(classify_gpu_failure(&oom).map(|(k, _)| k), Some("oom"));
+
+        let gpu = vec!["CUDA error: an illegal memory access was encountered".to_string()];
+        assert_eq!(classify_gpu_failure(&gpu).map(|(k, _)| k), Some("gpu"));
+
+        // 正常加载日志不得误判
+        let ok = vec![
+            "loading model 'Qwen3-ASR-0.6B-Q8_0.gguf'".to_string(),
+            "model loaded".to_string(),
+        ];
+        assert!(classify_gpu_failure(&ok).is_none());
+        assert!(classify_gpu_failure(&[]).is_none());
+    }
+
+    #[test]
+    fn test_fmt_mb() {
+        assert_eq!(fmt_mb(Some(1768)), "1768 MiB");
+        assert_eq!(fmt_mb(None), "未知");
+    }
 
     #[test]
     fn test_extract_asr_text() {

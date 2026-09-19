@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { RotateCw } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -7,11 +7,13 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ModelSelector } from "@/components/ModelSelector";
 import { ModelStatusBadge } from "@/components/ModelStatusBadge";
 import { useAppStore } from "@/stores";
-import { runtimeKeyOf } from "@/lib/modelState";
+import { computeIsLoaded, runtimeKeyOf } from "@/lib/modelState";
 import { VolumeWave } from "@/components/VolumeWave";
 import { t } from "@/lib/i18n";
-import { sendToSidecar } from "@/lib/tauri";
+import { rustCheckVram, sendToSidecar } from "@/lib/tauri";
 import { loadAsrModel } from "@/lib/modelLoader";
+import { alreadyConfirmedRemembered, rememberConfirmed } from "@/lib/vramGuard";
+import { VramGuardDialog, type VramGuardChoice } from "@/components/VramGuardDialog";
 import { TranscribePanel } from "./TranscribePanel";
 
 
@@ -131,6 +133,81 @@ function VramMonitorCard() {
   );
 }
 
+/** 弹框要展示的预检数字（Rust 判定不足时才有） */
+interface VramPrompt {
+  model: string;
+  device: string;
+  needMb: number | null;
+  freeMb: number | null;
+  totalMb: number | null;
+}
+
+/**
+ * ASR 加载前显存预检（用户主动加载专用，ASR 面板两处共用同一实现）。
+ *
+ * 流程：预检 → `ok` 直接加载 / 不足弹框 → 按选择（取消 / CPU / 仍用 GPU 试）加载。
+ * 不做预检的情形：设备为 CPU（不占显存）、目标 model+device 已加载（无意义重复点击）、
+ * 本会话已确认过「仍用 GPU 试」；预检自身失败则 fail-open（无法判定就放行）。
+ * 启动自动加载（main.tsx）不走本 hook —— 启动必须静默失败，绝不弹框。
+ */
+function useVramGuard() {
+  const [prompt, setPrompt] = useState<VramPrompt | null>(null);
+  // 弹框选择的一次性 resolver（弹框受控，选择通过 resolve 回传）
+  const resolverRef = useRef<((choice: VramGuardChoice) => void) | null>(null);
+
+  const ask = useCallback(async (model: string, device: string) => {
+    // 已有弹框在等选择：忽略并发点击，避免覆盖 resolver 造成悬挂
+    if (resolverRef.current) return;
+
+    const s = useAppStore.getState();
+    const skipCheck =
+      device === "cpu" ||
+      (computeIsLoaded("asr", model) && s.models.loadedDevice === device) ||
+      alreadyConfirmedRemembered(model, device);
+
+    if (!skipCheck) {
+      const verdict = await rustCheckVram(model, device).catch((e) => {
+        s.addLog(`[model] 显存预检失败，直接加载: ${String(e)}`, "warn");
+        return null;
+      });
+
+      if (verdict && !verdict.ok) {
+        const choice = await new Promise<VramGuardChoice>((resolve) => {
+          resolverRef.current = resolve;
+          setPrompt({
+            model,
+            device,
+            needMb: verdict.need_mb,
+            freeMb: verdict.free_mb,
+            totalMb: verdict.total_mb,
+          });
+        });
+        resolverRef.current = null;
+        setPrompt(null);
+
+        if (choice === "cancel") return;
+        if (choice === "cpu") {
+          // 降级到 CPU：同步选中设备，避免 UI 与实际加载设备不一致
+          s.updateAsr({ device: "cpu" });
+          s.addLog(`[model] 显存不足，改用 CPU 加载 ${model}`, "info");
+          await loadAsrModel(model, "cpu");
+          return;
+        }
+        rememberConfirmed(model, device);
+        s.addLog(`[model] 忽略显存提示，仍用 ${device} 加载 ${model}`, "warn");
+      }
+    }
+
+    await loadAsrModel(model, device);
+  }, []);
+
+  const choose = useCallback((choice: VramGuardChoice) => {
+    resolverRef.current?.(choice);
+  }, []);
+
+  return { ask, prompt, choose };
+}
+
 export function AsrPanel() {
   const sub = useAppStore((s) => s.activeSubMenu);
   const asr = useAppStore((s) => s.asr);
@@ -142,6 +219,8 @@ export function AsrPanel() {
   const loadedDevice = useAppStore((s) => s.models.loadedDevice);
   const modelItems = useAppStore((s) => s.models.items);
   const runtimePackages = useAppStore((s) => s.runtime.packages);
+  // 用户主动加载的显存预检（启动自动加载不走这里）
+  const vramGuard = useVramGuard();
 
   // 框架下拉项：ASR 模型清单里的运行时包 key 去重（顺序 = 清单顺序，确定性）；
   // label 优先取运行时包名，无包则直接用 key —— 新增框架无需改前端
@@ -230,7 +309,7 @@ export function AsrPanel() {
                 </div>
                 <Button
                   size="sm"
-                  onClick={() => void loadAsrModel(asr.model, asr.device)}
+                  onClick={() => void vramGuard.ask(asr.model, asr.device)}
                 >
                   <RotateCw className="mr-1.5 h-3.5 w-3.5" />
                   {t(locale, "asr.device.apply")}
@@ -288,7 +367,7 @@ export function AsrPanel() {
               formatFilter={asr.framework}
               downloadedOnly
               onSelect={(model) => {
-                void loadAsrModel(model, asr.device);
+                void vramGuard.ask(model, asr.device);
               }}
             />
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -297,6 +376,19 @@ export function AsrPanel() {
             </div>
           </CardContent>
         </Card>
+
+        {/* 显存预检弹框：Rust 判定不足时出现；选择后由 guard 决定加载方式 */}
+        {vramGuard.prompt && (
+          <VramGuardDialog
+            open
+            model={vramGuard.prompt.model}
+            device={vramGuard.prompt.device}
+            needMb={vramGuard.prompt.needMb}
+            freeMb={vramGuard.prompt.freeMb}
+            totalMb={vramGuard.prompt.totalMb}
+            onChoose={vramGuard.choose}
+          />
+        )}
       </div>
     );
   }

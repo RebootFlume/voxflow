@@ -46,6 +46,48 @@ impl GgufKvGeometry {
     }
 }
 
+// ─── 驱动口径：总/已用/可用显存 ─────────────────────────────────────────────
+//
+// 预估（上面）用于「需要多少」；本段用于「还剩多少」。两者都只做**读**，
+// 判定与放行策略在调用方（见 `model_manager::check_load_vram`）。
+
+/// 解析 `nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits` 的首行数字（MiB）。
+/// 纯函数（单测锁格式）；解析失败 → None。
+pub fn parse_smi_used_mb(stdout: &str) -> Option<u64> {
+    stdout.lines().next()?.trim().parse::<u64>().ok()
+}
+
+/// nvidia-smi 查询「已用显存」MiB。读不到（非 NVIDIA / 无驱动 / 无权限）→ None。
+fn smi_used_mb() -> Option<u64> {
+    let mut cmd = std::process::Command::new("nvidia-smi");
+    crate::process_hidden::hide_console_window(&mut cmd);
+    let out = cmd
+        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_smi_used_mb(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// 驱动口径的 (总显存 MiB, 已用 MiB)。任一读不到 → None。
+///
+/// 调用方拿到 None 必须 **fail-open**（显存预检只是提醒，绝不误拦加载）。
+pub fn gpu_mem_mb() -> Option<(u64, u64)> {
+    let total = crate::sidecar::detect_gpu()
+        .get("memoryMB")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let used = smi_used_mb()?;
+    (total > 0).then_some((total, used))
+}
+
+/// 可用显存 MiB（总 − 已用）。无法判定 → None。
+pub fn gpu_free_mb() -> Option<u64> {
+    gpu_mem_mb().map(|(total, used)| total.saturating_sub(used))
+}
+
 /// 显存预估（MiB）= 权重 + mmproj + KV + 固定开销。
 /// `geom` 缺失（读不到 GGUF）时按权重+mmproj+固定开销算，即**下界**。
 pub fn estimate_vram_mb(
@@ -255,5 +297,15 @@ mod tests {
         // 无几何 → 下界（不含 KV）
         let low = estimate_vram_mb(767 * 1024 * 1024, 204 * 1024 * 1024, None, 2048);
         assert!(low < est);
+    }
+
+    #[test]
+    fn test_parse_smi_used_mb() {
+        assert_eq!(parse_smi_used_mb("4963\n"), Some(4963));
+        assert_eq!(parse_smi_used_mb("  3011  \n"), Some(3011));
+        // 多卡输出：取首行（与面板口径一致）
+        assert_eq!(parse_smi_used_mb("100\n200\n"), Some(100));
+        assert_eq!(parse_smi_used_mb("N/A"), None);
+        assert_eq!(parse_smi_used_mb(""), None);
     }
 }

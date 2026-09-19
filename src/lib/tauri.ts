@@ -59,6 +59,22 @@ export function rustUnloadAsr(): Promise<Record<string, unknown>> {
   return invoke("rust_unload_asr");
 }
 
+/**
+ * 加载前显存预检（只判定，不加载）。
+ * `ok=true` = 可以继续加载（`checked=false` 表示无法判定，同样放行 = fail-open）。
+ */
+export function rustCheckVram(name: string, device: string): Promise<{
+  checked: boolean;
+  ok: boolean;
+  need_mb: number | null;
+  free_mb: number | null;
+  total_mb: number | null;
+  used_mb: number | null;
+  reason: string;
+}> {
+  return invoke("rust_check_vram", { name, device });
+}
+
 // ============================================================
 // llama-server 子进程桥接（ASR 主力路线）
 // ============================================================

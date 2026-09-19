@@ -45,10 +45,14 @@ impl AsrRegistry {
         device: &str,
         on_stage: &mut dyn FnMut(&str),
     ) -> Result<(&'static str, String), String> {
-        // 记录本次请求（任意框架）：兜底加载跟随用户当前选择
-        crate::inference::llama_server::record_last_requested(name, device);
         let fw = self.framework_for_model(name)?;
-        self.load_model_with_stage(fw, name, device, on_stage)
+        let out = self.load_model_with_stage(fw, name, device, on_stage);
+        if out.is_ok() {
+            // 只在**成功后**记录「最近请求」（兜底加载跟随用户当前选择）。
+            // 失败不记录：否则热键/文件/API 兜底会反复重试同一个装不上的模型（每次都等满超时）。
+            crate::inference::llama_server::record_last_requested(name, device);
+        }
+        out
     }
 
     /// 加载「最近一次被请求」的 ASR 模型（注册表路由，保证互斥）——热键/文件/API 兜底用。
@@ -94,26 +98,15 @@ impl AsrRegistry {
         self.load_model_with_device(framework, name, "cuda")
     }
 
-    /// 带设备加载（cpu / cuda），透传到引擎的 load_model_with_device
+    /// 带设备加载（cpu / cuda）。
+    /// **唯一实现**：转发到带阶段回调版本——互斥与失败回滚只有一份代码，不会两条路走偏。
     pub fn load_model_with_device(
         &self,
         framework: &str,
         name: &str,
         device: &str,
     ) -> Result<(&'static str, String), String> {
-        // 1. 找目标引擎
-        let engine = self
-            .engine(framework)
-            .ok_or_else(|| format!("未知框架: {framework}"))?;
-
-        // 幂等判定交给引擎层（模型名相同≠设备/参数相同），注册表只负责互斥与路由。
-
-        // 2. 卸载其他框架的引擎（ASR 互斥：同一时间只一个）
-        let _ = self.slot.unload_others(framework);
-
-        // 3. 加载目标引擎（带设备）
-        engine.load_model_with_device(name, device)?;
-        Ok((engine.framework(), engine.current_model()))
+        self.load_model_with_stage(framework, name, device, &mut |_| {})
     }
 
     /// 带阶段回调的加载（驱动前端进度条）
@@ -132,6 +125,10 @@ impl AsrRegistry {
         // 幂等与身份验证交给引擎层（llama：running_matches 校验 model+采样+启动参数；
         // sherpa：模型+设备都相等才算幂等）。注册表只负责互斥与路由。
 
+        // 加载失败回滚用：**卸载前**记下正在服务的模型。
+        // 同框架换模型时旧进程也会被引擎层杀掉，所以必须在这一步之前抓。
+        let prev = self.slot.active().map(|(f, e)| (f, e.current_model()));
+
         // 互斥：先卸载其他框架（stage 带出被卸载的模型名，卸载前上报，时序与重构前一致）
         self.slot.unload_others_with(framework, &mut |_f, victim| {
             let stage = if victim.is_empty() {
@@ -142,8 +139,35 @@ impl AsrRegistry {
             on_stage(&stage);
         });
 
-        engine.load_model_with_stage_and_device(name, device, on_stage)?;
-        Ok((engine.framework(), engine.current_model()))
+        match engine.load_model_with_stage_and_device(name, device, on_stage) {
+            Ok(()) => Ok((engine.framework(), engine.current_model())),
+            Err(e) => Err(self.rollback_failed_load(prev, name, device, e)),
+        }
+    }
+
+    /// 加载失败回滚：把加载前能用的模型装回来（best-effort），并把结果并入错误信息。
+    ///
+    /// 为什么必须做：同域切换是「先卸旧 → 再装新」，新模型因显存/驱动起不来时，
+    /// 用户**原来能用的模型也会消失**。回滚用同一次请求的设备参数（旧模型的实际设备不额外追踪，
+    /// 失败时日志会写明，可人工重载）。
+    fn rollback_failed_load(
+        &self,
+        prev: Option<(&'static str, String)>,
+        target: &str,
+        device: &str,
+        err: String,
+    ) -> String {
+        let Some((framework, model)) = super::slot::rollback_target(prev, target) else {
+            return err;
+        };
+        log::warn!("[registry] {target} 加载失败（{err}），尝试回滚到 {model}");
+        let Some(engine) = self.engine(framework) else {
+            return format!("{err}；回滚 {model} 失败：框架 {framework} 未注册");
+        };
+        match engine.load_model_with_stage_and_device(&model, device, &mut |_| {}) {
+            Ok(()) => format!("{err}；已回滚到 {model}"),
+            Err(e) => format!("{err}；回滚 {model} 也失败: {e}"),
+        }
     }
 
     /// 卸载指定框架的引擎（未加载则 no-op）

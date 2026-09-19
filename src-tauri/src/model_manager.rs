@@ -648,6 +648,74 @@ fn entry_vram_estimate_mb(dir: &Path, entry: &crate::tts::spec::DownloadEntry) -
     ))
 }
 
+/// 加载前显存预检结论（命令层直接序列化给前端）。
+///
+/// 契约（前端弹框文案依赖，勿改）：
+/// - `ok = true` ⇒ 直接加载（**包括无法判定**：`checked = false` 时一律放行）
+/// - `ok = false` ⇒ 询问用户是否仍要加载，且**当且仅当** `reason == "insufficient"`（显存不足）
+///   其它任何原因（未知模型/文件不全/读不到显存/cpu）都不得返回 `ok = false` —— 预检只是提醒，绝不误拦。
+///
+/// 字段名是前后端协议（同 `model_download_progress` 的教训）：改字段必须同步前端 `rustCheckVram`。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VramCheck {
+    pub checked: bool,
+    pub ok: bool,
+    pub need_mb: Option<u64>,
+    pub free_mb: Option<u64>,
+    pub total_mb: Option<u64>,
+    pub used_mb: Option<u64>,
+    pub reason: &'static str,
+}
+
+impl VramCheck {
+    /// 放行（不判定或无需判定）
+    fn pass(reason: &'static str) -> Self {
+        Self {
+            checked: false,
+            ok: true,
+            need_mb: None,
+            free_mb: None,
+            total_mb: None,
+            used_mb: None,
+            reason,
+        }
+    }
+}
+
+/// 加载前显存预检：该模型上线需要多少 vs 当前可用多少。
+///
+/// 需求用与模型页「预计显存」**同一个估算**（权重 + mmproj + KV + 固定开销，见 `vram`），
+/// 故此处不再叠加额外余量。任何一环读不到 → fail-open（`ok = true`），由加载失败路径兜底。
+pub fn check_load_vram(name: &str, device: &str) -> VramCheck {
+    if device.trim().eq_ignore_ascii_case("cpu") {
+        return VramCheck::pass("cpu"); // 纯 CPU：不占显存
+    }
+    let Some(spec) = crate::tts::spec::ModelSpec::find(name) else {
+        return VramCheck::pass("unknown_model"); // 交给加载路径报「未知模型」
+    };
+    let dir = model_dir(name);
+    let Some(entry) = active_entry_of(spec) else {
+        return VramCheck::pass("need_unknown"); // 无条目声明 → 估不出
+    };
+    let Some(need_mb) = entry_vram_estimate_mb(&dir, entry) else {
+        return VramCheck::pass("need_unknown"); // 文件不全 → 不猜
+    };
+    let Some((total_mb, used_mb)) = crate::vram::gpu_mem_mb() else {
+        return VramCheck::pass("no_vram_info"); // 非 NVIDIA / 无权限 → 放行
+    };
+    let free_mb = total_mb.saturating_sub(used_mb);
+    let ok = need_mb <= free_mb;
+    VramCheck {
+        checked: true,
+        ok,
+        need_mb: Some(need_mb),
+        free_mb: Some(free_mb),
+        total_mb: Some(total_mb),
+        used_mb: Some(used_mb),
+        reason: if ok { "ok" } else { "insufficient" },
+    }
+}
+
 /// 该模型当前安装的条目：manifest 优先 → 默认条目（无条目的模型 → None）
 pub fn active_entry_of(
     spec: &'static crate::tts::spec::ModelSpec,
@@ -1353,6 +1421,38 @@ pub fn emit_models_state(app: &AppHandle) {
 #[cfg(test)]
 mod e2e_list_tests {
     use super::*;
+
+    /// 预检的**线格式**契约：前端按这些字段名读取（曾因 progress/percent 漂移导致界面永久转圈）
+    #[test]
+    fn vram_check_wire_format_is_frozen() {
+        let v = serde_json::to_value(check_load_vram("Qwen3-ASR-0.6B", "cpu")).expect("序列化");
+        for key in ["checked", "ok", "need_mb", "free_mb", "total_mb", "used_mb", "reason"] {
+            assert!(v.get(key).is_some(), "前端读取的字段缺失: {key}");
+        }
+        // fail-open 不变量：ok=false 只允许出现在"显存不足"
+        let unknown = serde_json::to_value(check_load_vram("不存在的模型", "cuda")).expect("序列化");
+        assert_eq!(unknown["ok"], serde_json::json!(true));
+        assert_ne!(unknown["reason"], serde_json::json!("insufficient"));
+    }
+
+    /// 预检的 fail-open 语义：无法判定/无需判定时必须放行（绝不能因为读不到显存而拦住加载）
+    #[test]
+    fn check_load_vram_fails_open() {
+        let cpu = check_load_vram("Qwen3-ASR-0.6B", "cpu");
+        assert!(!cpu.checked && cpu.ok, "cpu 必须放行");
+        assert_eq!(cpu.reason, "cpu");
+
+        let unknown = check_load_vram("不存在的模型", "cuda");
+        assert!(!unknown.checked && unknown.ok, "未知模型放行（由加载路径报错）");
+        assert_eq!(unknown.reason, "unknown_model");
+
+        // 已安装且可估算时，要么判定通过，要么判定不足——但绝不能是「checked 却 ok 无数字」
+        let real = check_load_vram("Qwen3-ASR-0.6B", "cuda");
+        if real.checked {
+            assert!(real.need_mb.unwrap_or(0) > 0, "判定必须带需求数字");
+            assert!(real.free_mb.is_some(), "判定必须带可用数字");
+        }
+    }
 
     /// 进度事件字段名是**前后端协议**：Rust 与前端 store 必须一致
     /// （曾因 progress/percent 漂移导致百分比永远为 null、界面永久转圈）

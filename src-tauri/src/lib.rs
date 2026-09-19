@@ -1,7 +1,6 @@
 #[allow(unused_imports)]
 pub mod audio;
 pub mod process_hidden;
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 mod app_state;
@@ -364,29 +363,30 @@ async fn get_vram_status() -> serde_json::Value {
     tauri::async_runtime::spawn_blocking(|| get_vram_status_sync()).await.unwrap_or_default()
 }
 
+/// 加载前显存预检（只读，不加载）：够不够 + 需要/可用/总量数字。
+///
+/// 前端据此决定是否弹「显存可能不足，仍要加载吗」——**够或无法判定都返回 `ok = true`**，
+/// 即预检永不阻塞加载（fail-open）；真正的兜底是加载失败的诊断（llama-server stderr 分类）。
+#[tauri::command]
+async fn rust_check_vram(name: String, device: String) -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(move || {
+        serde_json::to_value(crate::model_manager::check_load_vram(&name, &device)).unwrap_or_else(
+            |_| serde_json::json!({ "checked": false, "ok": true, "reason": "serialize_failed" }),
+        )
+    })
+    .await
+    // 阻塞池 panic（JoinError）也必须放行，否则前端会把「预检挂了」当成「显存不足」弹框
+    .unwrap_or_else(|_| serde_json::json!({ "checked": false, "ok": true, "reason": "join_error" }))
+}
+
 /// 同步实现（供 spawn_blocking 调用）
 fn get_vram_status_sync() -> serde_json::Value {
     let gpu = sidecar::detect_gpu();
     let total_mb = gpu.get("memoryMB").and_then(|v| v.as_u64()).unwrap_or(0);
 
-    // nvidia-smi 已用显存（总量，无需权限）
-    let mut smi_cmd = Command::new("nvidia-smi");
-    crate::process_hidden::hide_console_window(&mut smi_cmd);
-    let used_mb = smi_cmd
-        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .next()
-                    .and_then(|s| s.trim().parse::<u64>().ok())
-            } else {
-                None
-            }
-        })
-        .unwrap_or(0);
+    // nvidia-smi 已用显存（总量，无需权限）。读不到按 0 处理（保持面板既有语义）。
+    // 读取实现收敛在 `vram::gpu_mem_mb`：本命令与「加载前预检」共用同一份，不重复解析。
+    let used_mb = crate::vram::gpu_mem_mb().map(|(_, used)| used).unwrap_or(0);
 
     // 各框架进程显存（按 PID 查询）。
     // 关键：进程不存在（引擎已卸载/释放）时绝不能回退到"模型目录大小"估算——
@@ -1054,6 +1054,7 @@ pub fn run() {
             send_to_sidecar_safe,
             get_gpu_info,
             get_vram_status,
+            rust_check_vram,
             decode_audio_file,
             rust_list_audio_devices,
             rust_unload_sherpa_asr,

@@ -240,6 +240,10 @@ impl TtsEngine for SherpaTtsEngine {
         })?;
 
         let mut inner = self.inner.lock();
+        // 候选状态先写入再校验，校验失败必须回滚：否则 is_loaded()（= spec.is_some()）会**谎报已加载**
+        // ——明明模型不可用，界面却显示就绪，且用户原来加载的模型被顶掉。
+        let prev_spec = inner.spec;
+        let prev_provider = inner.provider.clone();
         inner.spec = Some(spec);
         // device → provider（修复旧实现 device 失效：CPU 选项真实生效）
         inner.provider = match device.trim().to_ascii_lowercase().as_str() {
@@ -247,7 +251,11 @@ impl TtsEngine for SherpaTtsEngine {
             _ => "cuda".to_string(),
         };
 
-        self.check_ready(&inner, spec)?;
+        if let Err(e) = self.check_ready(&inner, spec) {
+            inner.spec = prev_spec;
+            inner.provider = prev_provider;
+            return Err(e);
+        }
 
         // 语言对齐：当前语言不在描述符支持列表 → 切到 "en"（有则用）否则首个支持语言
         if !spec.languages.contains(&inner.language.as_str()) {
