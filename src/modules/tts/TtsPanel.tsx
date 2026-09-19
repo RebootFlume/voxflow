@@ -825,7 +825,7 @@ function VoiceSettingsPage() {
   const showFilter = !fixedVoice && (speakers.length > 12 || voiceLangs.length > 1);
 
   /** sid 越界（如持久化 voice="47" 但该模型只有 0..35）→ 高亮提示 + 一键改为第一个音色。
-   *  "default" 是引擎默认值哨兵，不算越界。 */
+   *  空串 = 用模型默认音色；早前版本的 "default" 哨兵也一并放行（迁移期兼容）。 */
   const voiceOutOfRange =
     !noModel &&
     !fixedVoice &&
@@ -1408,7 +1408,11 @@ function SynthesizePage() {
           />
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <span>{t(locale, "tts.voiceLabel")}: sid {tts.voice}</span>
+              {/* voice 为空 = 用模型默认音色（单音色模型 / 未挑选时）⇒ 不能渲染成 "sid " */}
+              <span>
+                {t(locale, "tts.voiceLabel")}:{" "}
+                {tts.voice ? `sid ${tts.voice}` : t(locale, "tts.voice.default")}
+              </span>
             </div>
             <Button size="sm" onClick={() => void doSynthesize()} disabled={!text.trim() || busy}>
               {busy ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Play className="mr-1.5 h-3.5 w-3.5" />}

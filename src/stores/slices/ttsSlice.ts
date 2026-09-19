@@ -33,7 +33,7 @@ export interface TtsSlice {
 }
 
 export const createTtsSlice = (set: (partial: Partial<TtsSlice> | ((s: TtsSlice) => Partial<TtsSlice>)) => void): TtsSlice => ({
-  tts: { model: "", device: "cpu", language: "zh", voice: "default", framework: "onnx", voiceMode: "preset" },
+  tts: { model: "", device: "cpu", language: "zh", voice: "", framework: "onnx", voiceMode: "preset" },
   ttsModelStatus: "idle",
   ttsTasks: [],
   ttsClone: { active: false, audioPath: "", referenceText: "", status: "idle", error: "" },

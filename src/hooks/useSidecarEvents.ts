@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { onSidecarEvent, rustSetTtsCloneVoice, rustTtsVoicesList, rustTtsVoiceUse, sendToSidecar } from "@/lib/tauri";
+import { onSidecarEvent, rustListTtsSpeakers, rustSetTtsCloneVoice, rustTtsVoicesList, rustTtsVoiceUse, sendToSidecar } from "@/lib/tauri";
 import { applyEngineStatus, applyAsrFrameworkFromRust, syncAsrFrameworkFromLoaded, resolveModelKind, runtimeKeyOf, ttsSupportsClone } from "@/lib/modelState";
 import { useAppStore, type EngineState } from "@/stores";
 import { t } from "@/lib/i18n";
@@ -232,6 +232,34 @@ export function useSidecarEvents() {
               if (typeof payload.framework === "string") {
                 store.setEngineStatus("tts", { framework: payload.framework });
               }
+              // 音色对齐：换了模型后把上一个模型遗留的 sid 纠正掉。
+              // 单音色 / 克隆模型的说话人列表为空 ⇒ 清空（= 用模型默认音色），否则界面会一直显示
+              // 上一个模型的 "sid 47"（用户实际看到的现象）；预设模型则对齐到该模型自己的列表。
+              // 与语言对齐同源（TtsPanel 的 LanguageSelector）：派生状态不能跨模型残留。
+              void (async () => {
+                try {
+                  const r = await rustListTtsSpeakers();
+                  const list = Array.isArray(r.speakers) ? r.speakers : [];
+                  const cur = useAppStore.getState().tts.voice;
+                  if (list.length === 0) {
+                    if (cur !== "") useAppStore.getState().updateTts({ voice: "" });
+                    return;
+                  }
+                  // `""` = 用模型默认音色（引擎收 sid 0，与第一个音色等价）⇒ 不动它，
+                  // 否则预设模型上永远保不住"默认音色"。非数字的旧值（如早前的 "default"）归一为空。
+                  if (cur === "") return;
+                  if (!/^\d+$/.test(cur)) {
+                    useAppStore.getState().updateTts({ voice: "" });
+                    return;
+                  }
+                  if (!list.some((s) => String(s.sid) === cur)) {
+                    useAppStore.getState().updateTts({ voice: String(list[0].sid) });
+                  }
+                } catch {
+                  // 列表拿不到时不动用户选择（下次就绪/切模型会再对齐）
+                }
+              })();
+
               // TTS 就绪后恢复选中音色：优先音色库记录的 active_id（voice_use 会一并下发参数），
               // 无 active_id 时保留原来的「按持久化 audioPath 恢复」兜底。
               // 按模型去重：model_ready / model_loaded 双事件只恢复一次
