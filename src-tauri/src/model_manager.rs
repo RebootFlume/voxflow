@@ -1006,6 +1006,44 @@ fn cleanup_undeclared(
     }
 }
 
+/// 描述符声明"必需"的**模型目录内**文件里当前缺失的（只有 SherpaTts 后端声明了该清单）。
+fn missing_required_files(spec: &crate::tts::spec::ModelSpec, dir: &Path) -> Vec<String> {
+    let crate::tts::spec::BackendSpec::SherpaTts(ts) = &spec.backend else {
+        return Vec::new();
+    };
+    ts.required_files
+        .iter()
+        .filter(|f| !dir.join(f).exists())
+        .map(|f| (*f).to_string())
+        .collect()
+}
+
+/// 描述符声明的**附加文件**（落模型根；如 Matcha 的 vocos-22khz-univ.onnx、ZipVoice 的
+/// vocos_24khz.onnx）里当前缺失的。它们与模型包分开下载，漏了就是"装不完整"。
+fn missing_extra_files(spec: &crate::tts::spec::ModelSpec, root: &Path) -> Vec<String> {
+    spec.extra_files
+        .iter()
+        .filter(|e| !root.join(e.dest_rel).exists())
+        .map(|e| e.dest_rel.to_string())
+        .collect()
+}
+
+/// 模型是否**装全**：目录像样（`is_complete` 的通用启发式）+ 声明的必需文件与附加文件都在。
+///
+/// 只靠 `is_complete` 会把"缺 vocoder 的 Matcha"也算成已下载（用户实际撞到的静默不完整）。
+/// 能否跳过整包下载：主体目录已完整、且声明的必需文件都在 —— 只缺附加文件（vocoder）时为真。
+///
+/// 与 `spec_installed` 的区别：这里**不要求**附加文件已存在（正因为缺它才要走"补下载"）。
+fn can_skip_archive(spec: &crate::tts::spec::ModelSpec, dir: &Path) -> bool {
+    is_complete(dir) && missing_required_files(spec, dir).is_empty()
+}
+
+fn spec_installed(spec: &crate::tts::spec::ModelSpec, dir: &Path, root: &Path) -> bool {
+    is_complete(dir)
+        && missing_required_files(spec, dir).is_empty()
+        && missing_extra_files(spec, root).is_empty()
+}
+
 fn run_download(
     app: AppHandle,
     spec: &'static crate::tts::spec::ModelSpec,
@@ -1032,7 +1070,13 @@ fn run_download(
             download_model_files(&app, spec, entry, cancel.clone())?;
             return Ok(dest);
         }
-        // 无条目的模型：整包下载（GitHub release 资产）后解压
+        // 无条目的模型：整包下载（GitHub release 资产）后解压。
+        // 但"主体已完整、只缺附加文件"时不重拖整包 —— 典型场景：描述符修好之前下载的 Matcha
+        // 缺 vocoder，重下整包要几百 MB，而这里只需补那 54MB。
+        if can_skip_archive(spec, &dest) {
+            log::info!("[download] {}：主体已完整，仅补附加文件", spec.name);
+            return Ok(dest);
+        }
         std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
         match spec.source {
             DownloadSource::GithubRelease(url) => {
@@ -1311,7 +1355,7 @@ pub fn list_models_payload(kind: Option<&str>) -> Value {
         let real_dir = resolve_download_dir(&root, spec.name);
         let state = if is_downloading(spec.name) {
             "downloading"
-        } else if is_complete(&real_dir) {
+        } else if spec_installed(spec, &real_dir, &root) {
             "downloaded"
         } else {
             "not_downloaded"
@@ -1785,5 +1829,47 @@ mod e2e_list_tests {
             let name = resolved.file_name().unwrap().to_string_lossy().to_string();
             assert_eq!(name, expect, "input={input}");
         }
+    }
+
+    #[test]
+    fn matcha_counts_installed_only_with_required_and_extra_files() {
+        use crate::tts::spec::ModelSpec;
+        let spec = ModelSpec::find("matcha-icefall-zh-baker").expect("matcha spec");
+
+        let root = std::env::temp_dir().join("voxflow_installed_root");
+        let dir = root.join("matcha-icefall-zh-baker");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 只有声学模型：is_complete 的启发式已满足（它要求模型文件 >1MB，用 set_len 造稀疏文件），
+        // 但必需文件（tokens/lexicon）还缺 ⇒ 未装全
+        let big = std::fs::File::create(dir.join("model-steps-3.onnx")).unwrap();
+        big.set_len(1_100_000).unwrap();
+        drop(big);
+        assert!(!spec_installed(&spec, &dir, &root), "缺 tokens/lexicon 不能算已下载");
+        assert_eq!(
+            missing_required_files(&spec, &dir),
+            vec!["tokens.txt".to_string(), "lexicon.txt".to_string()]
+        );
+
+        // 补齐模型目录，但模型根还缺 vocoder ⇒ 仍未装全（用户撞到的静默不完整）；
+        // 但此时"可以跳过整包"（正是因为缺 vocoder 才走补下载）
+        for f in ["tokens.txt", "lexicon.txt"] {
+            std::fs::write(dir.join(f), b"x").unwrap();
+        }
+        assert!(can_skip_archive(&spec, &dir), "主体完整、只缺附加文件 ⇒ 应跳过整包");
+        assert!(missing_required_files(&spec, &dir).is_empty());
+        assert_eq!(
+            missing_extra_files(&spec, &root),
+            vec!["vocos-22khz-univ.onnx".to_string()]
+        );
+        assert!(!spec_installed(&spec, &dir, &root), "缺 vocoder 不能算已下载");
+
+        // vocoder 到位才算装全
+        std::fs::write(root.join("vocos-22khz-univ.onnx"), b"x").unwrap();
+        assert!(missing_extra_files(&spec, &root).is_empty());
+        assert!(spec_installed(&spec, &dir, &root));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
