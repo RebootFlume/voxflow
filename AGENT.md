@@ -336,6 +336,22 @@ src-tauri/src/audio/
 
 ---
 
+### 规则 14：TTS 音色库（克隆音色）
+
+克隆音色统一走**库**：录音 / 上传的参考音频先入库成条目，之后一律用条目 id 选中（不要把参考音频散在会话状态里）。
+
+- 存储 `<data_root>/tts-voices/`：
+  - `voices.json`：条目索引（`{active_id, voices:[{id, name, note, reference_text, file, created_ms}]}`），**原子写**（临时文件 + rename）。
+  - `v-<毫秒>.<ext>`：条目音频；`ref-<毫秒>.wav`：未入库的录音草稿（`reference_audio::prune` 只保留最近 5 个）。
+  - 索引**只存相对文件名** ⇒ 便携版整体搬目录不失效（禁止把绝对路径写进索引——曾经就是这么写的）。
+- 命令：`rust_tts_voices_list` / `_voice_add` / `_voice_update` / `_voice_remove` / `_voice_use` / `rust_clear_tts_clone_voice`。
+- 两条顺序不变量（写反就是用户可见的 bug）：
+  1. **先引擎、后落库**：`voice_use` 必须等引擎 `set_clone_voice` 成功，才写 `active_id`；否则库里显示"已选中"而引擎里根本没有这份参数。
+  2. **取消要清两处**：`rust_clear_tts_clone_voice` = 引擎 `clear_clone_voice` + `active_id` 置空。只清引擎 ⇒ 下次 TTS 模型就绪时按 `active_id` 恢复，会把用户**刚取消的克隆装回来**。
+- 入库方式按来源区分（数据安全）：**我们自己的草稿**（`ref-*.wav`）→ 移走；**用户上传的文件** → 一律**复制**（移走 = 从用户自己的目录里凭空删除）。判定见 `voices::is_own_draft`。
+
+---
+
 ## 📋 开发流程
 
 1. **开发前**：阅读 `README.md` 了解项目架构

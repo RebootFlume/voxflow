@@ -61,6 +61,18 @@ pub fn save(dir: &Path, lib: &Library) -> Result<(), String> {
     std::fs::rename(&tmp, dir.join(INDEX_FILE)).map_err(|e| format!("提交音色库索引失败: {e}"))
 }
 
+/// 是否是我们自己的录音草稿（位于音色库目录内、名为 `ref-*.wav`）。
+///
+/// 区分它与"用户上传的文件"是**数据安全**问题：草稿是临时产物、可以移走；
+/// 用户自己的文件只能复制。
+fn is_own_draft(dir: &Path, source: &Path) -> bool {
+    source.starts_with(dir)
+        && source
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("ref-"))
+}
+
 /// 条目音频的绝对路径
 pub fn path_of(dir: &Path, voice: &Voice) -> PathBuf {
     dir.join(&voice.file)
@@ -81,9 +93,12 @@ fn ext_of(src: &Path) -> String {
         .unwrap_or_else(|| "wav".to_string())
 }
 
-/// 收进音色库：把 `source`（录音草稿或用户上传的文件）移入库内并落一条索引。
+/// 收进音色库：把 `source`（录音草稿或用户上传的文件）收进库内并落一条索引。
 ///
 /// 名称必填（"保存才进库、才有名字"是这套流程的地基）。
+///
+/// 收进来的方式按来源分两种（见 `is_own_draft`）：我们自己的录音草稿**移走**，
+/// 用户上传的文件**复制**——后者若被移走就是从用户自己的目录里凭空消失。
 pub fn add(
     dir: &Path,
     source: &Path,
@@ -117,10 +132,17 @@ pub fn add(
     };
 
     let dest = dir.join(&file);
-    if std::fs::rename(source, &dest).is_err() {
-        // 跨卷 rename 失败 → 复制后删源
+    if is_own_draft(dir, source) {
+        // 我们自己的录音草稿是临时文件 ⇒ 移走（省一次拷贝，也让草稿目录清空）
+        if std::fs::rename(source, &dest).is_err() {
+            // 跨卷 rename 失败 → 复制后删源
+            std::fs::copy(source, &dest).map_err(|e| format!("收进音色库失败: {e}"))?;
+            let _ = std::fs::remove_file(source);
+        }
+    } else {
+        // 用户自己的文件（"上传音频"给的）一律**复制**：
+        // 绝不能把用户的原文件搬离它原来的目录。
         std::fs::copy(source, &dest).map_err(|e| format!("收进音色库失败: {e}"))?;
-        let _ = std::fs::remove_file(source);
     }
 
     let voice = Voice {
@@ -253,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn add_moves_file_and_persists() {
+    fn add_moves_own_draft_and_persists() {
         let dir = tmp("add");
         let s = src(&dir, "ref-1.wav");
         let v = add(&dir, &s, "  小明  ", " 参考自录音 ", " 你好世界 ").unwrap();
@@ -266,6 +288,25 @@ mod tests {
         let lib = load(&dir);
         assert_eq!(lib.voices.len(), 1);
         assert_eq!(lib.voices[0].id, v.id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn add_copies_user_uploaded_file_instead_of_moving_it() {
+        let dir = tmp("upload_copy");
+        // 用户上传的文件在库目录**之外**（模拟 D:\我的录音\voice.wav）
+        let outside = dir.parent().unwrap().join(format!("user-voice-{}.wav", now_ms()));
+        std::fs::write(&outside, b"user-audio-bytes").unwrap();
+
+        let v = add(&dir, &outside, "我的录音", "", "参考文本").unwrap();
+
+        assert!(outside.is_file(), "用户上传的原文件必须还在原处（未被搬走）");
+        assert_eq!(std::fs::read(&outside).unwrap(), b"user-audio-bytes");
+        let inside = path_of(&dir, &v);
+        assert!(inside.is_file(), "库里要有自己的副本");
+        assert_eq!(std::fs::read(&inside).unwrap(), b"user-audio-bytes");
+
+        let _ = std::fs::remove_file(&outside);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
