@@ -27,6 +27,8 @@ pub struct RuntimePkg {
     pub framework: &'static str,
     /// 展示名
     pub name: &'static str,
+    /// 版本（展示用；与 url / inner_dir 中的版本号人工保持一致，改动时三处同改）
+    pub version: &'static str,
     /// GitHub release 资产 URL（下载地址）
     pub url: &'static str,
     /// 附加依赖包 URL（如 llama.cpp 官方把 CUDA 运行库拆成独立的 cudart-*.zip）
@@ -92,6 +94,7 @@ pub const RUNTIME_PACKAGES: &[RuntimePkg] = &[
     RuntimePkg {
         framework: "gguf",
         name: "llama-server",
+        version: "b10622",
         url: "https://github.com/ggml-org/llama.cpp/releases/download/b10622/llama-b10622-bin-win-cuda-12.4-x64.zip",
         aux_url: Some("https://github.com/ggml-org/llama.cpp/releases/download/b10622/cudart-llama-bin-win-cuda-12.4-x64.zip"),
         aux_dir: "", // 官方 cudart zip 平铺内容 → 直接放 llama-cpp 根（与主 exe 同目录）
@@ -106,6 +109,7 @@ pub const RUNTIME_PACKAGES: &[RuntimePkg] = &[
     RuntimePkg {
         framework: "onnx",
         name: "sherpa-onnx",
+        version: "v1.13.6",
         url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.6/sherpa-onnx-v1.13.6-cuda-12.x-cudnn-9.x-onnxruntime1.27.1-win-x64-cuda.tar.bz2",
         // NVIDIA 运行库随装（官方包不含）→ sherpa 自包含，不依赖 llama
         aux_url: Some(SHERPA_CUDA_AUX_URL),
@@ -199,6 +203,7 @@ pub fn runtime_status() -> serde_json::Value {
             json!({
                 "framework": p.framework,
                 "name": p.name,
+                "version": p.version,
                 "installed": state == "ready",
                 "state": state,
                 "missing": missing,
@@ -752,6 +757,22 @@ pub fn extract_archive(pkg_path: &Path, dest: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// 开发脚本 benchmarks/setup.ps1 与本表版本必须一致（防"改了 Rust 忘了改脚本"）。
+    /// 脚本里 sherpa 版本是 `$ver = "1.13.6"` 变量拼接（URL 中写 `v$ver`），
+    /// 故比对去掉前导 v 的裸版本号。
+    #[test]
+    fn test_dev_script_versions_match_packages() {
+        let script = include_str!("../../../benchmarks/setup.ps1");
+        for p in RUNTIME_PACKAGES {
+            let needle = p.version.trim_start_matches('v');
+            assert!(
+                script.contains(needle),
+                "benchmarks/setup.ps1 中找不到 {} 的版本 {needle}（两处已漂移）",
+                p.name
+            );
+        }
+    }
+
     #[test]
     fn test_packages_defined() {
         // 至少 2 个框架定义（llama + sherpa）
@@ -767,6 +788,10 @@ mod tests {
         let s = runtime_status();
         assert_eq!(s["status"], "runtime_status");
         assert!(s["packages"].as_array().unwrap().len() >= 2);
+        for p in s["packages"].as_array().unwrap() {
+            let ver = p["version"].as_str().unwrap_or("");
+            assert!(!ver.is_empty(), "每个框架包必须带版本字段: {p}");
+        }
         // 调试：打印实际目录与安装状态
         eprintln!("DEBUG libs_root: {}", libs_root().display());
         for p in RUNTIME_PACKAGES {

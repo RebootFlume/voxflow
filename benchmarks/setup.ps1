@@ -85,12 +85,15 @@ function Expand-Pkg($Pkg, $Dest) {
 if (-not $SkipLlama) {
     $llamaDir = Join-Path $Root "llama-cpp"
 
-    # 1. 预编译二进制（b10622 实测存在这些资产）
+    # 1. 预编译二进制（版本号只写下面这一处）
+    #    对齐对象：src-tauri/src/inference/runtime_download.rs 的 RUNTIME_PACKAGES（漂移由 Rust 测试拦截）
+    $llamaTag = "b10622"
+    $llamaRel = "https://github.com/ggml-org/llama.cpp/releases/download/$llamaTag"
     if ($Backend -eq "cuda") {
-        Get-File "https://github.com/ggml-org/llama.cpp/releases/download/b10622/llama-b10622-bin-win-cuda-12.4-x64.zip" "$Downloads\llama-bin.zip"
-        Get-File "https://github.com/ggml-org/llama.cpp/releases/download/b10622/cudart-llama-bin-win-cuda-12.4-x64.zip" "$Downloads\cudart.zip"
+        Get-File "$llamaRel/llama-$llamaTag-bin-win-cuda-12.4-x64.zip" "$Downloads\llama-bin.zip"
+        Get-File "$llamaRel/cudart-llama-bin-win-cuda-12.4-x64.zip" "$Downloads\cudart.zip"
     } else {
-        Get-File "https://github.com/ggml-org/llama.cpp/releases/download/b10622/llama-b10622-bin-win-cpu-x64.zip" "$Downloads\llama-bin.zip"
+        Get-File "$llamaRel/llama-$llamaTag-bin-win-cpu-x64.zip" "$Downloads\llama-bin.zip"
     }
     Expand-Pkg "$Downloads\llama-bin.zip" $llamaDir
     if (Test-Path "$Downloads\cudart.zip") { Expand-Pkg "$Downloads\cudart.zip" $llamaDir }
@@ -113,6 +116,7 @@ if (-not $SkipSherpa) {
     New-Item -ItemType Directory -Force -Path $sherpaDir | Out-Null
 
     # 1. 运行时（单文件 CLI：non-streaming-asr / non-streaming-tts）
+    # 版本对齐对象：src-tauri/src/inference/runtime_download.rs 的 RUNTIME_PACKAGES（漂移由 Rust 测试拦截）
     $ver = "1.13.6"
     $relBase = "https://github.com/k2-fsa/sherpa-onnx/releases/download"
     if ($Backend -eq "cuda") {
