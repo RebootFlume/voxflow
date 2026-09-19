@@ -765,8 +765,7 @@ function VoiceSettingsPage() {
   const ttsClone = useAppStore((s) => s.ttsClone);
   const updateTts = useAppStore((s) => s.updateTts);
   const updateTtsClone = useAppStore((s) => s.updateTtsClone);
-  const [speakers, setSpeakers] = useState<{ sid: number; name: string }[]>([]);
-  const [numSpeakers, setNumSpeakers] = useState(0);
+  const { speakers, numSpeakers } = useTtsSpeakers();
   /** 试听：合成中标志（局部态，与任务列表解耦）+ 失败信息 */
   const [previewBusy, setPreviewBusy] = useState(false);
   const [previewError, setPreviewError] = useState("");
@@ -795,8 +794,6 @@ function VoiceSettingsPage() {
   const sidHidden = mode === "clone" && cloneActive && vm?.overrides_preset === true;
   /** PresetAndClone：克隆激活时 sid 控件禁用（保留可见） */
   const sidDisabled = mode === "preset_and_clone" && cloneActive;
-  /** per_language（sid 按语言独立，如 Supertonic）：语言切换后重新拉取音色列表 */
-  const speakerLangDep = vm?.per_language === true ? tts.language : "";
   /** requires_text 缺省（旧 payload / 未声明）→ 保持必填 */
   const requiresText = vm?.requires_text !== false;
   /** 试听用 voice：单音色模型没有可切换 sid，直接用模型第一个音色 */
@@ -836,13 +833,6 @@ function VoiceSettingsPage() {
   const sidMin = speakers.length > 0 ? Math.min(...speakers.map((sp) => sp.sid)) : 0;
   const sidMax = speakers.length > 0 ? Math.max(...speakers.map((sp) => sp.sid)) : 0;
 
-  // 加载模型的说话人列表（per_language 模型随语言变化重新请求）
-  useEffect(() => {
-    void rustListTtsSpeakers().then((r) => {
-      setSpeakers(r.speakers ?? []);
-      setNumSpeakers(r.num_speakers ?? 0);
-    }).catch(() => {});
-  }, [tts.model, speakerLangDep]);
 
   // 卸载时清掉录音倒计时（录音计时器由 useVoiceLibrary 持有）
   function goModelManager() {
@@ -1216,6 +1206,35 @@ function useTtsModelInfo(model: string) {
   return useMemo(() => ttsModelInfoOf(items, model), [items, model]);
 }
 
+/**
+ * 当前模型的说话人列表（描述符驱动：`speakers.json` 优先，`per_language` 模型随语言重拉）。
+ *
+ * 音色网格与"音色"展示行共用这一份数据：两边各拉一次会出现名字与显示不一致（用户看到的
+ * "音色 sid 45" 就是展示行没拿名字）。
+ */
+function useTtsSpeakers() {
+  const model = useAppStore((s) => s.tts.model);
+  const language = useAppStore((s) => s.tts.language);
+  const info = useTtsModelInfo(model);
+  const langDep = info?.voice_mode?.per_language === true ? language : "";
+  const [speakers, setSpeakers] = useState<{ sid: number; name: string }[]>([]);
+  const [numSpeakers, setNumSpeakers] = useState(0);
+
+  useEffect(() => {
+    void rustListTtsSpeakers()
+      .then((r) => {
+        setSpeakers(r.speakers ?? []);
+        setNumSpeakers(r.num_speakers ?? 0);
+      })
+      .catch(() => {
+        setSpeakers([]);
+        setNumSpeakers(0);
+      });
+  }, [model, langDep]);
+
+  return { speakers, numSpeakers };
+}
+
 function LanguageSelector() {
   const locale = useAppStore((s) => s.locale);
   const language = useAppStore((s) => s.tts.language);
@@ -1237,7 +1256,10 @@ function LanguageSelector() {
     }
   }, [info, langs, updateTts]);
 
-  if (!info) return null;
+  // 未加载/未选中模型：不支持语言时不知道有哪些语言 ⇒ 不留空行，给一句"先加载模型"
+  if (!info) {
+    return <span className="text-xs text-muted-foreground">{t(locale, "tts.voice.needModel")}</span>;
+  }
   // 自动识别模式（如 Kokoro 中英混合）→ 不显示语言选择，改为提示
   if (info.language_mode === "auto") {
     return (
@@ -1298,6 +1320,18 @@ function SynthesizePage() {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const audio = useAudioPreview();
+  const { speakers } = useTtsSpeakers();
+  /** 引擎是否就绪：两个信号取"或"——`engines.tts`（modelState 约定的权威字段）与旧徽章
+   *  `ttsModelStatus`。二者都出自 sidecar 事件，而启动快照（status_snapshot）只同步 ASR，
+   *  单看一个信号可能在"引擎已就绪但事件漏收"时把按钮永久禁掉 ⇒ 任一为就绪即允许。 */
+  const ttsEngineReady = useAppStore((s) => s.engines.tts.status === "ready");
+  const canSynth = ttsEngineReady || ttsModelStatus === "ready";
+  /** 音色展示：名字优先（`speakers.json`，如 "xiaobei (晓北)"）；查不到名字（模型未加载 /
+   *  sid 不在当前模型列表）就显示「默认音色」——不能把一个裸 sid 当成"当前音色"展示。 */
+  const voiceText = (() => {
+    const name = speakers.find((s) => String(s.sid) === tts.voice)?.name;
+    return name ? name + " · sid " + tts.voice : t(locale, "tts.voice.default");
+  })();
 
   // 共享导出目录（与 ASR 转写共用一份）
   const { exportDir, setExportDir } = useExportDir();
@@ -1381,7 +1415,7 @@ function SynthesizePage() {
           <div className="flex h-10 items-center gap-4">
             <span className="w-20 shrink-0 text-sm font-medium">{t(locale, "tts.voice.label")}</span>
             <div className="flex flex-1 items-center gap-2 text-sm">
-              <span>{tts.voice ? `sid ${tts.voice}` : t(locale, "tts.voice.default")}</span>
+              <span>{voiceText}</span>
             </div>
           </div>
           <div className="flex h-10 items-center gap-4">
@@ -1408,13 +1442,19 @@ function SynthesizePage() {
           />
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              {/* voice 为空 = 用模型默认音色（单音色模型 / 未挑选时）⇒ 不能渲染成 "sid " */}
+              {/* 空值 / 名字查不到 ⇒ 显示「默认音色」，不渲染成 "sid " */}
               <span>
-                {t(locale, "tts.voiceLabel")}:{" "}
-                {tts.voice ? `sid ${tts.voice}` : t(locale, "tts.voice.default")}
+                {t(locale, "tts.voiceLabel")}: {voiceText}
               </span>
             </div>
-            <Button size="sm" onClick={() => void doSynthesize()} disabled={!text.trim() || busy}>
+            {!canSynth && (
+              <span className="text-[11px] text-muted-foreground">{t(locale, "tts.voice.needModel")}</span>
+            )}
+            <Button
+              size="sm"
+              onClick={() => void doSynthesize()}
+              disabled={!text.trim() || busy || !canSynth}
+            >
               {busy ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Play className="mr-1.5 h-3.5 w-3.5" />}
               {t(locale, "tts.synthesize")}
             </Button>

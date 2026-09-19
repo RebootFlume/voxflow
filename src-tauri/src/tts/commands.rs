@@ -165,7 +165,7 @@ fn synthesize_blocking(
         let guard = registry.lock();
         let engine = guard
             .active()
-            .ok_or("TTS model not loaded. Please load a model first.")?;
+            .ok_or("TTS 模型未加载，请先在「模型与设备」中加载模型")?;
         let audio = engine.synthesize(text, voice).map_err(|e| e.to_string())?;
         (audio.samples, audio.sample_rate)
     };
