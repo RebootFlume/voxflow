@@ -10,6 +10,26 @@ function idleEngine(): EngineState {
   return { framework: null, model: null, status: "idle", stage: null, error: null };
 }
 
+// ── 能力字段归一化（models_state 事件 → ModelItemState）──
+// 形状不合法 / 缺失一律保持 undefined：不塞默认值，避免掩盖上游缺字段（UI 侧各自兜底）。
+const LANGUAGE_MODES: NonNullable<ModelItemState["language_mode"]>[] = ["auto", "fixed", "select", "cloning"];
+const VOICE_MODES: NonNullable<ModelItemState["voice_mode"]>["type"][] = ["fixed", "preset", "clone", "preset_and_clone"];
+
+/** voice_mode 是对象：仅接受合法 type，浅拷 5 个字段（type + 4 个可选） */
+function pickVoiceMode(v: unknown): ModelItemState["voice_mode"] {
+  if (typeof v !== "object" || v === null) return undefined;
+  const o = v as Record<string, unknown>;
+  const type = o.type as NonNullable<ModelItemState["voice_mode"]>["type"];
+  if (!VOICE_MODES.includes(type)) return undefined;
+  return {
+    type,
+    count: typeof o.count === "number" ? o.count : undefined,
+    per_language: typeof o.per_language === "boolean" ? o.per_language : undefined,
+    requires_text: typeof o.requires_text === "boolean" ? o.requires_text : undefined,
+    overrides_preset: typeof o.overrides_preset === "boolean" ? o.overrides_preset : undefined,
+  };
+}
+
 export interface ModelsSlice {
   /** 启动阶段：booting = 显示启动 Splash，ready = 主界面 */
   startupPhase: "booting" | "ready";
@@ -86,6 +106,13 @@ export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: Mod
             totalBytes: prev?.totalBytes ?? null,
             sizeOnDiskGb: typeof m.size_on_disk_gb === "number" ? m.size_on_disk_gb : undefined,
             cancelRequested: prev?.cancelRequested ?? false,
+            // 能力字段（描述符驱动）：原样透传，缺失/非法保持 undefined
+            languages: Array.isArray(m.languages) ? (m.languages as string[]) : undefined,
+            language_mode: LANGUAGE_MODES.includes(m.language_mode as NonNullable<ModelItemState["language_mode"]>)
+              ? (m.language_mode as ModelItemState["language_mode"])
+              : undefined,
+            voice_mode: pickVoiceMode(m.voice_mode),
+            supports_clone: typeof m.supports_clone === "boolean" ? m.supports_clone : undefined,
           } satisfies ModelItemState;
         }),
       },

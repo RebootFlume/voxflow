@@ -86,15 +86,32 @@ function VoiceSettingsPage() {
   const [speakers, setSpeakers] = useState<{ sid: number; name: string }[]>([]);
   const [numSpeakers, setNumSpeakers] = useState(0);
 
-  // 加载模型的说话人列表
+  // 音色控件由描述符能力字段驱动（决策 A：models.items 单一来源），不再由 numSpeakers>1 派生嗅探。
+  // vm 缺失（旧 payload / 未声明能力）→ 各开关退回既有行为（等价 preset 路径 + supports_clone 兜底）。
+  const info = useTtsModelInfo(tts.model);
+  const vm = info?.voice_mode;
+  const mode = vm?.type;
+  const cloneActive = ttsClone.active;
+  /** Fixed（单音色）：隐藏音色遍历/网格，改为固定音色名文本。
+   *  vm 缺失（旧 payload）时按方案 §4.2 的兜底判定：无克隆能力且音色数 ≤1 → 视为单音色模型。 */
+  const fixedVoice = mode === "fixed" || (vm === undefined && info?.supports_clone === false && numSpeakers <= 1);
+  /** Clone / PresetAndClone：显示克隆卡片；vm 缺失时退回 supports_clone */
+  const isCloningModel =
+    mode === "clone" || mode === "preset_and_clone" || (vm === undefined && info?.supports_clone === true);
+  /** Clone + overrides_preset：克隆激活后隐藏 sid 控件（不是禁用） */
+  const sidHidden = mode === "clone" && cloneActive && vm?.overrides_preset === true;
+  /** PresetAndClone：克隆激活时 sid 控件禁用（保留可见） */
+  const sidDisabled = mode === "preset_and_clone" && cloneActive;
+  /** per_language（sid 按语言独立，如 Supertonic）：语言切换后重新拉取音色列表 */
+  const speakerLangDep = vm?.per_language === true ? tts.language : "";
+
+  // 加载模型的说话人列表（per_language 模型随语言变化重新请求）
   useEffect(() => {
     void rustListTtsSpeakers().then((r) => {
       setSpeakers(r.speakers ?? []);
       setNumSpeakers(r.num_speakers ?? 0);
     }).catch(() => {});
-  }, [tts.model]);
-
-  const isCloningModel = useTtsModelInfo(tts.model)?.supports_clone ?? false;
+  }, [tts.model, speakerLangDep]);
 
   async function handlePickAudio() {
     const dialog = await import("@tauri-apps/plugin-dialog");
@@ -140,7 +157,10 @@ function VoiceSettingsPage() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {speakers.length > 0 ? (
+          {fixedVoice ? (
+            // Fixed（单音色模型）：不渲染音色遍历，显示固定音色名
+            <p className="text-sm font-medium">{speakers[0]?.name ?? t(locale, "tts.voice.default")}</p>
+          ) : speakers.length > 0 ? (
             <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-2">
               {speakers.map((sp) => {
                 const selected = tts.voice === String(sp.sid);
@@ -168,7 +188,7 @@ function VoiceSettingsPage() {
           ) : (
             <p className="text-xs text-muted-foreground">{t(locale, "tts.voice.noSpeakers")}</p>
           )}
-          {numSpeakers > 1 && (
+          {!fixedVoice && numSpeakers > 1 && !sidHidden && (
             <div className="flex items-center gap-2 mt-3 pt-3 border-t">
               <span className="text-xs text-muted-foreground">sid:</span>
               <Input
@@ -176,6 +196,7 @@ function VoiceSettingsPage() {
                 min={0}
                 max={numSpeakers - 1}
                 value={tts.voice}
+                disabled={sidDisabled}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
                   const v = e.target.value;
                   if (v !== "") updateTts({ voice: v });
@@ -188,7 +209,7 @@ function VoiceSettingsPage() {
         </CardContent>
       </Card>
 
-      {/* 语音克隆（仅 ZipVoice / PocketTts 模型显示） */}
+      {/* 语音克隆（voice_mode.type = clone / preset_and_clone 时显示） */}
       {isCloningModel && (
         <Card>
           <CardHeader>
