@@ -3,6 +3,7 @@ pub mod audio;
 pub mod process_hidden;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 mod app_state;
 #[allow(unused_imports)]
 pub mod clipboard;
@@ -25,10 +26,12 @@ pub mod tts;
 #[allow(unused_imports)]
 pub mod api_server;
 
+use parking_lot::Mutex;
 use tauri::Emitter;
 use tauri::Manager;
 
 use crate::app_state::AppState;
+use crate::tts::registry::TtsRegistry;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -41,8 +44,10 @@ fn set_hotkey(app: tauri::AppHandle, hotkey: String) -> Result<(), String> {
 }
 
 /// 模型是否使用中：按注册表 kind（与前端 modelState.resolveModelKind 一致）判定对应引擎
-fn is_model_in_use(state: &AppState, name: &str) -> bool {
-    match model_manager::find_model_info(name).map(|i| i.kind()) {
+///
+/// 取 `tts` 句柄而非 `&AppState`：命令侧需把本函数移入阻塞池（State 不能跨线程边界）。
+fn is_model_in_use(tts: &Arc<Mutex<TtsRegistry>>, name: &str) -> bool {
+    match crate::tts::spec::ModelSpec::find(name).map(|i| i.kind.as_str()) {
         // ASR：查 registry 当前加载引擎是否匹配该模型（统一路由，未来 PyTorch 自动生效）
         Some("asr") => {
             let r = crate::inference::registry::registry();
@@ -50,7 +55,7 @@ fn is_model_in_use(state: &AppState, name: &str) -> bool {
                 .map(|e| e.current_model() == name)
                 .unwrap_or(false)
         }
-        Some("tts") => state.tts.lock().is_loaded(),
+        Some("tts") => tts.lock().is_loaded(),
         _ => false, // 未知模型：无法判定，视为未使用
     }
 }
@@ -61,13 +66,28 @@ fn emit_error(app: &tauri::AppHandle, msg: String) {
 
 /// 安全版本：所有 action 走 Rust 原生（UI 无感，协议与原 Python sidecar 一致）
 ///
-/// async：Tauri 在 async 运行时执行（非主线程），load_model 等耗时 action
-/// （sherpa/llama 模型加载数秒）不再阻塞主线程 → 切换模型不卡 UI。
+/// async + 阻塞池：Tauri 不在主线程执行，且 action 分发整体下沉 `spawn_blocking`
+/// （load_model 等耗时 action 含起子进程 / 等端口 / 触达引擎，且会构造阻塞 client）。
 #[tauri::command]
 async fn send_to_sidecar_safe(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     payload: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    // State 不能跨线程边界移动：先取出 tts 句柄，整个分发下沉阻塞池。
+    // R2 根因：各 action 触达 registry / 引擎（会构造 reqwest::blocking::Client），
+    // 在 tokio 异步上下文里构造/析构自带 Runtime 的 client 会 panic。
+    let tts = state.tts.clone();
+    tauri::async_runtime::spawn_blocking(move || dispatch_sidecar_action(&app, &tts, &payload))
+        .await
+        .map_err(|e| format!("sidecar task failed: {e}"))?
+}
+
+/// `send_to_sidecar_safe` 的同步实现（阻塞池内执行；action 分发，协议与原 Python sidecar 一致）
+fn dispatch_sidecar_action(
+    app: &tauri::AppHandle,
+    tts: &Arc<Mutex<TtsRegistry>>,
+    payload: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let action = payload.get("action").and_then(|a| a.as_str()).unwrap_or("");
     match action {
@@ -174,7 +194,7 @@ async fn send_to_sidecar_safe(
         }
         "delete_model" => {
             let name = payload.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            if is_model_in_use(&state, &name) {
+            if is_model_in_use(tts, &name) {
                 let msg = format!("model in use: {name}");
                 emit_error(&app, msg.clone());
                 return Ok(serde_json::json!({"status": "error", "msg": msg}));
@@ -201,9 +221,9 @@ async fn send_to_sidecar_safe(
             }
             // 通知前端开始加载
             let _ = app.emit("sidecar://event", serde_json::json!({"status": "model_loading", "model": name}));
-            // 查找模型信息
-            let info = match model_manager::find_model_info(name) {
-                Some(i) => i.clone(),
+            // 查找模型描述符（单一真源：tts::spec::SPECS）
+            let spec = match crate::tts::spec::ModelSpec::find(name) {
+                Some(i) => i,
                 None => {
                     let msg = format!("unknown model: {name}");
                     emit_error(&app, msg.clone());
@@ -212,21 +232,25 @@ async fn send_to_sidecar_safe(
             };
             let dir = model_manager::model_dir(name);
             // 根据格式查找主模型文件
-            let main_file = match model_manager::find_main_model_file(&dir, info.format()) {
+            let main_file = match model_manager::find_main_model_file(&dir, &spec.format) {
                 Some(f) => f,
                 None => {
-                    let msg = format!("model file not found for {name} (format: {:?})", info.format());
+                    let msg = format!("model file not found for {name} (format: {:?})", spec.format);
                     let _ = app.emit("sidecar://event", serde_json::json!({"status": "model_not_downloaded", "model": name, "msg": msg}));
                     return Ok(serde_json::json!({"status": "error", "msg": msg}));
                 }
             };
-            // 根据格式加载到对应引擎（经 registry 统一路由 + ASR 互斥）
-            match info.format() {
-                model_manager::ModelFormat::Gguf => {
-                    // GGUF → llama-server（ASR 主引擎）
+            // 按描述符 kind 路由到所属域；框架由 registry 从描述符推导（命令层不再写框架字面量）
+            match spec.kind {
+                crate::tts::spec::ModelKind::Asr => {
                     let registry = crate::inference::registry::registry();
-                    match registry.load_model_with_device("gguf", &name, &device) {
-                        Ok((_, loaded_name)) => {
+                    // 错误文案沿用描述符后端（与重构前 GGUF / sherpa ASR 两类文案一致）
+                    let prefix = match &spec.backend {
+                        crate::tts::spec::BackendSpec::Llama(_) => "GGUF 引擎加载失败",
+                        _ => "sherpa ASR 加载失败",
+                    };
+                    match registry.load_asr_by_name(name, device, &mut |_| {}) {
+                        Ok((_fw, loaded_name)) => {
                             let _ = app.emit("sidecar://event", serde_json::json!({
                                 "status": "model_loaded",
                                 "model": loaded_name,
@@ -234,41 +258,20 @@ async fn send_to_sidecar_safe(
                             }));
                         }
                         Err(e) => {
-                            eprintln!("[load_model] llama-server load failed: {e}");
+                            eprintln!("[load_model] ASR 加载失败({}): {e}", spec.id);
                             let _ = app.emit("sidecar://event", serde_json::json!({
                                 "status": "model_error",
                                 "model": name,
-                                "msg": format!("GGUF 引擎加载失败: {e}"),
+                                "msg": format!("{prefix}: {e}"),
                             }));
                         }
                     }
                 }
-                model_manager::ModelFormat::Onnx if info.kind() == "asr" => {
-                    // ONNX + ASR → sherpa-onnx websocket server（低端设备引擎）
-                    let registry = crate::inference::registry::registry();
-                    match registry.load_model_with_device("onnx", &name, &device) {
-                        Ok((_, loaded_name)) => {
-                            let _ = app.emit("sidecar://event", serde_json::json!({
-                                "status": "model_loaded",
-                                "model": loaded_name,
-                                "device": device,
-                            }));
-                        }
-                        Err(e) => {
-                            eprintln!("[load_model] sherpa ASR load failed: {e}");
-                            let _ = app.emit("sidecar://event", serde_json::json!({
-                                "status": "model_error",
-                                "model": name,
-                                "msg": format!("sherpa ASR 加载失败: {e}"),
-                            }));
-                        }
-                    }
-                }
-                model_manager::ModelFormat::Onnx => {
-                    // ONNX + TTS → TtsRegistry（按描述符路由，经 State<AppState>）
-                    eprintln!("[load_model] ONNX TTS: {}", main_file.display());
-                    let guard = state.tts.lock();
-                    match guard.load(&name, device) {
+                crate::tts::spec::ModelKind::Tts => {
+                    // TTS → TtsRegistry（按描述符路由，经阻塞池传入的 tts 句柄）
+                    eprintln!("[load_model] TTS: {}", main_file.display());
+                    let guard = tts.lock();
+                    match guard.load(name, device) {
                         Ok((_fw, loaded)) => {
                             let _ = app.emit("sidecar://event", serde_json::json!({
                                 "status": "model_ready",
@@ -296,7 +299,7 @@ async fn send_to_sidecar_safe(
             let host = payload.get("host").and_then(|v| v.as_str()).unwrap_or("127.0.0.1").to_string();
             let port = payload.get("port").and_then(|v| v.as_u64()).unwrap_or(9870) as u16;
             let api_key = payload.get("api_key").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let cfg = crate::api_server::ApiConfig { host, port, api_key, tts: state.tts.clone() };
+            let cfg = crate::api_server::ApiConfig { host, port, api_key, tts: tts.clone() };
             match crate::api_server::start(cfg) {
                 Ok(()) => {
                     let _ = app.emit("sidecar://event", serde_json::json!({"status": "api_started", "port": port}));
@@ -322,9 +325,14 @@ async fn send_to_sidecar_safe(
 
 
 /// 前端同步查询 GPU 信息（nvidia-smi，<100ms，不依赖 Python）
+///
+/// async + 阻塞池：nvidia-smi 是起子进程，不得在主线程内联（与 get_vram_status 同模板）。
+/// 无 State → 返回类型保持不变。
 #[tauri::command]
-fn get_gpu_info() -> serde_json::Value {
-    sidecar::detect_gpu()
+async fn get_gpu_info() -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(sidecar::detect_gpu)
+        .await
+        .unwrap_or_default()
 }
 
 /// 查询显存状态：总显存 + 已用 + 各推理框架占用（按 PID 过滤 nvidia-smi）
@@ -487,16 +495,23 @@ fn pathbuf_size_mb(dir: std::path::PathBuf) -> Option<u64> {
 /// Rust 原生音频解码（不依赖 Python）
 /// 输入：文件路径，输出：16kHz mono float32 samples + 时长
 /// 多格式：WAV 走 hound，其他走 ffmpeg 子进程
+///
+/// async + 阻塞池：读盘 + ffmpeg 子进程（含等超时）不可占主线程。
+/// 无 State → 返回类型保持不变（仍为 Result，错误语义不变）。
 #[tauri::command]
-fn decode_audio_file(path: String) -> Result<serde_json::Value, String> {
-    let data = std::fs::read(&path).map_err(|e| format!("读取文件失败: {e}"))?;
-    let (samples, rate) = audio::decode_any(&data, std::path::Path::new(&path))?;
-    let duration = samples.len() as f64 / rate as f64;
-    Ok(serde_json::json!({
-        "samples": samples,
-        "sample_rate": rate,
-        "duration": (duration * 100.0).round() / 100.0,
-    }))
+async fn decode_audio_file(path: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let data = std::fs::read(&path).map_err(|e| format!("读取文件失败: {e}"))?;
+        let (samples, rate) = audio::decode_any(&data, std::path::Path::new(&path))?;
+        let duration = samples.len() as f64 / rate as f64;
+        Ok(serde_json::json!({
+            "samples": samples,
+            "sample_rate": rate,
+            "duration": (duration * 100.0).round() / 100.0,
+        }))
+    })
+    .await
+    .map_err(|e| format!("解码任务失败: {e}"))?
 }
 
 // ============================================================
@@ -622,9 +637,14 @@ async fn rust_stop_llama_server() -> Result<serde_json::Value, String> {
 }
 
 /// 查询 llama-server 状态
+///
+/// async + 阻塞池：is_loaded 内含 HTTP /health 健康检查 + 子进程探测。
+/// 无 State → 返回类型保持不变。
 #[tauri::command]
-fn rust_llama_server_status() -> serde_json::Value {
-    inference::commands::llama_server_status()
+async fn rust_llama_server_status() -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(inference::commands::llama_server_status)
+        .await
+        .unwrap_or_default()
 }
 
 /// 统一 ASR 加载请求号：前端用它丢弃旧请求的迟到事件（只认最新 reqId）
@@ -903,109 +923,19 @@ async fn download_runtime(
 }
 
 /// 测试 TTS 模型加载（打印输入输出 tensor 名称）
+///
+/// async + 阻塞池：模型加载含起子进程 / 等就绪，不可占主线程。
+/// 有 State → 保持返回 Result，业务失败仍是 Err（与原语义一致）。
 #[tauri::command]
-fn rust_test_tts_model(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let guard = state.tts.lock();
-    let (_fw, name) = guard.load("Kokoro-v1_0", "cpu")?;
-    Ok(serde_json::json!({"status": "loaded", "model": name, "device": "cpu"}))
-}
-
-// ============================================================
-// Hugging Face 模型下载命令
-// ============================================================
-
-/// 从 Hugging Face 下载模型文件
-#[tauri::command]
-fn hf_download_file(
-    model_id: String,
-    filename: String,
-    token: Option<String>,
-    cache_dir: Option<String>,
-) -> Result<serde_json::Value, String> {
-    let mut config = download::DownloadConfig::new(&model_id, &filename)
-        .with_config_token();
-
-    if let Some(t) = token {
-        config = config.with_token(t);
-    }
-
-    if let Some(dir) = cache_dir {
-        config = config.with_cache_dir(std::path::PathBuf::from(dir));
-    }
-
-    let downloader = download::SyncDownloader::new(&config)
-        .map_err(|e| e.to_string())?;
-
-    let path = downloader
-        .download_file(&config)
-        .map_err(|e| e.to_string())?;
-
-    Ok(serde_json::json!({
-        "path": path.to_string_lossy(),
-        "model_id": model_id,
-        "filename": filename,
-    }))
-}
-
-/// 从 Hugging Face 下载模型文件并返回内容（JSON 字符串）
-#[tauri::command]
-fn hf_download_as_string(
-    model_id: String,
-    filename: String,
-    token: Option<String>,
-) -> Result<serde_json::Value, String> {
-    let mut config = download::DownloadConfig::new(&model_id, &filename)
-        .with_config_token();
-
-    if let Some(t) = token {
-        config = config.with_token(t);
-    }
-
-    let downloader = download::SyncDownloader::new(&config)
-        .map_err(|e| e.to_string())?;
-
-    let content = downloader
-        .download_as_string(&config)
-        .map_err(|e| e.to_string())?;
-
-    Ok(serde_json::json!({
-        "content": content,
-        "model_id": model_id,
-        "filename": filename,
-    }))
-}
-
-/// 批量下载多个文件
-#[tauri::command]
-fn hf_download_multiple(
-    model_id: String,
-    filenames: Vec<String>,
-    token: Option<String>,
-) -> Result<serde_json::Value, String> {
-    let mut config = download::DownloadConfig::new(&model_id, "")
-        .with_config_token();
-
-    if let Some(t) = token {
-        config = config.with_token(t);
-    }
-
-    let downloader = download::SyncDownloader::new(&config)
-        .map_err(|e| e.to_string())?;
-
-    let paths = downloader
-        .download_files(&model_id, &filenames)
-        .map_err(|e| e.to_string())?;
-
-    let paths_str: Vec<String> = paths
-        .iter()
-        .map(|p| p.to_string_lossy().to_string())
-        .collect();
-
-    Ok(serde_json::json!({
-        "paths": paths_str,
-        "model_id": model_id,
-        "count": paths.len(),
-    }))
+async fn rust_test_tts_model(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let registry = state.tts.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let guard = registry.lock();
+        let (_fw, name) = guard.load("Kokoro-v1_0", "cpu")?;
+        Ok(serde_json::json!({"status": "loaded", "model": name, "device": "cpu"}))
+    })
+    .await
+    .map_err(|e| format!("测试任务失败: {e}"))?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1079,9 +1009,6 @@ pub fn run() {
             tts::commands::rust_clear_tts_clone_voice,
             tts::commands::rust_list_tts_speakers,
             rust_test_tts_model,
-            hf_download_file,
-            hf_download_as_string,
-            hf_download_multiple,
             persistence::read_data_file,
             persistence::write_data_file,
             persistence::remove_data_file,

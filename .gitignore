@@ -31,3 +31,6 @@ log.txt
 *.wav
 nul
 dist-bundle/
+
+# Python（护栏脚本运行产物）
+__pycache__/

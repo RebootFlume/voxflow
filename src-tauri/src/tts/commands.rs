@@ -71,40 +71,63 @@ pub async fn rust_load_tts_model(
 }
 
 /// 卸载当前 TTS 模型（释放引擎，可随后删除模型）
+///
+/// async + 阻塞池：卸载含杀子进程 + 等端口关闭，不可占主线程。
 #[tauri::command]
-pub fn rust_unload_tts_model(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    state.tts.lock().unload()?;
-    Ok(serde_json::json!({ "status": "unloaded" }))
+pub async fn rust_unload_tts_model(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let registry = state.tts.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        registry.lock().unload()?;
+        Ok(serde_json::json!({ "status": "unloaded" }))
+    })
+    .await
+    .map_err(|e| format!("unload task failed: {e}"))?
 }
 
 /// 设置语音克隆参数（参考音频 + 参考文本；仅克隆模型支持，其余引擎默认拒绝）
+///
+/// async + 阻塞池：写参考音频 + 引擎侧克隆（触达引擎，可能起子进程）。
 #[tauri::command]
-pub fn rust_set_tts_clone_voice(
+pub async fn rust_set_tts_clone_voice(
     state: State<'_, AppState>,
     audio_path: String,
     reference_text: String,
 ) -> Result<serde_json::Value, String> {
-    let guard = state.tts.lock();
-    let engine = guard.active().ok_or("TTS 模型未加载")?;
-    engine
-        .set_clone_voice(std::path::Path::new(&audio_path), &reference_text)
-        .map_err(|e| e.to_string())?;
-    Ok(serde_json::json!({
-        "status": "ok",
-        "reference_audio": audio_path,
-        "reference_text": reference_text,
-    }))
+    let registry = state.tts.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let guard = registry.lock();
+        let engine = guard.active().ok_or("TTS 模型未加载")?;
+        engine
+            .set_clone_voice(std::path::Path::new(&audio_path), &reference_text)
+            .map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({
+            "status": "ok",
+            "reference_audio": audio_path,
+            "reference_text": reference_text,
+        }))
+    })
+    .await
+    .map_err(|e| format!("clone voice task failed: {e}"))?
 }
 
 /// 清除语音克隆参数（回到预设音色模式）
+///
+/// async + 阻塞池：引擎状态变更（与 set_clone_voice 同上下文，避免异步体内触达引擎）。
 #[tauri::command]
-pub fn rust_clear_tts_clone_voice(
+pub async fn rust_clear_tts_clone_voice(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    if let Some(engine) = state.tts.lock().active() {
-        engine.clear_clone_voice();
-    }
-    Ok(serde_json::json!({ "status": "ok" }))
+    let registry = state.tts.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(engine) = registry.lock().active() {
+            engine.clear_clone_voice();
+        }
+        Ok(serde_json::json!({ "status": "ok" }))
+    })
+    .await
+    .map_err(|e| format!("clear clone voice task failed: {e}"))?
 }
 
 /// TTS 语音合成并保存为 WAV 文件（端到端：文本 → 波形；采样率取引擎真实输出）
@@ -196,41 +219,58 @@ fn synthesize_blocking(
 }
 
 /// 切换 TTS 语言（按模型描述符校验；不在命令层硬编码白名单）
+///
+/// async + 阻塞池：切换 voice embedding 会触达引擎。
 #[tauri::command]
-pub fn rust_set_tts_language(
+pub async fn rust_set_tts_language(
     state: State<'_, AppState>,
     language: String,
 ) -> Result<serde_json::Value, String> {
-    let lang = language.trim().to_lowercase();
-    let guard = state.tts.lock();
-    let engine = guard.active().ok_or("TTS 模型未加载")?;
-    engine.set_language(&lang).map_err(|e| e.to_string())?;
-    Ok(serde_json::json!({ "language": lang }))
+    let registry = state.tts.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let lang = language.trim().to_lowercase();
+        let guard = registry.lock();
+        let engine = guard.active().ok_or("TTS 模型未加载")?;
+        engine.set_language(&lang).map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({ "language": lang }))
+    })
+    .await
+    .map_err(|e| format!("set language task failed: {e}"))?
 }
 
 /// 查询当前 TTS 模型的说话人列表（描述符驱动：speakers.json 优先，数量 = 列表长度）
+///
+/// async + 阻塞池：扫描 voices 目录（文件 IO）。
+/// 有 State → 返回 `Result`；业务性失败（未知模型 / 空列表）仍是 `Ok`，形状不变。
 #[tauri::command]
-pub fn rust_list_tts_speakers(state: State<'_, AppState>) -> serde_json::Value {
-    let guard = state.tts.lock();
-    let model = guard.loaded_model();
-    let Some(spec) = ModelSpec::find(&model).filter(|s| s.kind == ModelKind::Tts) else {
-        return serde_json::json!({ "model": model, "num_speakers": 0, "speakers": [] });
-    };
-    let speakers = match spec.voice_mode {
-        VoiceMode::Preset(p) | VoiceMode::PresetAndClone(p, _) => {
-            speaker_list(&guard.model_dir(spec.id), p)
-        }
-        _ => Vec::new(),
-    };
-    let entries: Vec<serde_json::Value> = speakers
-        .iter()
-        .map(|(sid, name)| serde_json::json!({ "sid": sid, "name": name }))
-        .collect();
-    serde_json::json!({
-        "model": spec.name,
-        "num_speakers": entries.len(),
-        "speakers": entries,
+pub async fn rust_list_tts_speakers(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let registry = state.tts.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let guard = registry.lock();
+        let model = guard.loaded_model();
+        let Some(spec) = ModelSpec::find(&model).filter(|s| s.kind == ModelKind::Tts) else {
+            return Ok(serde_json::json!({ "model": model, "num_speakers": 0, "speakers": [] }));
+        };
+        let speakers = match spec.voice_mode {
+            VoiceMode::Preset(p) | VoiceMode::PresetAndClone(p, _) => {
+                speaker_list(&guard.model_dir(spec.id), p)
+            }
+            _ => Vec::new(),
+        };
+        let entries: Vec<serde_json::Value> = speakers
+            .iter()
+            .map(|(sid, name)| serde_json::json!({ "sid": sid, "name": name }))
+            .collect();
+        Ok(serde_json::json!({
+            "model": spec.name,
+            "num_speakers": entries.len(),
+            "speakers": entries,
+        }))
     })
+    .await
+    .map_err(|e| format!("list speakers task failed: {e}"))?
 }
 
 // ─── 辅助 ──────────────────────────────────────────────────────────────────

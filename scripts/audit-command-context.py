@@ -24,21 +24,9 @@ import sys
 import pathlib
 
 # ── 待修白名单：已知违规 + 原因。修完后**必须删除条目**（否则脚本报"白名单过期"）──────────
-PENDING: dict[str, str] = {
-    "get_gpu_info": "R1：起 nvidia-smi 子进程",
-    "decode_audio_file": "R1：起 ffmpeg 子进程解码",
-    "rust_llama_server_status": "R1：is_loaded 内含 HTTP 健康检查",
-    "rust_test_tts_model": "R1：起子进程试听合成长度",
-    "rust_unload_tts_model": "R1：卸载含杀进程 + 等端口关闭",
-    "rust_set_tts_clone_voice": "R1：写参考音频 + 引擎侧克隆",
-    "rust_clear_tts_clone_voice": "R1：清克隆 + 引擎状态变更",
-    "rust_set_tts_language": "R1：切换 voice embedding（触达引擎）",
-    "rust_list_tts_speakers": "R1：扫描 voices 目录（文件 IO）",
-    "send_to_sidecar_safe": "R2：异步体内经引擎构造阻塞 client",
-    "hf_download_file": "R1：主线程 HTTP 下载；旧 HF 直连路径，**仅注册无人调用** → 建议删除而非改造",
-    "hf_download_multiple": "R1：同上（死命令，建议删除）",
-    "hf_download_as_string": "R1：同上（死命令，建议删除）",
-}
+# 当前为空：§11.5 的 IPC 整改已全部落地（同步命令 → async + spawn_blocking；
+# 旧 HF 直连死命令 hf_download_file / hf_download_as_string / hf_download_multiple 已删除）。
+PENDING: dict[str, str] = {}
 
 # ── 已确认接受的例外 ────────────────────────────────────────────────────────────
 # 仅涉及**配置 / 历史等小文件**（KB 级、单次读写）或**纯路径存在性检查**的同步命令：
