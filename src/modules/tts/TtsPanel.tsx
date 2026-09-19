@@ -790,6 +790,15 @@ function VoiceSettingsPage() {
   const fixedVoice = mode === "fixed" || (vm === undefined && info?.supports_clone === false && numSpeakers <= 1);
   /** 克隆能力：与「模型就绪恢复」同源（modelState.supportsClone） */
   const cloneCapable = supportsClone(info);
+  /** 克隆入口门控：只有"能力明确为否"才拦截；能力**未知**（旧 payload 未声明能力）保持既有行为，
+   *  不把"不知道"当成"不支持"（`vm === undefined && supports_clone === undefined` = 未知）。
+   *  引擎侧 set_clone_voice 仍是最终兜底：门控只是不让人白做录音/命名。 */
+  const cloneDeclared = vm !== undefined || info?.supports_clone !== undefined;
+  const cloneBlocked = Boolean(info) && cloneDeclared && cloneCapable === false;
+  // 模型换成不支持克隆的 ⇒ 自动退出克隆工作区（否则录音+命名做完，点「使用」才被引擎拒绝）
+  useEffect(() => {
+    if (cloneBlocked && tts.voiceMode === "clone") updateTts({ voiceMode: "preset" });
+  }, [cloneBlocked, tts.voiceMode, updateTts]);
   /** Clone + overrides_preset：克隆激活后隐藏 sid 控件（不是禁用） */
   const sidHidden = mode === "clone" && cloneActive && vm?.overrides_preset === true;
   /** PresetAndClone：克隆激活时 sid 控件禁用（保留可见） */
@@ -878,10 +887,13 @@ function VoiceSettingsPage() {
         {VOICE_MODE_TABS.map((tab) => {
           const Icon = tab.icon;
           const active = tts.voiceMode === tab.key;
+          const blocked = tab.key === "clone" && cloneBlocked;
           return (
             <button
               key={tab.key}
-              className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors ${
+              disabled={blocked}
+              title={blocked ? t(locale, "tts.voice.cloneUnsupported") : undefined}
+              className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
                 active
                   ? "bg-primary/10 font-medium text-primary"
                   : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
@@ -893,6 +905,11 @@ function VoiceSettingsPage() {
             </button>
           );
         })}
+        {cloneBlocked && (
+          <span className="px-2 text-xs text-muted-foreground">
+            {t(locale, "tts.voice.cloneUnsupported")}
+          </span>
+        )}
       </div>
 
       {tts.voiceMode !== "clone" ? (
