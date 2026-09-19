@@ -89,6 +89,7 @@ export function useSidecarEvents() {
         status !== "runtime_download_phase" &&
         status !== "runtime_installed" &&
         status !== "runtime_download_error" &&
+        status !== "runtime_download_cancelled" &&
         status !== "api_started" &&
         status !== "api_stopped"
       ) {
@@ -135,6 +136,13 @@ export function useSidecarEvents() {
           const msg = typeof payload.msg === "string" ? payload.msg : "未知错误";
           useAppStore.getState().setRuntimeDownload(null, 0, msg);
           store.addLog(`[framework] ❌ ${fw} 下载失败: ${msg}`, "error");
+          break;
+        }
+        case "runtime_download_cancelled": {
+          // 与 error 分支同样的收尾：清空 store → 进度条与取消按钮一起消失，回到可再次下载
+          const fw = typeof payload.framework === "string" ? payload.framework : "";
+          useAppStore.getState().setRuntimeDownload(null, 0);
+          store.addLog(`[framework] ${t(store.locale, "framework.cancelLog", { name: fw })}`, "warn");
           break;
         }
         case "models_state":

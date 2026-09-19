@@ -149,3 +149,8 @@ export function rustGetDataRootInfo(): Promise<{ portable: boolean; data_root: s
 export function rustDownloadRuntime(framework: string): Promise<{ ok: boolean; framework: string }> {
   return invoke("download_runtime", { framework });
 }
+
+/** 取消推理框架运行时下载（Rust 侧收尾后会发 runtime_download_cancelled 事件） */
+export function rustCancelRuntimeDownload(framework: string): Promise<{ ok: boolean }> {
+  return invoke("cancel_runtime_download", { framework });
+}

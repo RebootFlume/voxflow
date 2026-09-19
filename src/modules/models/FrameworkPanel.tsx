@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { CheckCircle2, Download, Loader2, Lock, RefreshCw } from "lucide-react";
+import { CheckCircle2, Download, Loader2, Lock, RefreshCw, X } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useAppStore } from "@/stores";
 import { t } from "@/lib/i18n";
-import { rustCheckRuntime, rustDownloadRuntime, rustVerifyRuntime } from "@/lib/tauri";
+import { rustCancelRuntimeDownload, rustCheckRuntime, rustDownloadRuntime, rustVerifyRuntime } from "@/lib/tauri";
 
 interface RuntimePkg {
   framework: string;
@@ -28,6 +28,8 @@ export function FrameworkPanel() {
   // 下载状态/错误在全局 store（常住：切页回来进度与报错都不丢）
   const dl = useAppStore((s) => s.runtimeDownload);
   const setRuntimeDownload = useAppStore((s) => s.setRuntimeDownload);
+  // 正在请求取消的框架（仅用于按钮 loading/防连点；终态清理由 store 事件驱动）
+  const [cancelling, setCancelling] = useState<string | null>(null);
 
   const refresh = () => {
     rustCheckRuntime()
@@ -61,6 +63,18 @@ export function FrameworkPanel() {
     } catch (e) {
       // 报错同时写 store（常驻显示；Rust 也会发 runtime_download_error 事件）
       setRuntimeDownload(null, 0, String(e));
+    }
+  };
+
+  // 取消下载：Rust 收尾后发 runtime_download_cancelled 事件清空 store（进度条/按钮自动消失）
+  const doCancel = async (fw: string) => {
+    setCancelling(fw);
+    try {
+      await rustCancelRuntimeDownload(fw);
+    } catch {
+      // 取消失败（如下载已结束）：不打扰用户，状态仍由后续事件矫正
+    } finally {
+      setCancelling(null);
     }
   };
 
@@ -258,6 +272,22 @@ export function FrameworkPanel() {
                           {t(locale, "framework.download")}
                           </Button>
                         </>
+                      )}
+                      {/* 下载中才显示取消；取消/完成/失败后 store 清空 → 按钮自动消失 */}
+                      {dl.framework === pkg.framework && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void doCancel(pkg.framework)}
+                          disabled={cancelling === pkg.framework}
+                        >
+                          {cancelling === pkg.framework ? (
+                            <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <X className="mr-1 h-3.5 w-3.5" />
+                          )}
+                          {t(locale, "framework.cancel")}
+                        </Button>
                       )}
                     </div>
                   </div>
