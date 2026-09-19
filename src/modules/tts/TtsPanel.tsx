@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Loader2, Mic, Play, Sparkles, Trash2 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -11,7 +11,7 @@ import { ModelSelector } from "@/components/ModelSelector";
 import { ModelStatusBadge } from "@/components/ModelStatusBadge";
 import { useAppStore } from "@/stores";
 import { t } from "@/lib/i18n";
-import { rustListE2eTtsModels, rustListTtsSpeakers, rustListTtsVoices, rustSetTtsCloneVoice, rustClearTtsCloneVoice, rustSetTtsLanguage, rustSynthesize } from "@/lib/tauri";
+import { rustListTtsSpeakers, rustSetTtsCloneVoice, rustClearTtsCloneVoice, rustSetTtsLanguage, rustSynthesize } from "@/lib/tauri";
 import { loadTtsModel } from "@/lib/modelLoader";
 import { useExportDir } from "@/lib/useExportDir";
 
@@ -94,7 +94,7 @@ function VoiceSettingsPage() {
     }).catch(() => {});
   }, [tts.model]);
 
-  const isCloningModel = /^(zipvoice|pocket)/i.test(tts.model);
+  const isCloningModel = useTtsModelInfo(tts.model)?.supports_clone ?? false;
 
   async function handlePickAudio() {
     const dialog = await import("@tauri-apps/plugin-dialog");
@@ -266,45 +266,48 @@ const langLabel: Record<string, string> = {
   vi: "Vietnamese",
 };
 
+/**
+ * 当前 TTS 模型的描述符能力（语言 / 音色模式 / 克隆）。
+ * 数据源 = models.items（models_state 事件携带能力字段，决策 A 单一来源）。
+ * 归一化匹配：展示名 / 引擎目录名，与 Rust 侧 spec::find 的别名集合一致。
+ */
+function useTtsModelInfo(model: string) {
+  const items = useAppStore((s) => s.models.items);
+  return useMemo(() => {
+    if (!model) return null;
+    const norm = (s: string) => s.toLowerCase().replace(/[-_]/g, "");
+    return (
+      items.find(
+        (m) => m.kind === "tts" && (norm(m.name) === norm(model) || norm(m.path) === norm(model)),
+      ) ?? null
+    );
+  }, [items, model]);
+}
+
 function LanguageSelector() {
   const locale = useAppStore((s) => s.locale);
   const language = useAppStore((s) => s.tts.language);
   const ttsModel = useAppStore((s) => s.tts.model);
   const updateTts = useAppStore((s) => s.updateTts);
-  const [langs, setLangs] = useState<string[]>([]);
-  const [voicesByLang, setVoicesByLang] = useState<Record<string, string[]>>({});
-  const [modelMode, setModelMode] = useState<
-    "auto" | "fixed" | "select" | "cloning" | null
-  >(null);
+  const info = useTtsModelInfo(ttsModel);
+
+  // 语言对齐：当前语言不在模型支持列表 → 切到模型默认（zh 优先，否则首个支持语言）
+  const langs = info?.languages ?? [];
   useEffect(() => {
-    // 从注册表查当前模型的 language_mode（id 匹配：忽略大小写和 -/_）
-    void rustListE2eTtsModels().then((r) => {
-      const norm = (s: string) => s.toLowerCase().replace(/[-_]/g, "");
-      const hit = (r.models ?? []).find(
-        (m) => norm(m.id) === norm(ttsModel) || norm(m.name) === norm(ttsModel),
-      );
-      if (hit) setModelMode(hit.language_mode);
-    }).catch(() => {});
-  }, [ttsModel]);
-  useEffect(() => {
-    void rustListTtsVoices().then((r) => {
-      const langs = (r.languages as string[]) ?? [];
-      const voicesByLang = (r.voices_by_lang as Record<string, string[]>) ?? {};
-      const def = (r.default_lang as string) ?? "en";
-      setLangs(langs);
-      setVoicesByLang(voicesByLang);
-      // store 默认 "zh" 可能与模型实际可用语言不符：同步到 Rust 默认语言并让引擎一致
-      const cur = useAppStore.getState().tts.language;
-      if (langs.length && !langs.includes(cur)) {
-        useAppStore.getState().updateTts({ language: def });
-        void rustSetTtsLanguage(def).catch(() => {
-          useAppStore.getState().addLog(`[tts] switch language failed: ${def}`, "error");
-        });
-      }
-    }).catch(() => {});
-  }, []);
+    if (!info || langs.length === 0) return;
+    const cur = useAppStore.getState().tts.language;
+    if (!langs.includes(cur)) {
+      const def = langs.includes("zh") ? "zh" : langs[0];
+      updateTts({ language: def });
+      void rustSetTtsLanguage(def).catch(() => {
+        useAppStore.getState().addLog(`[tts] switch language failed: ${def}`, "error");
+      });
+    }
+  }, [info, langs, updateTts]);
+
+  if (!info) return null;
   // 自动识别模式（如 Kokoro 中英混合）→ 不显示语言选择，改为提示
-  if (modelMode === "auto") {
+  if (info.language_mode === "auto") {
     return (
       <span className="inline-flex items-center gap-1.5 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-2.5 py-1 text-xs text-emerald-600 dark:text-emerald-400">
         <Sparkles className="h-3.5 w-3.5" />
@@ -312,17 +315,17 @@ function LanguageSelector() {
       </span>
     );
   }
-  // 单语言固定（Kokoro-en / Kitten / Matcha-zh）→ 显示固定语言标记
-  if (modelMode === "fixed") {
-    const fixedLang = langs.length === 1 ? langs[0] : "en";
+  // 单语言固定（Kokoro-en / Kitten / Matcha-zh）→ 显示固定语言标记（来自描述符）
+  if (info.language_mode === "fixed") {
+    const fixedLang = langs[0] ?? "en";
     return (
       <span className="inline-flex items-center rounded-md border border-border bg-muted/50 px-2.5 py-1 text-xs text-muted-foreground">
         {langLabel[fixedLang] ?? fixedLang}
       </span>
     );
   }
-  // 语音克隆（ZipVoice / PocketTTS）→ 提示需要参考音频
-  if (modelMode === "cloning") {
+  // 语音克隆（ZipVoice）→ 提示需要参考音频
+  if (info.language_mode === "cloning") {
     return (
       <span className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/5 px-2.5 py-1 text-xs text-amber-600 dark:text-amber-400">
         <Mic className="h-3.5 w-3.5" />
@@ -330,28 +333,25 @@ function LanguageSelector() {
       </span>
     );
   }
-  // 默认 / select 模式（Supertonic 等）→ 显示语言下拉
-  const options = langs.length ? langs : ["zh", "en"];
+  // select 模式（Supertonic 31 语言等）→ 显示语言下拉（选项来自描述符）
   return (
-    <Select value={language} onValueChange={(v) => {
+    <Select
+      value={language}
+      onValueChange={(v) => {
         updateTts({ language: v });
         void rustSetTtsLanguage(v).catch(() => {
           useAppStore.getState().addLog(`[tts] switch language failed: ${v}`, "error");
         });
-        const nextVoices = (voicesByLang[v] ?? []) as string[];
-        const curVoice = useAppStore.getState().tts.voice;
-        const curOk = nextVoices.length === 0 || nextVoices.includes(curVoice) || curVoice === "default";
-        if (!curOk && nextVoices.length) {
-          const mapped = nextVoices[0] === "af" ? "default" : nextVoices[0];
-          updateTts({ voice: mapped });
-        }
-      }}>
-      <SelectTrigger className="h-8 w-32">
+      }}
+    >
+      <SelectTrigger className="h-8 w-40">
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
-        {options.map((l) => (
-          <SelectItem key={l} value={l}>{langLabel[l] ?? l}</SelectItem>
+        {langs.map((l) => (
+          <SelectItem key={l} value={l}>
+            {langLabel[l] ?? l}
+          </SelectItem>
         ))}
       </SelectContent>
     </Select>

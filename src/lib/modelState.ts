@@ -45,6 +45,12 @@ export function applyEngineStatus(
   // ready / error / idle 时清掉加载阶段（stage 只在 loading 期间有意义）
   const stage = status === "loading" ? s.engines[kind].stage : null;
   s.setEngineStatus(kind, { status, stage, error: error ?? null });
+  // 状态域同步：ASR/TTS 面板徽章仍读 asr.modelStatus / ttsModelStatus，
+  // 若只写 engines，失败时徽章会永远停在 loading（用户看不到失败原因）。
+  if (status !== "loading") {
+    if (kind === "asr") s.updateAsr({ modelStatus: status });
+    else s.setTtsModelStatus(status);
+  }
 }
 
 /** 依据 Rust 事件里的权威框架（注册表 format）对齐 ASR 模型页标签 */

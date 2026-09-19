@@ -31,6 +31,16 @@ pub fn sherpa_runtime_dir() -> PathBuf {
     libs_dir().join("sherpa-onnx")
 }
 
+/// sherpa-onnx 工具可执行文件的**规范位置**：`<sherpa_runtime_dir>/bin/<name>`。
+///
+/// 官方包根 = `bin/include/lib`，所有 CLI（offline / offline-tts / offline-websocket-server）
+/// 与运行库同处 `bin/` —— 下载一次即可让 ASR 与 TTS 两个工具同时可用。
+/// 本函数是布局的单一真源：下载校验 marker、ASR 引擎、TTS 引擎都走这里，
+/// 避免"一处假设 bin/、另一处假设扁平"导致必然有一侧失败。
+pub fn sherpa_exe(name: &str) -> PathBuf {
+    sherpa_runtime_dir().join("bin").join(name)
+}
+
 /// exe 同级目录（libs / data 等资源的基准）
 pub fn app_dir() -> PathBuf {
     exe_dir().unwrap_or_else(|| PathBuf::from("."))

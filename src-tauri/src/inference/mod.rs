@@ -6,6 +6,8 @@
 //! - sherpa_asr：SenseVoice / Paraformer 推理（websocket server 子进程）
 
 pub mod engine;
+pub mod device;
+pub mod slot;
 pub mod llama_server;
 pub mod sherpa_asr;
 pub mod registry;

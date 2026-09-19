@@ -26,31 +26,18 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   }
 
   // ③ 加载 ASR 模型
+  // 加载入口自带「运行时前置门禁」：缺框架时直接给可读错误 + 全局横幅，
+  // 不进入 loading（此前这里重复实现了一遍框架检查，失败又只写日志，用户看不到）。
   const asr0 = s0.asr;
   if (asr0.model) {
-    const fw = asr0.framework === "onnx" ? "onnx" : "gguf";
-    import("@/lib/tauri")
-      .then(({ rustCheckRuntime }) => rustCheckRuntime())
-      .catch(() => null)
-      .then((runtimeCheck) => {
-        const pkg = runtimeCheck?.packages?.find((p) => p.framework === fw);
-        if (!runtimeCheck || pkg?.installed) {
-          void import("./lib/modelLoader").then(({ loadAsrModel }) =>
-            loadAsrModel(asr0.model, asr0.device).catch(() => {}),
-          );
-        } else {
-          useAppStore.getState().addLog(
-            `[init] 缺少推理框架 ${fw}（模型 ${asr0.model} 需要它），请到「推理框架」页下载`,
-            "warn",
-          );
-          useAppStore.getState().setEngineStatus("asr", {
-            framework: fw === "onnx" ? "sherpa" : "llama",
-            model: asr0.model,
-            status: "error",
-            error: `缺少推理框架（${fw === "onnx" ? "sherpa-onnx" : "llama-server"}），请到「推理框架」页下载后重试`,
-          });
-        }
-      });
+    void Promise.all([
+      import("@/hooks/useRuntimeStatus"),
+      import("./lib/modelLoader"),
+    ]).then(async ([{ refreshRuntime }, { loadAsrModel }]) => {
+      // 先让门禁拿到框架状态，再决定是否发起加载
+      await refreshRuntime();
+      void loadAsrModel(asr0.model, asr0.device).catch(() => {});
+    });
   }
 
   // ④ 数据根：Rust 判定便携/安装 → 设置模型目录展示值（下载/列表全走 Rust 数据根）

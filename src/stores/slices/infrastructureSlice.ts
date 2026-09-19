@@ -1,9 +1,20 @@
+export interface RuntimePkgState {
+  framework: string;
+  name: string;
+  installed: boolean;
+  state: "ready" | "incomplete" | "missing";
+  missing: string[];
+  dir: string;
+}
+
 export interface InfrastructureSlice {
   io: { exportDir: string };
   gpu: { available: boolean; name: string; deviceCount: number };
   capabilities: { ffmpeg: boolean };
   useRustEngine: boolean;
   sidebarCollapsed: boolean;
+  /** 推理框架（libs）安装状态：检测结果 + 检测时间；null = 尚未检测 */
+  runtime: { packages: RuntimePkgState[] | null; lastUpdate: number };
   /** 显存监控（全局单例轮询，不随组件生命周期） */
   vram: { total: number; used: number; llama: number | null; sherpa: number | null; lastUpdate: number };
   updateIo: (patch: Partial<InfrastructureSlice["io"]>) => void;
@@ -11,6 +22,7 @@ export interface InfrastructureSlice {
   audioDevices: { current: string; currentName: string };
   setGpu: (available: boolean, name: string, deviceCount: number) => void;
   setCapabilities: (patch: Partial<InfrastructureSlice["capabilities"]>) => void;
+  setRuntime: (packages: RuntimePkgState[] | null) => void;
   setUseRustEngine: (v: boolean) => void;
   setSidebarCollapsed: (v: boolean) => void;
   toggleSidebar: () => void;
@@ -24,11 +36,13 @@ export const createInfrastructureSlice = (set: (partial: Partial<InfrastructureS
   useRustEngine: true,
   sidebarCollapsed: false,
   audioDevices: { current: "default", currentName: "…" },
+  runtime: { packages: null, lastUpdate: 0 },
   vram: { total: 0, used: 0, llama: null, sherpa: null, lastUpdate: 0 },
   updateIo: (patch) => set((s) => ({ io: { ...s.io, ...patch } })),
   setAudioDevices: (current, currentName) => set({ audioDevices: { current, currentName } }),
   setGpu: (available, name, deviceCount) => set({ gpu: { available, name, deviceCount } }),
   setCapabilities: (patch) => set((s) => ({ capabilities: { ...s.capabilities, ...patch } })),
+  setRuntime: (packages) => set({ runtime: { packages, lastUpdate: Date.now() } }),
   setUseRustEngine: (useRustEngine) => set({ useRustEngine }),
   setSidebarCollapsed: (v) => set({ sidebarCollapsed: v }),
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),

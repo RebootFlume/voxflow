@@ -22,7 +22,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useAppStore, type ModelItemState } from "@/stores";
 import { t } from "@/lib/i18n";
 import { openPath, pickFolder, sendToSidecar } from "@/lib/tauri";
-import { loadAsrModel, loadTtsModel, unloadAsrModel, unloadTtsModel, frameworkFor } from "@/lib/modelLoader";
+import { loadAsrModel, loadTtsModel, unloadAsrModel, unloadTtsModel, frameworkForModel } from "@/lib/modelLoader";
 import { computeIsLoaded } from "@/lib/modelState";
 import { FrameworkPanel } from "./FrameworkPanel";
 
@@ -174,9 +174,9 @@ function SettingsPage() {
 // 框架徽章（模型所属推理框架）
 // ============================================================
 
-function FrameworkBadge({ kind, name }: { kind: "asr" | "tts"; name: string }) {
-  const fw = frameworkFor(kind, name);
+function FrameworkBadge({ name }: { name: string }) {
   const item = useAppStore((s) => s.models.items.find((i) => i.name === name));
+  const fw = item ? frameworkForModel(item) : "torch";
   // 格式：sherpa 模型 → onnx，llama → gguf，torch → torch
   const fmt = item?.format === "onnx" ? "onnx" : item?.format === "gguf" ? "gguf" : fw;
   const styles: Record<string, string> = {
@@ -301,7 +301,7 @@ function ModelRow({ name }: { name: string }) {
               {it.quant}
             </Badge>
           )}
-          <FrameworkBadge kind={it.kind} name={it.name} />
+          <FrameworkBadge name={it.name} />
           {cpuSlow && (
             <Badge variant="outline" className="ml-1 text-[10px] bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20">
               ⚠ {t(locale, "models.cpuSlow")}
@@ -448,7 +448,7 @@ function ModelListPage({ kind, title, icon: Icon }: { kind: "asr" | "tts"; title
         const byFw = new Map<string, string[]>();
         for (const n of names) {
           const item = items.find((i) => i.name === n);
-          const fw = item ? frameworkFor(kind, item.name) : "torch";
+          const fw = item ? frameworkForModel(item) : "torch";
           const arr = byFw.get(fw) ?? [];
           arr.push(n);
           byFw.set(fw, arr);

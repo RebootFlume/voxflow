@@ -1,8 +1,6 @@
 //! Rust 推理引擎对照测试
 //! 验证：音频模块输出 vs Python 输出，模型加载是否正常
 
-use crate::inference::engine::InferenceEngine;
-use crate::tts::traits::TtsEngine;
 
 #[test]
 fn test_audio_decode_wav() {
@@ -53,46 +51,36 @@ fn test_audio_float_int16_roundtrip() {
 #[test]
 #[ignore = "needs 300MB+ model download; run with --ignored"]
 fn test_tts_model_load() {
-    let model_path = crate::model_manager::model_dir("Kokoro-v1_0")
-        .join("model.onnx");
-    if !model_path.exists() {
-        eprintln!("Kokoro ONNX 模型未下载，跳过 TTS 加载测试");
-        return;
-    }
-
-    let mut service = crate::tts::service::TtsService::new();
-    let result = service.load(&model_path, "cpu");
+    let registry = crate::tts::registry::TtsRegistry::new();
+    let result = registry.load("Kokoro-v1_0", "cpu");
     assert!(result.is_ok(), "TTS 模型加载失败: {:?}", result.err());
-    assert!(service.is_loaded());
-    assert!(!service.name().is_empty());
-    println!("TTS 模型加载成功: {}", service.name());
+    assert!(registry.is_loaded());
+    assert!(!registry.loaded_model().is_empty());
+    println!("TTS 模型加载成功: {}", registry.loaded_model());
 }
 
 #[test]
 #[ignore = "needs model + sherpa-onnx; run with --ignored"]
 fn test_tts_inference_pipeline() {
-    let model_path = crate::model_manager::model_dir("Kokoro-v1_0")
-        .join("model.onnx");
-    if !model_path.exists() {
-        eprintln!("Kokoro ONNX 模型未下载，跳过 TTS 推理测试");
-        return;
-    }
+    let registry = crate::tts::registry::TtsRegistry::new();
+    registry.load("Kokoro-v1_0", "cpu").unwrap();
 
-    let mut service = crate::tts::service::TtsService::new();
-    service.load(&model_path, "cpu").unwrap();
-
+    let engine = registry.active().expect("引擎未加载");
     // 中文（端到端直通，须产出实质音频而非报错/空）
-    service.set_language("zh").unwrap();
-    let zh_samples = service.infer("你好世界", "zf_xiaobei").unwrap();
-    assert!(!zh_samples.is_empty());
-    println!("TTS 中文推理成功: {} samples, 24kHz", zh_samples.len());
+    engine.set_language("zh").unwrap();
+    let audio = engine.synthesize("你好世界", "45").unwrap();
+    assert!(!audio.samples.is_empty());
+    println!(
+        "TTS 中文推理成功: {} samples @ {}Hz",
+        audio.samples.len(),
+        audio.sample_rate
+    );
 }
 
 // ─── registry 路由 / 互斥测试 ──────────────────────────────────────────────
 
 #[test]
 fn test_registry_engine_frameworks() {
-    use crate::inference::engine::AsrEngine;
     let r = crate::inference::registry::registry();
 
     // 两个框架都注册了

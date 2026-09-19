@@ -3,6 +3,7 @@ import { useThemeSync } from "@/lib/theme";
 import { Sidebar } from "@/components/Sidebar";
 import { FloatingBar } from "@/components/FloatingBar";
 import { ModelLoadingOverlay } from "@/components/ModelLoadingOverlay";
+import { RuntimeAlert } from "@/components/RuntimeAlert";
 import { StartupSplash } from "@/components/StartupSplash";
 import { TitleBar } from "@/components/TitleBar";
 import { AsrPanel } from "@/modules/asr/AsrPanel";
@@ -16,6 +17,7 @@ import { t } from "@/lib/i18n";
 import { useSidecarEvents } from "@/hooks/useSidecarEvents";
 import { useVramPoller } from "@/hooks/useVramPoller";
 import { useHotkeySync, useStartupFallback, useModelLoadTimeout, useStatusReconcile } from "@/hooks/useStartup";
+import { useRuntimeStatus } from "@/hooks/useRuntimeStatus";
 import { MODULE_ICONS, resolveHeading } from "@/config/modules";
 
 function ModuleIcon() {
@@ -32,6 +34,7 @@ export default function App() {
   useStartupFallback();
   useModelLoadTimeout();
   useStatusReconcile();
+  useRuntimeStatus();
   const activeModule = useAppStore((s) => s.activeModule);
   const activeSubMenu = useAppStore((s) => s.activeSubMenu);
   const locale = useAppStore((s) => s.locale);
@@ -40,6 +43,7 @@ export default function App() {
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-background">
       <TitleBar />
+      <RuntimeAlert />
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <ActivityBar />
         <Sidebar />

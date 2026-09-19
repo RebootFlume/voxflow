@@ -4,7 +4,6 @@
 //! 旧 AsrEngine（llama-cpp-2 占位）已移除，ASR 走 llama-server / sherpa 子进程。
 
 use super::llama_server::global_engine;
-use super::engine::InferenceEngine;
 use super::transcribe_chunks::transcribe_long;
 use super::super::audio;
 

@@ -103,11 +103,11 @@ fn test_llama_load_asr_model_switch() {
     let p1 = engine.current_model_path();
     assert!(p1.to_string_lossy().contains("0.6B"), "应指向 0.6B: {}", p1.display());
 
-    // 2. 切换到 1.7B（若模型存在）
-    let p17 = voxflow_lib::inference::llama_server::LlamaServerConfig::for_model(
-        "Qwen3-ASR-1.7B", "Qwen3-ASR-1.7B");
-    if !p17.model_path.exists() {
-        eprintln!("[skip] 1.7B 模型不存在: {}", p17.model_path.display());
+    // 2. 切换到 1.7B（若模型存在）—— 路径由描述符决定（无模型名分支）
+    let p17 = voxflow_lib::model_manager::model_dir("Qwen3-ASR-1.7B")
+        .join("Qwen3-ASR-1.7B-Q8_0.gguf");
+    if !p17.exists() {
+        eprintln!("[skip] 1.7B 模型不存在: {}", p17.display());
         engine.unload().unwrap();
         return;
     }

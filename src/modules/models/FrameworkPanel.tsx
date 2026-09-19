@@ -230,9 +230,16 @@ export function FrameworkPanel() {
                           </Button>
                         </>
                       ) : (
-                        <Button
-                          size="sm"
-                          onClick={() => void doDownload(pkg.framework)}
+                        <>
+                          {/* 未安装也允许「验证」：手动放置的运行时靠它被识别，
+                              否则用户只能重下（这是本次踩坑的直接原因） */}
+                          <Button size="sm" variant="outline" onClick={() => void doVerify(pkg.framework)}>
+                            <RefreshCw className="mr-1 h-3.5 w-3.5" />
+                            {t(locale, "runtime.verify")}
+                          </Button>
+                          <Button
+                            size="sm"
+                            onClick={() => void doDownload(pkg.framework)}
                           disabled={dl.framework !== null}
                         >
                           {dl.framework === pkg.framework ? (
@@ -241,7 +248,8 @@ export function FrameworkPanel() {
                             <Download className="mr-1 h-3.5 w-3.5" />
                           )}
                           {t(locale, "framework.download")}
-                        </Button>
+                          </Button>
+                        </>
                       )}
                     </div>
                   </div>

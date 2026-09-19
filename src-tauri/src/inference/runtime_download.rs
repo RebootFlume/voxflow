@@ -63,6 +63,9 @@ pub const SHERPA_CUDA_AUX_FILES: &[&str] = &[
     "bin/cudnn_ops64_9.dll",
     "bin/cufft64_11.dll",
     "bin/cufftw64_11.dll",
+    // TTS 工具也必须在（与 ASR 的 websocket server 同层 bin/）：
+    // 只校验 ASR exe 会让"缺 TTS exe"的包显示为已安装，TTS 首次合成才失败。
+    "bin/sherpa-onnx-offline-tts.exe",
 ];
 
 /// 当前发布包（官方版本，固定版本号）

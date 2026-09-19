@@ -6,8 +6,6 @@ export interface TtsSlice {
     device: string;
     language: string;
     voice: string;
-    volume: number;
-    hotkey: string;
   };
   ttsModelStatus: "idle" | "loading" | "ready" | "error";
   ttsTasks: TtsTask[];
@@ -28,7 +26,7 @@ export interface TtsSlice {
 }
 
 export const createTtsSlice = (set: (partial: Partial<TtsSlice> | ((s: TtsSlice) => Partial<TtsSlice>)) => void): TtsSlice => ({
-  tts: { model: "", device: "cpu", language: "zh", voice: "default", volume: 1.0, hotkey: "Alt+Shift+S" },
+  tts: { model: "", device: "cpu", language: "zh", voice: "default" },
   ttsModelStatus: "idle",
   ttsTasks: [],
   ttsClone: { active: false, audioPath: "", referenceText: "", status: "idle", error: "" },

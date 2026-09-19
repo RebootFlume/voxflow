@@ -2,6 +2,7 @@ import { useAppStore, type ModelItemState, type ModelFramework } from "@/stores"
 import { t } from "@/lib/i18n";
 import { Badge } from "@/components/ui/badge";
 import { computeIsLoaded } from "@/lib/modelState";
+import { runtimeKeyForFormat } from "@/hooks/useRuntimeStatus";
 
 const EMPTY_ITEMS: ModelItemState[] = [];
 
@@ -40,6 +41,8 @@ function FormatBadge({ format }: { format: ModelFramework }) {
 export function ModelSelector({ kind, selected, onSelect, formatFilter, downloadedOnly = false }: ModelSelectorProps) {
   const items = useAppStore((s) => s.models?.items ?? EMPTY_ITEMS);
   const engineStatus = useAppStore((s) => s.engines?.[kind]?.status ?? "idle");
+  const engineError = useAppStore((s) => s.engines?.[kind]?.error ?? null);
+  const runtimePackages = useAppStore((s) => s.runtime.packages);
 
   const locale = useAppStore((s) => s.locale);
 
@@ -70,8 +73,12 @@ export function ModelSelector({ kind, selected, onSelect, formatFilter, download
         const isLoaded = computeIsLoaded(kind, m.name);
         const status = engineStatus;
         const isSelected = m.name === selected;
-        const statusLabel =
-          isSelected && isLoaded
+        // 失败原因只在该模型是当前选中时展示（否则会串台到别的模型）
+        const isFailedHere = isSelected && status === "error";
+        // 状态文案：不再要求 isLoaded —— 失败时 isLoaded=false，旧逻辑会让原因整段不渲染
+        const statusLabel = isLoaded
+          ? t(locale, "common.modelReady")
+          : isSelected
             ? status === "loading"
               ? t(locale, "common.modelLoading")
               : status === "ready"
@@ -79,9 +86,11 @@ export function ModelSelector({ kind, selected, onSelect, formatFilter, download
                 : status === "error"
                   ? t(locale, "common.modelFailed")
                   : ""
-            : isLoaded
-              ? t(locale, "common.modelReady")
-              : "";
+            : "";
+        // 该模型所需框架未就绪 → 标注（用户不必先点一次才知道）
+        const fwKey = runtimeKeyForFormat(m.format);
+        const fwPkg = fwKey ? runtimePackages?.find((p) => p.framework === fwKey) : undefined;
+        const fwBlocked = Boolean(fwPkg && fwPkg.state !== "ready");
 
         return (
           <div
@@ -111,6 +120,11 @@ export function ModelSelector({ kind, selected, onSelect, formatFilter, download
               </div>
               <div className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground pl-6">
                 <span>{sizeLabel(m)}</span>
+                {fwBlocked && (
+                  <span className="text-amber-600 dark:text-amber-400">
+                    {t(locale, "runtime.needsFramework", { name: fwPkg?.name ?? "" })}
+                  </span>
+                )}
                 {statusLabel && (
                   <span
                     className={
@@ -128,6 +142,11 @@ export function ModelSelector({ kind, selected, onSelect, formatFilter, download
                 )}
               </div>
             </div>
+            {isFailedHere && engineError && (
+              <p className="mt-2 rounded-md bg-destructive/10 px-2 py-1.5 text-[11px] leading-snug text-destructive">
+                {engineError}
+              </p>
+            )}
           </div>
         );
       })}

@@ -986,39 +986,66 @@ fn format_str(f: &ModelFormat) -> &'static str {
     }
 }
 
-/// 解析 sherpa-onnx E2E 模型的真实目录：展示名（如 "Kokoro-v1_0"）→ 引擎目录（"kokoro-multi-lang-v1_0"）
-/// 若引擎目录存在则返回它，否则回退到展示名目录
+/// 语言模式 → 前端字符串（描述符能力字段）
+fn language_mode_str(m: crate::tts::spec::LanguageMode) -> &'static str {
+    use crate::tts::spec::LanguageMode as L;
+    match m {
+        L::Auto => "auto",
+        L::Fixed => "fixed",
+        L::Select => "select",
+        L::Cloning => "cloning",
+    }
+}
+
+/// 音色模式 → 前端 JSON（描述符能力字段）
+fn voice_mode_json(v: crate::tts::spec::VoiceMode) -> Value {
+    use crate::tts::spec::VoiceMode as V;
+    match v {
+        V::Fixed => json!({ "type": "fixed" }),
+        V::Preset(p) => json!({
+            "type": "preset",
+            "count": p.count,
+            "per_language": p.per_language,
+        }),
+        V::Clone(c) => json!({
+            "type": "clone",
+            "requires_text": c.requires_text,
+            "overrides_preset": c.overrides_preset,
+        }),
+        V::PresetAndClone(p, c) => json!({
+            "type": "preset_and_clone",
+            "count": p.count,
+            "per_language": p.per_language,
+            "requires_text": c.requires_text,
+        }),
+    }
+}
+
+/// 解析模型真实目录：展示名（如 "Kokoro-v1_0"）→ 引擎目录（"kokoro-multi-lang-v1_0"）。
+/// 目录存在则返回它，否则回退到 default（描述符查找，无 e2e_registry 依赖）。
 #[allow(dead_code)] // 测试专用
 fn resolve_sherpa_model_dir(root: &Path, name: &str, default: &Path) -> PathBuf {
-    use crate::tts::engine::e2e_registry::E2eTtsModel;
-    for m in E2eTtsModel::all() {
-        // 归一化比较：Kokoro-v1_0 vs kokoro-v1_0
-        let norm = |s: &str| s.to_lowercase().replace(['-', '_'], "");
-        if norm(m.id()) == norm(name) || norm(m.default_model_dir()) == norm(name) {
-            let engine_dir = root.join(m.default_model_dir());
-            if engine_dir.exists() {
-                return engine_dir;
-            }
+    if let Some(spec) = crate::tts::spec::ModelSpec::find(name) {
+        let engine_dir = root.join(spec.id);
+        if engine_dir.exists() {
+            return engine_dir;
         }
     }
     default.to_path_buf()
 }
 
-/// 计算模型下载/查找的目标目录：优先用注册表的 engine_dir（E2E 模型显式指定，
-/// 与 TTS 引擎查找一致），否则回退到展示名目录。修复「下载到展示名目录
-/// 但引擎找引擎目录名」的不一致。
+/// 计算模型下载/查找的目标目录：优先用描述符的引擎目录名（engine_id，
+/// 与 TTS 引擎查找一致），否则回退到清单 engine_dir / 展示名目录。
+/// 修复「下载到展示名目录但引擎找引擎目录名」的不一致。
 fn resolve_download_dir(root: &Path, name: &str) -> PathBuf {
+    // 1. 描述符（TTS 展示名 / 引擎 id / 目录名 归一化匹配）
+    if let Some(spec) = crate::tts::spec::ModelSpec::find(name) {
+        return root.join(spec.id);
+    }
+    // 2. 清单 engine_dir（ASR 等）
     if let Some(info) = find_model(name) {
         if let Some(dir) = info.engine_dir {
             return root.join(dir);
-        }
-    }
-    // 兼容：E2E 注册表 id / default_model_dir 直接匹配（如 "matcha"）
-    use crate::tts::engine::e2e_registry::E2eTtsModel;
-    for m in E2eTtsModel::all() {
-        let norm = |s: &str| s.to_lowercase().replace(['-', '_'], "");
-        if norm(m.id()) == norm(name) || norm(m.default_model_dir()) == norm(name) {
-            return root.join(m.default_model_dir());
         }
     }
     root.join(name)
@@ -1081,6 +1108,16 @@ pub fn list_models_payload(kind: Option<&str>) -> Value {
                 }
             }
         }
+        // 能力字段（描述符驱动，前端语言/克隆 UI 据此渲染；见方案 4.4 决策 A）
+        if let Some(spec) = crate::tts::spec::ModelSpec::find(m.name) {
+            obj["languages"] = json!(spec.languages);
+            obj["language_mode"] = json!(language_mode_str(spec.language_mode));
+            obj["voice_mode"] = voice_mode_json(spec.voice_mode);
+            obj["supports_clone"] = json!(matches!(
+                spec.voice_mode,
+                crate::tts::spec::VoiceMode::Clone(_) | crate::tts::spec::VoiceMode::PresetAndClone(..)
+            ));
+        }
         items.push(obj);
     }
     let disk_free_gb = free_bytes_for_root().map(|b| (b as f64 / 1024f64.powi(3) * 10.0).round() / 10.0);
@@ -1137,6 +1174,42 @@ pub fn parse_format(s: &str) -> Option<ModelFormat> {
 #[cfg(test)]
 mod e2e_list_tests {
     use super::*;
+
+    /// 决策 A 数据通路：models_state payload 为 TTS 模型携带描述符能力字段
+    /// （前端语言/克隆 UI 的唯一来源，无需再调独立命令）
+    #[test]
+    fn test_models_state_carries_capability_fields() {
+        let payload = list_models_payload(Some("tts"));
+        let models = payload["models"].as_array().expect("models 数组");
+        assert!(!models.is_empty(), "应有 TTS 模型");
+
+        let kokoro = models
+            .iter()
+            .find(|m| m["name"] == "Kokoro-v1_0")
+            .expect("应含 Kokoro-v1_0");
+        assert_eq!(kokoro["language_mode"], "auto");
+        assert_eq!(kokoro["languages"][0], "zh");
+        assert_eq!(kokoro["voice_mode"]["type"], "preset");
+        assert_eq!(kokoro["voice_mode"]["count"], 53);
+        assert_eq!(kokoro["supports_clone"], false);
+
+        let zip = models
+            .iter()
+            .find(|m| m["name"] == "ZipVoice-distill")
+            .expect("应含 ZipVoice-distill");
+        assert_eq!(zip["language_mode"], "cloning");
+        assert_eq!(zip["voice_mode"]["type"], "clone");
+        assert_eq!(zip["voice_mode"]["requires_text"], true);
+        assert_eq!(zip["supports_clone"], true);
+
+        // 决策 6：Pocket 按不支持克隆处理（不再出现无效克隆卡）
+        let pocket = models
+            .iter()
+            .find(|m| m["name"] == "PocketTTS-int8")
+            .expect("应含 PocketTTS-int8");
+        assert_eq!(pocket["voice_mode"]["type"], "fixed");
+        assert_eq!(pocket["supports_clone"], false);
+    }
 
     fn dev_root() -> PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/models")

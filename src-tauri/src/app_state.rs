@@ -1,23 +1,24 @@
 //! 应用全局状态（Tauri managed state）
 //!
-//! 替代 lib.rs 顶部的 `static ASR_ENGINE / TTS_ENGINE` 全局变量：
 //! 由 `Builder::manage()` 注入，命令通过 `State<AppState>` 访问。
+//! P2：`Arc<Mutex<TtsService>>` → `Arc<Mutex<TtsRegistry>>`（注册表内部持引擎，
+//! Mutex 保留 API server 的 try_lock 忙碌语义——UI 合成期间 HTTP 合成返回 503）。
 
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use crate::tts::service::TtsService;
+use crate::tts::registry::TtsRegistry;
 
 /// 全局引擎句柄
 pub struct AppState {
-    pub tts: Arc<Mutex<TtsService>>,
+    pub tts: Arc<Mutex<TtsRegistry>>,
 }
 
 impl AppState {
     pub fn new() -> Self {
         Self {
-            tts: Arc::new(Mutex::new(TtsService::new())),
+            tts: Arc::new(Mutex::new(TtsRegistry::new())),
         }
     }
 }

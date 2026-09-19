@@ -20,6 +20,8 @@ export function useSidecarEvents() {
     let unlisten: (() => void) | undefined;
     let unlisten2: (() => void) | undefined;
     let disposed = false;
+    /** 已消费的最大状态快照 seq（Rust 单调递增），用于丢弃乱序到达的陈旧快照 */
+    let lastStatusSeq = 0;
 
     void onSidecarEvent((payload) => {
       const store = useAppStore.getState();
@@ -60,8 +62,6 @@ export function useSidecarEvents() {
       } else if (
         status !== "models_state" &&
         status !== "volume" &&
-        status !== "tts_preview_ready" &&
-        status !== "tts_preview_error" &&
         status !== "accepted" &&
         status !== "status_snapshot" &&
         status !== "model_evicted" &&
@@ -69,9 +69,6 @@ export function useSidecarEvents() {
         status !== "transcribe_error" &&
         status !== "transcribe_progress" &&
         status !== "audio_devices" &&
-        status !== "tts_done" &&
-        status !== "tts_error" &&
-        status !== "tts_synthesizing" &&
         // 以下状态已有友好日志（case 里 addLog），跳过通用 JSON 日志避免重复
         status !== "model_loading" &&
         status !== "model_progress" &&
@@ -219,6 +216,12 @@ export function useSidecarEvents() {
             }
             if (kind === "tts") {
               store.setTtsModelStatus("ready");
+              // 框架标签：事件权威 framework（Rust 注册表决定），前端不猜
+              if (typeof payload.framework === "string") {
+                store.setEngineStatus("tts", {
+                  framework: payload.framework as EngineState["framework"],
+                });
+              }
             } else if (kind === "asr") {
               store.updateAsr({ modelStatus: "ready", device: device as "cpu" | "cuda" });
               // 框架标签对齐：事件权威 framework 优先，清单兜底
@@ -286,6 +289,10 @@ export function useSidecarEvents() {
         }
         // ---- 状态对账：后端真实状态快照，用于纠偏 ----
         case "status_snapshot": {
+          // 并发对账（启动/窗口聚焦/超时兜底）可能乱序到达 → 丢弃陈旧快照
+          const seq = typeof payload.seq === "number" ? payload.seq : 0;
+          if (seq > 0 && seq < lastStatusSeq) break;
+          if (seq > 0) lastStatusSeq = seq;
           const asrSnap = payload.asr as
             | { model?: string; device?: string; loaded?: boolean }
             | undefined;
@@ -335,25 +342,6 @@ export function useSidecarEvents() {
               t(store.locale, "log.vramInsufficient", { models: evicted.join(", "), freedFor }),
               "warn",
             );
-          }
-          break;
-        }
-        // ---- TTS 合成事件 ----
-        case "tts_done": {
-          const ttsText = typeof payload.text === "string" ? payload.text : "";
-          const savedPath = typeof payload.saved_path === "string" ? payload.saved_path : "";
-          const fileSize = typeof payload.size === "string" ? payload.size : undefined;
-          const pendingTts = store.ttsTasks.find((t) => t.status === "synthesizing" && t.text === ttsText);
-          if (pendingTts) {
-            store.updateTtsTask(pendingTts.id, { status: "done", savedPath, fileSize });
-          }
-          break;
-        }
-        case "tts_error": {
-          const ttsErrMsg = typeof payload.msg === "string" ? payload.msg : t(store.locale, "log.synthesisFailed");
-          const synthesizing = store.ttsTasks.find((t) => t.status === "synthesizing");
-          if (synthesizing) {
-            store.updateTtsTask(synthesizing.id, { status: "error", error: ttsErrMsg });
           }
           break;
         }

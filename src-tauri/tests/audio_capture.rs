@@ -40,5 +40,4 @@ fn test_capture_start_twice_idempotent() {
     std::thread::sleep(Duration::from_millis(200));
     let samples = cap.stop().expect("stop");
     println!("captured {} samples", samples.len());
-    assert!(samples.len() >= 0);
 }

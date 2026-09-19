@@ -29,7 +29,6 @@ use tauri::Emitter;
 use tauri::Manager;
 
 use crate::app_state::AppState;
-use crate::tts::traits::TtsEngine;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -266,14 +265,15 @@ async fn send_to_sidecar_safe(
                     }
                 }
                 model_manager::ModelFormat::Onnx => {
-                    // ONNX + TTS → 统一 TtsService（经 State<AppState>）
+                    // ONNX + TTS → TtsRegistry（按描述符路由，经 State<AppState>）
                     eprintln!("[load_model] ONNX TTS: {}", main_file.display());
-                    let mut guard = state.tts.lock();
-                    match guard.load(&main_file, device) {
-                        Ok(()) => {
+                    let guard = state.tts.lock();
+                    match guard.load(&name, device) {
+                        Ok((_fw, loaded)) => {
                             let _ = app.emit("sidecar://event", serde_json::json!({
                                 "status": "model_ready",
-                                "model": name,
+                                "kind": "tts",
+                                "model": loaded,
                                 "device": device,
                             }));
                         }
@@ -282,6 +282,7 @@ async fn send_to_sidecar_safe(
                             emit_error(&app, msg.clone());
                             let _ = app.emit("sidecar://event", serde_json::json!({
                                 "status": "model_error",
+                                "kind": "tts",
                                 "model": name,
                                 "msg": msg,
                             }));
@@ -528,10 +529,16 @@ fn rust_list_audio_devices() -> serde_json::Value {
 }
 
 /// 卸载 sherpa ASR 引擎（杀 websocket server 进程）
+///
+/// async + 阻塞池：卸载含杀进程 + 等端口关闭，不可占主线程。
 #[tauri::command]
-fn rust_unload_sherpa_asr() -> Result<serde_json::Value, String> {
-    crate::inference::sherpa_asr::global_engine().unload();
-    Ok(serde_json::json!({ "status": "unloaded" }))
+async fn rust_unload_sherpa_asr() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        crate::inference::sherpa_asr::global_engine().unload();
+        Ok(serde_json::json!({ "status": "unloaded" }))
+    })
+    .await
+    .map_err(|e| format!("卸载任务失败: {e}"))?
 }
 
 // ─── llama-server 子进程 + HTTP 命令 ──────────────────────────────────────
@@ -605,9 +612,13 @@ async fn rust_start_llama_server(
 }
 
 /// 停止 llama-server 子进程
+///
+/// async + 阻塞池：停止含杀进程 + 等端口关闭（最长数秒），不可占主线程。
 #[tauri::command]
-fn rust_stop_llama_server() -> Result<serde_json::Value, String> {
-    inference::commands::stop_llama_server()
+async fn rust_stop_llama_server() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(inference::commands::stop_llama_server)
+        .await
+        .map_err(|e| format!("停止引擎任务失败: {e}"))?
 }
 
 /// 查询 llama-server 状态
@@ -637,10 +648,16 @@ async fn rust_load_asr(
     let req = NEXT_ASR_REQ.fetch_add(1, Ordering::SeqCst) + 1;
 
         // 注册表权威框架（事件带出，前端据此切换模型页标签，无需猜）
-        let fw_opt: Option<String> = crate::inference::registry::registry()
-            .framework_for_model(&model)
-            .ok()
-            .map(|f| f.to_string());
+        // 经阻塞池取：注册表首次初始化会构造阻塞 HTTP client，在异步上下文构造/析构会 panic
+        let fw_model = model.clone();
+        let fw_opt: Option<String> = tauri::async_runtime::spawn_blocking(move || {
+            crate::inference::registry::registry()
+                .framework_for_model(&fw_model)
+                .ok()
+                .map(|f| f.to_string())
+        })
+        .await
+        .unwrap_or(None);
 
     let _ = app.emit("sidecar://event", serde_json::json!({
         "status": "model_loading", "reqId": req, "kind": "asr",
@@ -680,8 +697,11 @@ async fn rust_load_asr(
             Ok(Ok(pair)) => Ok(pair),
             Ok(Err(e)) => Err(e),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                // 兜底：卸载残留引擎，保证下次加载干净
-                let _ = crate::inference::registry::registry().unload_active();
+                // 兜底：卸载残留引擎，保证下次加载干净（阻塞池执行：卸载会杀进程 + 等端口）
+                let _ = tauri::async_runtime::spawn_blocking(|| {
+                    crate::inference::registry::registry().unload_active()
+                })
+                .await;
                 Err("模型加载超时（240s），已中止并清理残留".into())
             }
             Err(_disconnected) => Err("加载线程异常退出".into()),
@@ -707,40 +727,67 @@ async fn rust_load_asr(
     Ok(serde_json::json!({ "ok": true, "reqId": req, "model": model_resp, "loading": true }))
 }
 
-/// 真实引擎状态快照（自愈对账）：任何"卡 loading"调它 → status_snapshot 纠偏
-#[tauri::command]
-fn rust_get_status(app: tauri::AppHandle) -> serde_json::Value {
-    let llama = crate::inference::llama_server::global_engine();
-    let sherpa = crate::inference::sherpa_asr::global_engine();
-    let (loaded, model, device) = if llama.is_loaded() {
-        let name = llama
-            .current_model_path()
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        (true, name, llama.device_label().to_string())
-    } else if sherpa.is_loaded() {
-        (true, sherpa.model(), sherpa.device())
+/// 状态快照序号：单调递增。并发对账时事件/响应可能乱序到达，前端凭 seq 丢弃陈旧快照。
+static NEXT_STATUS_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 构建状态快照（在阻塞池执行：`snapshot()` 会做 HTTP 健康检查，不可占主线程）。
+/// 每个引擎的状态经 `snapshot()` 单次读取取齐，不会出现 loaded=true 但模型名为空的撕裂状态。
+fn build_status_snapshot() -> serde_json::Value {
+    let llama = crate::inference::llama_server::global_engine().snapshot();
+    let (loaded, model, device) = if llama.loaded {
+        (true, llama.model, llama.device)
     } else {
-        (false, String::new(), String::new())
+        let sherpa = crate::inference::sherpa_asr::global_engine().snapshot();
+        if sherpa.loaded {
+            (true, sherpa.model, sherpa.device)
+        } else {
+            (false, String::new(), String::new())
+        }
     };
-    let snap = serde_json::json!({
+    status_snapshot_value(loaded, model, device)
+}
+
+/// 组装 status_snapshot 事件体（含单调 seq）
+fn status_snapshot_value(loaded: bool, model: String, device: String) -> serde_json::Value {
+    serde_json::json!({
         "status": "status_snapshot",
+        "seq": NEXT_STATUS_SEQ.fetch_add(1, Ordering::SeqCst) + 1,
         "asr": { "loaded": loaded, "model": model, "device": device },
         "recording": false,
-    });
+    })
+}
+
+/// 真实引擎状态快照（自愈对账）：任何"卡 loading"调它 → status_snapshot 纠偏
+///
+/// async + 阻塞池：`state()` 内含 HTTP 健康检查（端口不通时还会追加 TCP 探测与 fresh client
+/// 诊断），同步执行会冻结主线程（启动 800ms 与每次窗口聚焦都会走到这里）。
+#[tauri::command]
+async fn rust_get_status(app: tauri::AppHandle) -> serde_json::Value {
+    let snap = match tauri::async_runtime::spawn_blocking(build_status_snapshot).await {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("[status] 快照任务失败（按未加载上报，前端下轮对账自愈）: {e}");
+            status_snapshot_value(false, String::new(), String::new())
+        }
+    };
     let _ = app.emit("sidecar://event", snap.clone());
     snap
 }
 
 /// 卸载当前 ASR 引擎（llama/sherpa 都清理），供前端「卸载」操作
+///
+/// async + 阻塞池：卸载含杀进程 + 等端口关闭（最长数秒），不可占主线程。
 #[tauri::command]
-fn rust_unload_asr() -> Result<serde_json::Value, String> {
-    crate::inference::registry::registry().unload_active()?;
-    // 双保险：即使 active 判定异常，也把两个引擎都停掉
-    let _ = crate::inference::llama_server::global_engine().unload();
-    crate::inference::sherpa_asr::global_engine().unload();
-    Ok(serde_json::json!({ "ok": true, "loaded": false }))
+async fn rust_unload_asr() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        crate::inference::registry::registry().unload_active()?;
+        // 双保险：即使 active 判定异常，也把两个引擎都停掉
+        let _ = crate::inference::llama_server::global_engine().unload();
+        crate::inference::sherpa_asr::global_engine().unload();
+        Ok(serde_json::json!({ "ok": true, "loaded": false }))
+    })
+    .await
+    .map_err(|e| format!("卸载任务失败: {e}"))?
 }
 
 
@@ -801,9 +848,29 @@ fn check_runtime() -> serde_json::Value {
 }
 
 /// 两步验证：① 文件检查（缺什么列清单）② 试启动（DLL 链能否真跑）——不触发下载
+///
+/// async + 阻塞池：试启动要起子进程并轮询等待（最长 6 秒），同步执行会冻结 UI。
+/// 返回结构与同步版完全一致（前端 `FrameworkPanel` 按 state/error/missing 判别，无 try/catch，
+/// 因此这里绝不 reject —— 任务异常降级为 `state: "error"`）。
 #[tauri::command]
-fn rust_verify_runtime(framework: String) -> serde_json::Value {
-    inference::runtime_download::verify_runtime_full(&framework)
+async fn rust_verify_runtime(framework: String) -> serde_json::Value {
+    let fw = framework.clone();
+    match tauri::async_runtime::spawn_blocking(move || {
+        inference::runtime_download::verify_runtime_full(&fw)
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("[runtime] 验证任务失败: {e}");
+            serde_json::json!({
+                "state": "error",
+                "installed": false,
+                "missing": [],
+                "error": format!("验证任务失败: {e}"),
+            })
+        }
+    }
 }
 
 /// 下载 + 解压推理框架运行时（libs）到 exe 旁 libs/
@@ -838,14 +905,9 @@ async fn download_runtime(
 /// 测试 TTS 模型加载（打印输入输出 tensor 名称）
 #[tauri::command]
 fn rust_test_tts_model(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let model_path = crate::model_manager::model_dir("Kokoro-v1_0")
-        .join("model.onnx");
-    if !model_path.exists() {
-        return Err(format!("TTS model not found: {}", model_path.display()));
-    }
-    let mut g = state.tts.lock();
-    g.load(&model_path, "cpu").map_err(|e| e.to_string())?;
-    Ok(serde_json::json!({"status": "loaded", "model": g.name(), "device": "cpu"}))
+    let guard = state.tts.lock();
+    let (_fw, name) = guard.load("Kokoro-v1_0", "cpu")?;
+    Ok(serde_json::json!({"status": "loaded", "model": name, "device": "cpu"}))
 }
 
 // ============================================================
@@ -957,6 +1019,15 @@ pub fn run() {
             // Rust log:: 记录 → 前端运行日志（引擎层端口守卫/身份验证等细节可见）
             log_bridge::start_emitter(app.handle().clone());
 
+            // ── 预热 ASR 引擎注册表（必须在「非异步上下文」完成首次初始化）──
+            // 原因：注册表首次初始化会构造 LlamaServerEngine → 创建 reqwest::blocking::Client
+            // （其内部自建 tokio Runtime）。若首次初始化发生在 async 命令体或 spawn_blocking 里，
+            // tokio 会拒绝在该上下文析构 Runtime → panic（"Cannot drop a runtime ..."），
+            // 后果是 rust_load_asr 在发 model_loading 事件之前中断 → 界面停在「加载中」直到超时。
+            // 此处位于主线程 setup，仅建对象（不发网络请求、不起子进程），毫秒级。
+            // 注：只影响「创建时机」，HTTP 调用的执行线程不变（仍在后台线程/阻塞池）。
+            let _ = crate::inference::registry::registry();
+
             // 统一数据根：便携模式（exe旁data）或安装模式（AppData）
             // 模型根优先级：config.json 已保存的用户选择 > 数据根/models（便携/安装各自默认）
             let saved = crate::data_root::read_saved_model_root_with(app.handle());
@@ -1003,9 +1074,6 @@ pub fn run() {
             tts::commands::rust_load_tts_model,
             tts::commands::rust_synthesize,
             tts::commands::rust_set_tts_language,
-            tts::commands::rust_list_tts_voices,
-            tts::commands::rust_list_e2e_tts_models,
-            tts::commands::rust_switch_e2e_tts_model,
             tts::commands::rust_unload_tts_model,
             tts::commands::rust_set_tts_clone_voice,
             tts::commands::rust_clear_tts_clone_voice,

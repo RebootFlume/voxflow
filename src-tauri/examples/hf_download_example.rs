@@ -10,7 +10,7 @@ use voxflow_lib::download;
 fn example_sync_download() -> anyhow::Result<()> {
     // 创建下载配置
     let config = download::DownloadConfig::new("openai-community/gpt2", "config.json")
-        .with_env_token(); // 从 HF_TOKEN 环境变量读取 Token
+        .with_config_token(); // 从 HF_TOKEN 环境变量读取 Token
 
     // 创建同步下载器
     let downloader = download::SyncDownloader::new(&config)?;
@@ -42,7 +42,7 @@ fn example_private_model() -> anyhow::Result<()> {
 /// 示例 3：下载多个文件
 fn example_download_multiple() -> anyhow::Result<()> {
     let config = download::DownloadConfig::new("openai-community/gpt2", "")
-        .with_env_token();
+        .with_config_token();
 
     let downloader = download::SyncDownloader::new(&config)?;
 
@@ -66,7 +66,7 @@ fn example_custom_cache() -> anyhow::Result<()> {
 
     let config = download::DownloadConfig::new("openai-community/gpt2", "config.json")
         .with_cache_dir(cache_dir)
-        .with_env_token();
+        .with_config_token();
 
     let downloader = download::SyncDownloader::new(&config)?;
     let path = downloader.download_file(&config)?;

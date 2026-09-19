@@ -91,35 +91,9 @@ export function rustTranscribeLlama(
   return invoke("rust_transcribe_llama", { filePath, exportDir, exportFormat });
 }
 
-/** Rust 引擎：加载 TTS 模型 */
+/** Rust 引擎：加载 TTS 模型（唯一命令；展示名 / 引擎 id / 目录名均可） */
 export function rustLoadTtsModel(modelPath: string, device: string): Promise<Record<string, unknown>> {
   return invoke("rust_load_tts_model", { modelPath, device });
-}
-
-/** 列出所有可切换的纯 E2E TTS 模型（Kokoro/Matcha/ZipVoice/Pocket/Supertonic/Kitten） */
-export interface E2eTtsModelInfo {
-  id: string;
-  name: string;
-  cli_prefix: string;
-  default_dir: string;
-  is_chinese_optimized: boolean;
-  languages: string[];
-  supports_speaker: boolean;
-  /** auto=自动识别 / fixed=单语言固定 / select=需用户选 / cloning=语音克隆 */
-  language_mode: "auto" | "fixed" | "select" | "cloning";
-  downloaded: boolean;
-}
-
-export function rustListE2eTtsModels(): Promise<{ models: E2eTtsModelInfo[] }> {
-  return invoke("rust_list_e2e_tts_models");
-}
-
-/** 切换 E2E TTS 模型（按 id，如 "kokoro-v1_1" / "matcha"） */
-export function rustSwitchE2eTtsModel(
-  modelId: string,
-  device: string,
-): Promise<Record<string, unknown>> {
-  return invoke("rust_switch_e2e_tts_model", { modelId, device });
 }
 
 /** 卸载当前 TTS 模型（释放引擎，可随后删除模型） */
@@ -149,10 +123,7 @@ export function rustListTtsSpeakers(): Promise<{
   return invoke("rust_list_tts_speakers");
 }
 
-/** TTS 可用语言/音色（由 Rust 扫 voices 目录得来，不写死） */
-export function rustListTtsVoices(): Promise<{ languages: string[]; voices_by_lang: Record<string, string[]>; default_lang: string }> {
-  return invoke("rust_list_tts_voices");
-}
+/** TTS 可用语言/音色（已废弃：语言能力改由 rustListE2eTtsModels 的描述符提供） */
 
 export function rustSetTtsLanguage(language: string): Promise<{ language: string }> {
   return invoke("rust_set_tts_language", { language });
@@ -163,11 +134,6 @@ export function rustSynthesize(
   text: string, voice: string, exportDir: string,
 ): Promise<Record<string, unknown>> {
   return invoke("rust_synthesize", { text, voice, exportDir });
-}
-
-/** Rust 引擎：查询 TTS 状态 */
-export function rustTtsStatus(): Promise<Record<string, unknown>> {
-  return invoke("rust_tts_status");
 }
 
 /** Rust 原生音频设备枚举 */

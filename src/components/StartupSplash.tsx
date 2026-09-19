@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { AudioWaveform, Loader2, Sparkles, Download } from "lucide-react";
+import { AlertTriangle, AudioWaveform, Loader2, Sparkles, Download } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { useAppStore } from "@/stores";
 import { t } from "@/lib/i18n";
 
@@ -23,6 +24,9 @@ export function StartupSplash() {
   const asrStatus = useAppStore((s) => s.engines.asr.status);
   const asrModel = useAppStore((s) => s.engines.asr.model);
   const asrStage = useAppStore((s) => s.engines.asr.stage);
+  const asrError = useAppStore((s) => s.engines.asr.error);
+  const setActiveModule = useAppStore((s) => s.setActiveModule);
+  const setActiveSubMenu = useAppStore((s) => s.setActiveSubMenu);
 
   const [visible, setVisible] = useState(true);
   const [showSkip, setShowSkip] = useState(false);
@@ -65,9 +69,9 @@ export function StartupSplash() {
     };
   }, [emptyBoot]);
 
-  // 消失条件：ASR ready/error → 淡出 400ms → 置 startupPhase ready（unmount）
+  // 消失条件：ASR ready → 淡出；ASR error → 不静默消失，改为就地解释（见下方 error 面板）
   useEffect(() => {
-    if (asrStatus === "ready" || asrStatus === "error") {
+    if (asrStatus === "ready") {
       setFading(true);
       fadeTimer.current = setTimeout(() => {
         setVisible(false);
@@ -130,8 +134,35 @@ export function StartupSplash() {
         {t(locale, "splash.subtitle")}
       </p>
 
-      {/* 加载指示：正常加载 / 空启动引导 */}
-      {emptyBoot ? (
+      {/* 启动失败：给出原因与出口（此前静默淡出，用户不知道发生了什么） */}
+      {asrStatus === "error" ? (
+        <div className="mt-10 flex max-w-[420px] flex-col items-center gap-3 px-6">
+          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-destructive/10 ring-1 ring-destructive/30">
+            <AlertTriangle className="h-6 w-6 text-destructive" />
+          </div>
+          <p className="text-sm font-medium text-foreground">{t(locale, "splash.error.title")}</p>
+          {asrError && (
+            <p className="rounded-md bg-destructive/10 px-3 py-2 text-center text-xs leading-snug text-destructive">
+              {asrError}
+            </p>
+          )}
+          <div className="mt-1 flex items-center gap-2">
+            <Button
+              size="sm"
+              onClick={() => {
+                setActiveModule("models");
+                setActiveSubMenu("framework");
+                handleSkip();
+              }}
+            >
+              {t(locale, "splash.error.cta")}
+            </Button>
+            <Button size="sm" variant="outline" onClick={handleSkip}>
+              {t(locale, "splash.error.enter")}
+            </Button>
+          </div>
+        </div>
+      ) : emptyBoot ? (
         <div className="mt-10 flex flex-col items-center gap-3">
           <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10 ring-1 ring-primary/30">
             <Download className="h-6 w-6 text-primary" />

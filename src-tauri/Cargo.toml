@@ -35,7 +35,6 @@ ndarray = "0.16"             # numpy 替代
 hound = "3.5"                # WAV 编解码
 base64 = "0.22"              # base64 编解码
 chrono = { version = "0.4", features = ["clock"] }
-ort = { version = "2.0.0-rc.13", features = ["directml"] }  # ONNX Runtime 1.28 + DirectML
 llama-cpp-2 = "0.1"         # llama.cpp GGUF 推理
 
 # llama-server 子进程 + HTTP 桥接（ASR）

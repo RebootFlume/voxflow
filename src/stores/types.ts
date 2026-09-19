@@ -77,4 +77,15 @@ export interface ModelItemState {
   totalBytes?: number | null;
   sizeOnDiskGb?: number;
   cancelRequested?: boolean;
+  // ── 能力字段（描述符驱动，models_state 事件携带；TTS 语言/克隆 UI 据此渲染）──
+  languages?: string[];
+  language_mode?: "auto" | "fixed" | "select" | "cloning";
+  voice_mode?: {
+    type: "fixed" | "preset" | "clone" | "preset_and_clone";
+    count?: number;
+    per_language?: boolean;
+    requires_text?: boolean;
+    overrides_preset?: boolean;
+  };
+  supports_clone?: boolean;
 }

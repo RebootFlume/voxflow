@@ -11,16 +11,14 @@
 //!
 //! 重要：默认 ctx 大小会让 8GB 显存爆掉（→ 慢 500 倍），必须显式限制。
 
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde::Deserialize;
 
-use super::engine::{Device, EngineKind, InferInput, InferOutput, InferenceEngine};
 use super::errors::{InferenceError, InferenceResult};
 
 /// 默认 HTTP 端口（与启动参数一致）
@@ -59,14 +57,14 @@ pub struct LlamaServerConfig {
     pub mmproj_offload: bool,
 }
 
-impl LlamaServerConfig {
-    /// 按模型名构造配置（0.6B / 1.7B），mmproj 优先 bf16（无损编码器）
-    pub fn for_model(model_prefix: &str, model_dir: &str) -> Self {
-        let (runtime, model) = llama_paths_for(model_dir);
-        Self {
-            server_path: runtime.join(if cfg!(windows) { "llama-server.exe" } else { "llama-server" }),
-            model_path: model.join(format!("{model_prefix}-Q8_0.gguf")),
-            mmproj_path: pick_mmproj(&model, model_prefix),
+impl Default for LlamaServerConfig {
+    fn default() -> Self {
+        // 从描述符解析默认 ASR 模型（Qwen3-ASR-0.6B）；解析失败退回最小配置（不 panic）
+        llama_config_for_model("Qwen3-ASR-0.6B", "cuda").unwrap_or_else(|_| LlamaServerConfig {
+            server_path: crate::inference::runtime_paths::llama_runtime_dir()
+                .join(if cfg!(windows) { "llama-server.exe" } else { "llama-server" }),
+            model_path: PathBuf::new(),
+            mmproj_path: PathBuf::new(),
             port: DEFAULT_PORT,
             n_gpu_layers: 99,
             ctx_size: 8192,
@@ -74,83 +72,8 @@ impl LlamaServerConfig {
             temperature: 0.0,
             no_webui: true,
             mmproj_offload: true,
-        }
+        })
     }
-}
-
-impl Default for LlamaServerConfig {
-    fn default() -> Self {
-        // 从注册表动态解析 0.6B（默认 ASR 模型）
-        llama_config_for_model("Qwen3-ASR-0.6B", "cuda")
-            .unwrap_or_else(|_| llama_config_fallback())
-    }
-}
-
-/// 兜底配置（解析失败时，避免构造 panic）
-fn llama_config_fallback() -> LlamaServerConfig {
-    let (runtime, model) = llama_paths();
-    LlamaServerConfig {
-        server_path: runtime.join(if cfg!(windows) { "llama-server.exe" } else { "llama-server" }),
-        model_path: model.join("Qwen3-ASR-0.6B-Q8_0.gguf"),
-        mmproj_path: model.join("mmproj-Qwen3-ASR-0.6B-Q8_0.gguf"),
-        port: DEFAULT_PORT,
-        n_gpu_layers: 99,
-        ctx_size: 8192,
-        parallel: 1,
-        temperature: 0.0,
-        no_webui: true,
-        mmproj_offload: true,
-    }
-}
-
-/// 选择 mmproj：优先 bf16（无损编码器，转写更准），回退 Q8_0（量化）。
-/// 同一目录下可能存在多个版本的 mmproj（下载更新后旧文件残留）。
-fn pick_mmproj(model_dir: &Path, model_name: &str) -> PathBuf {
-    let bf16 = model_dir.join(format!("mmproj-{model_name}-bf16.gguf"));
-    if bf16.exists() {
-        return bf16;
-    }
-    model_dir.join(format!("mmproj-{model_name}-Q8_0.gguf"))
-}
-
-/// 定位 llama-cpp 推理框架目录 + 模型目录（分离架构）
-/// 返回 (运行时目录, 模型目录)
-fn llama_paths() -> (PathBuf, PathBuf) {
-    llama_paths_for("qwen3-asr-0.6b-gguf")
-}
-
-/// 定位运行时 + 指定模型子目录（0.6B / 1.7B 通用）
-fn llama_paths_for(model_subdir: &str) -> (PathBuf, PathBuf) {
-    // 运行时目录：exe 同级 libs（llama_runtime_dir 统一解析）
-    let runtime = crate::inference::runtime_paths::llama_runtime_dir();
-
-    // 模型目录（GGUF + mmproj 必须同时存在）: 统一走 model_manager 的 modelRoot（config.json）:
-    //   1. modelRoot/<模型目录>
-    //   2. modelRoot/<模型名>（旧目录名兼容）
-    let model_root = crate::model_manager::get_model_root();
-    let model_name = if model_subdir.contains("1.7") {
-        "Qwen3-ASR-1.7B"
-    } else {
-        "Qwen3-ASR-0.6B"
-    };
-    let gguf = format!("{model_name}-Q8_0.gguf");
-    let model = {
-        let d = model_root.join(model_subdir);
-        (d.join(&gguf).exists()).then_some(d)
-    }
-    .or_else(|| {
-        let d = model_root.join(model_name);
-        (d.join(&gguf).exists()).then_some(d)
-    })
-    .unwrap_or_else(|| model_root.join(model_subdir));
-    if !model.join(&gguf).exists() {
-        // 回退：模型和运行时同目录（旧布局 / benchmarks）
-        let legacy = runtime.join(&gguf);
-        if legacy.exists() {
-            return (runtime.clone(), runtime);
-        }
-    }
-    (runtime, model)
 }
 
 impl LlamaServerConfig {
@@ -191,6 +114,15 @@ impl LaunchRec {
             && paths_equal(&self.mmproj_path, &cfg.mmproj_path)
             && self.n_gpu_layers == cfg.n_gpu_layers
     }
+}
+
+/// 引擎状态快照：`loaded` 判定与 model/device 取自同一次状态读取，
+/// 供状态对账使用（避免分三次调用得到撕裂状态）。
+#[derive(Debug, Clone, Default)]
+pub struct LlamaSnapshot {
+    pub loaded: bool,
+    pub model: String,
+    pub device: String,
 }
 
 /// 内部状态：
@@ -517,12 +449,22 @@ impl LlamaServerEngine {
     /// 仅当 ①本进程成功启动过（launched 记录）且 ②该端口仍在服务时返回 true。
     /// 外部进程/用户自装的 llama-server 即使监听同一端口，也不被视为"我们的已加载引擎"。
     pub fn is_loaded(&self) -> bool {
+        self.snapshot().loaded
+    }
+
+    /// 状态快照：`loaded` / 模型文件名 / 设备在一次调用内取齐（与 `is_loaded` 同一实现）。
+    /// 状态对账必须用它，避免 `is_loaded` → `current_model_path` → `device_label`
+    /// 三次分读在并发加载/卸载时拿到撕裂状态（如 loaded=true 但模型名为空）。
+    pub fn snapshot(&self) -> LlamaSnapshot {
         // 本进程从未成功启动过 → 不是我们的引擎
-        let launched = self.launched.lock();
-        if launched.is_none() {
-            return false;
+        let launched = self.launched.lock().is_some();
+        if !launched {
+            return LlamaSnapshot::default();
         }
-        let port = self.config.lock().port;
+        let (port, model_path, n_gpu_layers) = {
+            let c = self.config.lock();
+            (c.port, c.model_path.clone(), c.n_gpu_layers)
+        };
         // port_alive 用池化 client——已禁用空闲复用（每次新连接），不会再因 stale 假阴性。
         // 端口是权威判据：只要 /health 响应 = 引擎在服务 = 已加载。
         // child 句柄只作参考（可能过期误报），不否决端口结论。
@@ -559,13 +501,20 @@ impl LlamaServerEngine {
             log::info!(
                 "[llama-server] is_loaded=false: port={port} pooled_health=false tcp={tcp_ok} fresh_health={fresh_health} child_alive={child_says_alive}"
             );
-            return false;
+            return LlamaSnapshot::default();
         }
         // 端口通：即使 child 句柄 stale 也视为已加载（接管/句柄过期场景的正确语义）
         if !child_says_alive {
             log::debug!("[llama-server] child 句柄已退出但端口 {port} 在服务 → 视为已加载");
         }
-        true
+        LlamaSnapshot {
+            loaded: true,
+            model: model_path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            device: if n_gpu_layers > 0 { "cuda" } else { "cpu" }.to_string(),
+        }
     }
 
     /// 转写一段音频
@@ -640,6 +589,13 @@ impl LlamaServerEngine {
         self.config.lock().model_path.clone()
     }
 
+    /// 当前模型显示名（取真实模型文件名 + 后端标记；此前无论加载什么都显示 0.6B）
+    pub fn model_name(&self) -> Option<String> {
+        let p = self.config.lock().model_path.clone();
+        let fname = p.file_name()?.to_string_lossy().into_owned();
+        Some(format!("{fname} (via llama-server)"))
+    }
+
     /// 当前生效设备（cuda/cpu），供状态快照与前端展示
     pub fn device_label(&self) -> &'static str {
         if self.config.lock().n_gpu_layers > 0 {
@@ -670,57 +626,6 @@ impl Drop for LlamaServerEngine {
     }
 }
 
-// ─── InferenceEngine trait 实现 ──────────────────────────────────────────────
-
-impl InferenceEngine for LlamaServerEngine {
-    fn kind(&self) -> EngineKind {
-        EngineKind::LlamaServer
-    }
-
-    fn load(&mut self, _model_path: &Path, _device: Device) -> InferenceResult<()> {
-        // 配置已在 new() 时固定，_model_path 参数忽略
-        LlamaServerEngine::load(self)
-    }
-
-    fn unload(&mut self) -> InferenceResult<()> {
-        LlamaServerEngine::unload(self)
-    }
-
-    fn is_loaded(&self) -> bool {
-        LlamaServerEngine::is_loaded(self)
-    }
-
-    fn model_name(&self) -> Option<String> {
-        // 从当前配置的真实模型文件取名，不再硬编码（此前无论加载什么都显示 0.6B）
-        let p = self.config.lock().model_path.clone();
-        let fname = p.file_name()?.to_string_lossy().into_owned();
-        Some(format!("{fname} (via llama-server)"))
-    }
-
-    fn device(&self) -> Device {
-        if self.config.lock().n_gpu_layers > 0 {
-            Device::Cuda(0)
-        } else {
-            Device::Cpu
-        }
-    }
-
-    fn infer(&mut self, input: &InferInput) -> InferenceResult<InferOutput> {
-        match input {
-            InferInput::Audio { samples, sample_rate } => {
-                let text = self.transcribe(samples, *sample_rate)?;
-                Ok(InferOutput::Transcript {
-                    text,
-                    language: Some("zh".to_string()),
-                })
-            }
-            InferInput::Text(_) => Err(InferenceError::InvalidInput(
-                "LlamaServerEngine 仅支持 Audio 输入".to_string(),
-            )),
-        }
-    }
-}
-
 // ─── 辅助函数 ──────────────────────────────────────────────────────────────
 
 /// 两个模型路径是否指向同一文件（Windows 大小写不敏感 + 分隔符归一）
@@ -729,115 +634,10 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
     norm(a) == norm(b)
 }
 
-/// 路径规范化（比较用）：Windows 大小写不敏感 + 分隔符归一
-fn norm_path(p: &std::path::Path) -> String {
-    p.to_string_lossy().replace('\\', "/").to_lowercase()
-}
-
-/// 该进程是否由本软件自己的 runtime（exe 旁 libs/）启动。
-/// 只清理"自己的引擎进程"（本实例启动或本软件历史会话残留），
-/// 绝不杀用户/第三方自装的 llama-server —— 即使它恰好监听同一端口。
-fn is_our_engine_exe(exe: &Path) -> bool {
-    let libs = crate::inference::runtime_paths::libs_dir();
-    let e = norm_path(exe);
-    let l = norm_path(&libs);
-    e.starts_with(&l)
-}
-
-/// 取进程可执行文件路径（PowerShell；仅 Windows 有效）
-fn process_exe_path(pid: u32) -> Option<PathBuf> {
-    let mut cmd = std::process::Command::new("powershell");
-    crate::process_hidden::hide_console_window(&mut cmd);
-    let out = cmd
-        .args([
-            "-NoProfile",
-            "-Command",
-            &format!("(Get-Process -Id {pid} -ErrorAction SilentlyContinue).Path"),
-        ])
-        .output()
-        .ok()?;
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() {
-        return None;
-    }
-    Some(PathBuf::from(s))
-}
-
-/// 杀掉占用指定端口的「本软件引擎」进程（仅 Windows）。
-/// 判定依据 = 进程可执行文件是否在本软件 libs 目录下（路径归属），不是图像名：
-/// - 自己的引擎 / 历史会话残留 → 杀掉（防止死进程占着固定端口造成"端口通=假就绪"）
-/// - 用户或第三方自装的 llama-server / sherpa（路径不在本软件目录）→ 不杀
-/// - 无法读取路径的进程 → 保守不杀（宁可让后续走"端口被占"逻辑，也不误伤）
-pub(crate) fn kill_port_owner(port: u16) {
-    #[cfg(windows)]
-    {
-        let mut netstat_cmd = std::process::Command::new("netstat");
-        crate::process_hidden::hide_console_window(&mut netstat_cmd);
-        let out = netstat_cmd
-            .args(["-ano", "-p", "tcp"])
-            .output();
-        let Ok(out) = out else { return };
-        if !out.status.success() {
-            return;
-        }
-        let text = String::from_utf8_lossy(&out.stdout);
-        let needle = format!(":{port}");
-        let mut pids: Vec<u32> = Vec::new();
-        for line in text.lines() {
-            if !line.contains(&needle) || !line.contains("LISTENING") {
-                continue;
-            }
-            if let Some(pid) = line.split_whitespace().next_back().and_then(|s| s.parse::<u32>().ok()) {
-                if !pids.contains(&pid) {
-                    pids.push(pid);
-                }
-            }
-        }
-        for pid in pids {
-            let exe = match process_exe_path(pid) {
-                Some(e) => e,
-                None => {
-                    log::warn!("[port-guard] 端口 {port} 的 PID={pid} 无法确认路径，保守跳过（不误杀）");
-                    continue;
-                }
-            };
-            if !is_our_engine_exe(&exe) {
-                log::warn!(
-                    "[port-guard] 端口 {port} 被外部进程占用（{}，非本软件引擎），不杀 —— 需要走换端口/报错逻辑",
-                    exe.display()
-                );
-                continue;
-            }
-            log::warn!("[port-guard] 清理本软件残留引擎 PID={pid}（{}）", exe.display());
-            let mut kill = std::process::Command::new("taskkill");
-            crate::process_hidden::hide_console_window(&mut kill);
-            let _ = kill
-                .args(["/PID", &pid.to_string(), "/F"])
-                .status();
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = port;
-    }
-}
-
-/// 从 start 起找第一个空闲端口（探测：无法建立 TCP 连接即视为空闲）
-pub(crate) fn find_free_port(start: u16) -> Option<u16> {
-    (start..start + 200).find(|p| TcpStream::connect(("127.0.0.1", *p)).is_err())
-}
-
-/// 等待端口完全释放（旧进程刚杀后，避免 bind 冲突）
-pub(crate) fn wait_port_closed(port: u16, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if TcpStream::connect(("127.0.0.1", port)).is_err() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    log::warn!("[llama-server] 等待端口 {port} 释放超时");
-}
+// 进程监督（kill_port_owner / find_free_port / wait_port_closed）已移至
+// `inference::device`（P1 脚手架抽取），此处 re-export 保持本文件内部
+// 及 sherpa_asr.rs 等外部调用点（crate::inference::llama_server::kill_port_owner）兼容。
+pub(crate) use crate::inference::device::{find_free_port, kill_port_owner, wait_port_closed};
 
 /// llama-server 转写响应（OpenAI 兼容）
 #[derive(Debug, Deserialize)]
@@ -984,68 +784,58 @@ pub fn load_asr_model_with_stage(
     Ok(engine.model_name().unwrap_or_else(|| name.to_string()))
 }
 
-/// 从注册表解析模型目录 + 模型/投影文件路径（不硬编码模型名）
+/// 从描述符解析运行时 + 模型/投影文件路径（模型差异在 spec.rs，本文件无模型名分支）
 fn llama_config_for_model(name: &str, device: &str) -> InferenceResult<LlamaServerConfig> {
-    let (runtime, _) = llama_paths_for(name);
+    use crate::tts::spec::{AsrBackendSpec, BackendSpec, ModelSpec};
+
+    let spec = ModelSpec::find(name)
+        .ok_or_else(|| InferenceError::LoadFailed(format!("未知模型: {name}")))?;
+    let BackendSpec::Llama(AsrBackendSpec::Llama {
+        gguf,
+        mmproj_bf16,
+        mmproj_q8,
+    }) = &spec.backend
+    else {
+        return Err(InferenceError::LoadFailed(format!(
+            "{name} 不是 llama 后端模型（backend={:?}）",
+            spec.backend
+        )));
+    };
+
     // 目录 = model_dir(name)（内部处理 engine_dir：如 "Qwen3-ASR-0.6B" → "qwen3-asr-0.6b-gguf"）
     let dir = crate::model_manager::model_dir(name);
+    let model_path = dir.join(gguf);
+    if !model_path.exists() {
+        return Err(InferenceError::LoadFailed(format!(
+            "在 {} 未找到模型文件（{gguf}）",
+            dir.display()
+        )));
+    }
+    // mmproj：bf16（无损编码器）优先，回退 Q8_0
+    let bf16 = dir.join(mmproj_bf16);
+    let mmproj_path = if bf16.exists() { bf16 } else { dir.join(mmproj_q8) };
+    if !mmproj_path.exists() {
+        return Err(InferenceError::LoadFailed(format!(
+            "在 {} 未找到 mmproj 文件（{mmproj_bf16} / {mmproj_q8}）",
+            dir.display()
+        )));
+    }
 
-    // 目录内动态找 GGUF 主模型（Q8_0 优先，bf16 次之）
-    let model_path = find_gguf_in(&dir, name, "-Q8_0", false)
-        .or_else(|| find_gguf_in(&dir, name, "-bf16", false))
-        .ok_or_else(|| {
-            InferenceError::LoadFailed(format!(
-                "在 {} 未找到模型文件（{}-Q8_0.gguf）",
-                dir.display(),
-                name
-            ))
-        })?;
-    // mmproj：bf16（无损）优先，回退 Q8_0
-    let mmproj = find_gguf_in(&dir, name, "-bf16", true)
-        .or_else(|| find_gguf_in(&dir, name, "-Q8_0", true))
-        .ok_or_else(|| {
-            InferenceError::LoadFailed(format!(
-                "在 {} 未找到 mmproj 文件（mmproj-{}-*.gguf）",
-                dir.display(),
-                name
-            ))
-        })?;
-
+    let runtime = crate::inference::runtime_paths::llama_runtime_dir();
+    let is_cpu = device.to_ascii_lowercase().trim() == "cpu";
     Ok(LlamaServerConfig {
         server_path: runtime.join(if cfg!(windows) { "llama-server.exe" } else { "llama-server" }),
         model_path,
-        mmproj_path: mmproj,
+        mmproj_path,
         port: DEFAULT_PORT,
         // 设备生效：cpu → 全 CPU（0 层）；其他（cuda 等）→ 全 GPU（99 层）
-        n_gpu_layers: match device.to_ascii_lowercase().trim() {
-            "cpu" => 0,
-            _ => 99,
-        },
+        n_gpu_layers: if is_cpu { 0 } else { 99 },
         ctx_size: 8192,
         parallel: 1,
         temperature: 0.0,
         no_webui: true,
-        mmproj_offload: device.to_ascii_lowercase().trim() != "cpu",
+        mmproj_offload: !is_cpu,
     })
-}
-
-/// 在目录内找匹配的 GGUF 文件。
-/// - is_mmproj=true：找 mmproj-{name}{quant}.gguf
-/// - is_mmproj=false：找 {name}{quant}.gguf（非 mmproj- 前缀）
-fn find_gguf_in(dir: &Path, name: &str, quant: &str, is_mmproj: bool) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(dir).ok()?;
-    let want = format!("{name}{quant}.gguf");
-    let want_mm = format!("mmproj-{name}{quant}.gguf");
-    for e in entries.flatten() {
-        let fname = e.file_name().to_string_lossy().to_string();
-        if is_mmproj && fname == want_mm {
-            return Some(e.path());
-        }
-        if !is_mmproj && !fname.starts_with("mmproj-") && fname == want {
-            return Some(e.path());
-        }
-    }
-    None
 }
 
 /// 用自定义配置初始化（仅第一次有效）
@@ -1179,22 +969,33 @@ mod tests {
         assert!(cfg.port == DEFAULT_PORT);
         assert!(cfg.ctx_size == 8192);
         assert!(cfg.parallel == 1);
-        // 分离架构：运行时在 libs/llama-cpp，模型在 models/qwen3-asr-0.6b-gguf
-        // 这些路径在开发机存在（随项目落地），但 CI/其它机器可能没有，故用存在性宽松断言
+        // 分离架构：运行时在 libs/llama-cpp；模型路径在模型已下载时才可解析
         eprintln!("[test] server_path={}", cfg.server_path.display());
         eprintln!("[test] model_path={}", cfg.model_path.display());
         eprintln!("[test] mmproj_path={}", cfg.mmproj_path.display());
+        assert!(
+            cfg.server_path.display().to_string().replace('\\', "/").contains("libs/llama-cpp"),
+            "运行时应在 libs/llama-cpp"
+        );
     }
 
+    /// 描述符驱动：模型文件路径 / ngl 策略 / mmproj 偏好都由 spec 决定，无模型名分支
     #[test]
-    fn test_llama_paths_separated() {
-        let (runtime, model) = llama_paths();
-        eprintln!("[test] runtime={}", runtime.display());
-        eprintln!("[test] model={}", model.display());
-        // 开发环境下：runtime 应在 libs/llama-cpp，model 应在 models/qwen3-asr-0.6b-gguf
-        let runtime_str = runtime.display().to_string().replace('\\', "/");
-        let model_str = model.display().to_string().replace('\\', "/");
-        assert!(runtime_str.contains("libs/llama-cpp"), "runtime 应在 libs/llama-cpp，实际: {runtime_str}");
-        assert!(model_str.contains("models/qwen3-asr-0.6b-gguf"), "model 应在 models/qwen3-asr-0.6b-gguf，实际: {model_str}");
+    fn test_config_spec_driven() {
+        match llama_config_for_model("Qwen3-ASR-0.6B", "cpu") {
+            Ok(cfg) => {
+                assert!(cfg.model_path.ends_with("Qwen3-ASR-0.6B-Q8_0.gguf"));
+                assert!(cfg
+                    .mmproj_path
+                    .to_string_lossy()
+                    .contains("mmproj-Qwen3-ASR-0.6B"));
+                assert_eq!(cfg.n_gpu_layers, 0, "cpu → 0 层");
+                assert!(!cfg.mmproj_offload, "cpu → mmproj 不卸载到 GPU");
+            }
+            Err(e) => eprintln!("模型未下载，跳过路径断言: {e}"),
+        }
+        // 未知模型 / 非 llama 后端 → 明确报错（不 panic）
+        assert!(llama_config_for_model("bogus-model", "cpu").is_err());
+        assert!(llama_config_for_model("Kokoro-v1_0", "cpu").is_err(), "TTS 模型不是 llama 后端");
     }
 }

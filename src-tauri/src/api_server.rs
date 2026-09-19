@@ -26,7 +26,7 @@ pub struct ApiConfig {
     pub host: String,
     pub port: u16,
     pub api_key: String,
-    pub tts: Arc<Mutex<crate::tts::service::TtsService>>,
+    pub tts: Arc<Mutex<crate::tts::registry::TtsRegistry>>,
 }
 
 // ─── 单例状态 ──────────────────────────────────────────────────────────────
@@ -290,22 +290,22 @@ fn handle_tts(body: &[u8], cfg: &ApiConfig) -> tiny_http::Response<Cursor<Vec<u8
         .and_then(|v| v.as_str())
         .unwrap_or("default");
 
-    // 2. 合成（24kHz mono i16）
+    // 2. 合成（采样率取引擎真实输出）
     // try_lock 避免与 UI 主线程 Tauri 命令争锁：忙时返回 503
-    let mut tts = match cfg.tts.try_lock() {
+    let tts = match cfg.tts.try_lock() {
         Some(g) => g,
         None => return json_response(503, error_json(503, "TTS engine busy")),
     };
-    if !tts.is_loaded() {
+    let Some(engine) = tts.active() else {
         return json_response(500, error_json(500, "TTS model not loaded"));
-    }
-    match tts.infer(input, voice) {
-        Ok(samples) => {
-            if samples.is_empty() {
+    };
+    match engine.synthesize(input, voice) {
+        Ok(audio) => {
+            if audio.samples.is_empty() {
                 return json_response(500, error_json(500, "TTS returned empty audio"));
             }
-            // 3. 编码为 WAV（24kHz 16bit mono）
-            match wav_from_i16(&samples) {
+            // 3. 编码为 WAV（采样率与 PCM 一致）
+            match wav_from_i16(&audio.samples, audio.sample_rate) {
                 Ok(wav_bytes) => {
                     let len = wav_bytes.len();
                     tiny_http::Response::new(
@@ -350,11 +350,11 @@ fn is_wav(data: &[u8]) -> bool {
     data.len() >= 4 && &data[..4] == b"RIFF"
 }
 
-/// i16 PCM → 内存 WAV（24kHz 16bit mono，与 rust_synthesize 落盘 spec 一致）
-fn wav_from_i16(samples: &[i16]) -> Result<Vec<u8>, String> {
+/// i16 PCM → 内存 WAV（采样率由调用方传入，与 rust_synthesize 落盘一致）
+fn wav_from_i16(samples: &[i16], sample_rate: u32) -> Result<Vec<u8>, String> {
     let spec = hound::WavSpec {
         channels: 1,
-        sample_rate: 24000,
+        sample_rate: sample_rate.max(1),
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };

@@ -32,6 +32,14 @@ pub enum SherpaState {
     Error(String),
 }
 
+/// 引擎状态快照：单锁读取，保证 loaded / model / device 三者自洽
+#[derive(Debug, Clone, Default)]
+pub struct SherpaSnapshot {
+    pub loaded: bool,
+    pub model: String,
+    pub device: String,
+}
+
 struct Inner {
     child: Option<Child>,
     port: u16,
@@ -78,11 +86,10 @@ impl SherpaAsrEngine {
         self.inner.lock().device.clone()
     }
 
-    /// 定位 websocket server 可执行文件（官方包结构：根/bin/sherpa-onnx-offline-websocket-server.exe）
+    /// 定位 websocket server 可执行文件（规范布局：<sherpa_runtime_dir>/bin/…，
+    /// 与下载 marker、TTS 引擎共用 runtime_paths::sherpa_exe 单一真源）
     fn server_exe() -> PathBuf {
-        crate::inference::runtime_paths::sherpa_runtime_dir()
-            .join("bin")
-            .join(SHERPA_WS_EXE)
+        crate::inference::runtime_paths::sherpa_exe(SHERPA_WS_EXE)
     }
 
     fn server_exe_exists() -> bool {
@@ -144,14 +151,10 @@ impl SherpaAsrEngine {
             DEFAULT_PORT
         };
 
-        // 参数：SenseVoice 用 --sense-voice-model，Paraformer 用 --paraformer
-        let is_sense_voice = model_name.contains("SenseVoice") || main_file.to_string_lossy().contains("sense-voice");
+        // 主模型 flag 由描述符决定（--sense-voice-model / --paraformer，无模型名嗅探）
+        let flag = main_model_flag(model_name)?;
         let mut cmd = Command::new(&exe);
-        if is_sense_voice {
-            cmd.arg(format!("--sense-voice-model={}", main_file.display()));
-        } else {
-            cmd.arg(format!("--paraformer={}", main_file.display()));
-        }
+        cmd.arg(format!("{flag}={}", main_file.display()));
         cmd.arg(format!("--tokens={}", tokens.display()))
             // 设备生效：cpu → --provider=cpu；其他（cuda 等）→ --provider=cuda
             .arg(match device.to_ascii_lowercase().trim() {
@@ -208,9 +211,15 @@ impl SherpaAsrEngine {
     /// 活着）——因此 child 说"死"时，用端口连接确认；端口仍通 → 视为加载中，不复位。
     /// 只有 child 与端口都说死，才复位为未加载。
     pub fn is_loaded(&self) -> bool {
+        self.snapshot().loaded
+    }
+
+    /// 状态快照：loaded / model / device 在同一次持锁窗口内取齐（与 `is_loaded` 同一实现）。
+    /// 状态对账必须用它，避免分次读在并发加载/卸载时拿到撕裂状态。
+    pub fn snapshot(&self) -> SherpaSnapshot {
         let mut inner = self.inner.lock();
         if inner.state != SherpaState::Ready {
-            return false;
+            return SherpaSnapshot::default();
         }
         if let Some(c) = inner.child.as_mut() {
             if let Ok(Some(_)) = c.try_wait() {
@@ -221,12 +230,16 @@ impl SherpaAsrEngine {
                     inner.model = String::new();
                     inner.device = String::new();
                     inner.state = SherpaState::Uninitialized;
-                    return false;
+                    return SherpaSnapshot::default();
                 }
                 // 端口通 → 句柄过期误报，进程实际活着 → 仍算已加载
             }
         }
-        true
+        SherpaSnapshot {
+            loaded: true,
+            model: inner.model.clone(),
+            device: inner.device.clone(),
+        }
     }
 
     fn unload_locked(&self, inner: &mut Inner) {
@@ -291,6 +304,20 @@ impl SherpaAsrEngine {
 
         // 解析 JSON，提取 text
         parse_result(&result)
+    }
+}
+
+/// 主模型 CLI flag（描述符驱动：--sense-voice-model / --paraformer；无模型名嗅探）
+fn main_model_flag(model_name: &str) -> Result<&'static str, String> {
+    use crate::tts::spec::{AsrBackendSpec, BackendSpec, ModelSpec};
+    let spec = ModelSpec::find(model_name)
+        .ok_or_else(|| format!("未知 ASR 模型: {model_name}"))?;
+    match spec.backend {
+        BackendSpec::SherpaWs(AsrBackendSpec::SherpaWs { flag }) => Ok(flag),
+        _ => Err(format!(
+            "{model_name} 不是 sherpa-onnx ASR 模型（backend={:?}）",
+            spec.backend
+        )),
     }
 }
 
@@ -432,5 +459,15 @@ mod tests {
         let raw = r#"{"lang":"<|zh|>","emotion":"<|NEUTRAL|>","event":"<|Speech|>","text":"今天下午三点开会","timestamps":[0.12,0.30]}"#;
         assert_eq!(parse_result(raw).unwrap(), "今天下午三点开会");
         assert!(parse_result("not json").is_err());
+    }
+
+    /// 主模型 flag 来自描述符（不再嗅探模型名）：SenseVoice / Paraformer 各取自己的 flag
+    #[test]
+    fn test_main_model_flag_from_spec() {
+        assert_eq!(main_model_flag("SenseVoice-int8").unwrap(), "--sense-voice-model");
+        assert_eq!(main_model_flag("Paraformer-zh-small").unwrap(), "--paraformer");
+        // 非 sherpa ASR 后端 / 未知模型 → 明确报错
+        assert!(main_model_flag("Kokoro-v1_0").is_err());
+        assert!(main_model_flag("bogus-model").is_err());
     }
 }
