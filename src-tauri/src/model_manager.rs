@@ -383,16 +383,15 @@ pub fn start_download(app: AppHandle, name: &str, entry_id: &str) -> Result<(), 
     if !spec.available {
         return Err(format!("engine not available yet: {}", spec.name));
     }
-    let target_entry = if spec.entries.is_empty() {
-        None
-    } else {
+    // 校验目标条目存在（空 = 默认条目）；下载按"并集"进行，故此处只需校验
+    if !spec.entries.is_empty() {
         let entry = if entry_id.is_empty() {
             spec.default_entry()
         } else {
             spec.entry(entry_id)
         };
-        Some(entry.ok_or_else(|| format!("unknown entry: {entry_id}"))?)
-    };
+        entry.ok_or_else(|| format!("unknown entry: {entry_id}"))?;
+    }
 
     // 迁移旧布局：E2E 模型曾下载到展示名目录（如 models/Matcha-zh-baker），
     // 现在引擎找引擎目录名（matcha-icefall-zh-baker）。若旧目录已存在且完整，
@@ -415,8 +414,12 @@ pub fn start_download(app: AppHandle, name: &str, entry_id: &str) -> Result<(), 
     }
     if let Some(free) = free_bytes_for_root() {
         // 峰值 = 下载归档 + 解压产物（解压期间两者并存）≈ 2× 体积；
-        // 有条目时按条目体积（如换 bf16 解码器会更大）
-        let need_gb = target_entry.map(|e| e.size_gb).unwrap_or(spec.size_gb) * 2.0;
+        // 有条目时按**并集**体积（一次下全，切换不再下）
+        let need_gb = if spec.entries.is_empty() {
+            spec.size_gb
+        } else {
+            entry_union(spec).iter().map(|f| f.size_mb).sum::<u64>() as f64 / 1024.0
+        } * 2.0;
         let need = (need_gb * 1024f64.powi(3)) as u64;
         if free < need {
             return Err(format!(
@@ -587,13 +590,11 @@ pub fn entry_installed(
             return false;
         }
         if let Some(m) = &manifest {
-            if m.entry == entry_id {
-                if let Some((_, size)) = m.files.iter().find(|(name, _)| name == f.name) {
-                    if *size > 0 {
-                        let actual = std::fs::metadata(&path).map(|md| md.len()).unwrap_or(0);
-                        if actual != *size {
-                            return false;
-                        }
+            if let Some((_, size)) = m.files.iter().find(|(name, _)| name == f.name) {
+                if *size > 0 {
+                    let actual = std::fs::metadata(&path).map(|md| md.len()).unwrap_or(0);
+                    if actual != *size {
+                        return false;
                     }
                 }
             }
@@ -683,11 +684,28 @@ fn head_size(client: &reqwest::blocking::Client, url: &str) -> Result<u64, Strin
     Ok(resp.content_length().unwrap_or(0))
 }
 
-/// 按条目下载该组文件并落账 manifest（HF 源）
-fn download_entry_files(
+/// 该模型所有条目的文件并集（按声明顺序去重）。
+///
+/// 下载即"下全"：切换条目只改 manifest 的 active 指针，**不再需要重新下载**。
+pub fn entry_union(
+    spec: &'static crate::tts::spec::ModelSpec,
+) -> Vec<&'static crate::tts::spec::EntryFile> {
+    let mut out: Vec<&'static crate::tts::spec::EntryFile> = Vec::new();
+    for entry in spec.entries {
+        for f in entry.files {
+            if !out.iter().any(|u| u.name == f.name) {
+                out.push(f);
+            }
+        }
+    }
+    out
+}
+
+/// 按"并集"下载该模型需要的全部文件并落账 manifest（active = 目标条目）。HF 源
+fn download_model_files(
     app: &AppHandle,
     spec: &'static crate::tts::spec::ModelSpec,
-    entry: &'static crate::tts::spec::DownloadEntry,
+    target: &'static crate::tts::spec::DownloadEntry,
     cancel: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let crate::tts::spec::DownloadSource::HuggingFace { repo, revision } = spec.source else {
@@ -695,39 +713,78 @@ fn download_entry_files(
     };
     let dir = resolve_download_dir(&get_model_root(), spec.name);
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    let client = build_download_client()?;
-    let urls: Vec<String> = entry
-        .files
+    let client = build_net_client(3600)?;
+    let previous = read_manifest(&dir);
+    let files = entry_union(spec);
+    let urls: Vec<String> = files
         .iter()
         .map(|f| hf_file_url(repo, revision, f.name))
         .collect();
-    // 体积权重：HEAD 失败不阻断（退化为该文件停在区间起点，只报字节数）
-    let head_sizes: Vec<Option<u64>> = urls.iter().map(|u| head_size(&client, u).ok()).collect();
-    let weighted = head_sizes.iter().all(|s| s.is_some());
-    let total: u64 = head_sizes.iter().filter_map(|s| *s).sum();
-    let mut spans: Vec<(u32, u32)> = Vec::with_capacity(urls.len());
+    // 体积权重：HEAD 优先（失败不阻断），退回声明体积
+    let weights: Vec<u64> = urls
+        .iter()
+        .zip(&files)
+        .map(|(u, f)| {
+            head_size(&client, u)
+                .ok()
+                .filter(|v| *v > 0)
+                .unwrap_or(f.size_mb * 1024 * 1024)
+        })
+        .collect();
+    let total: u64 = weights.iter().sum();
+    let mut spans: Vec<(u32, u32)> = Vec::with_capacity(files.len());
     let mut cursor = 0u32;
-    for size in &head_sizes {
-        if weighted && total > 0 {
-            let w = (size.unwrap_or(0) as f64 / total as f64 * 100.0).round() as u32;
-            let end = (cursor + w).min(100);
-            spans.push((cursor, end));
-            cursor = end;
+    for size in &weights {
+        let w = if total > 0 {
+            (*size as f64 / total as f64 * 100.0).round() as u32
         } else {
-            spans.push((cursor, cursor));
-        }
+            0
+        };
+        let end = (cursor + w).min(100);
+        spans.push((cursor, end));
+        cursor = end;
     }
     if let Some(last) = spans.last_mut() {
         last.1 = 100;
     }
 
     let token = config_token();
-    let mut manifest_files: Vec<(String, u64)> = Vec::with_capacity(entry.files.len());
-    for ((file, url), (span_start, span_end)) in entry.files.iter().zip(&urls).zip(&spans) {
+    let mut manifest_files: Vec<(String, u64)> = Vec::with_capacity(files.len());
+    for ((file, url), (span_start, span_end)) in files.iter().zip(&urls).zip(&spans) {
         let dest = dir.join(file.name);
         let (s, e) = (*span_start, *span_end);
-        let on_progress = |downloaded: u64, total: Option<u64>| {
-            let pct = match total {
+        // 已在本地：无 size 记录 → 直接复用；有记录 → 一致才复用，不一致先删再下
+        if let Ok(md) = std::fs::metadata(&dest) {
+            if md.is_file() && md.len() > 0 {
+                let recorded = previous.as_ref().and_then(|m| {
+                    m.files
+                        .iter()
+                        .find(|(n, _)| n == file.name)
+                        .map(|(_, sz)| *sz)
+                });
+                match recorded {
+                    Some(sz) if sz > 0 && sz != md.len() => {
+                        let _ = std::fs::remove_file(&dest);
+                    }
+                    _ => {
+                        manifest_files.push((file.name.to_string(), md.len()));
+                        let _ = app.emit(
+                            "sidecar://event",
+                            json!({
+                                "status": "model_download_progress",
+                                "model": spec.name,
+                                "progress": e,
+                                "downloaded": md.len(),
+                                "total": md.len(),
+                            }),
+                        );
+                        continue;
+                    }
+                }
+            }
+        }
+        let on_progress = |downloaded: u64, got: Option<u64>| {
+            let pct = match got {
                 Some(t) if t > 0 => {
                     s + ((e.saturating_sub(s)) as f64 * (downloaded as f64 / t as f64)) as u32
                 }
@@ -740,7 +797,7 @@ fn download_entry_files(
                     "model": spec.name,
                     "progress": pct,
                     "downloaded": downloaded,
-                    "total": total.unwrap_or(0),
+                    "total": got.unwrap_or(0),
                 }),
             );
         };
@@ -757,45 +814,39 @@ fn download_entry_files(
         )?;
         manifest_files.push((file.name.to_string(), written));
     }
-    // 先落账（此后的目录状态可自证），再清理旧条目独有的文件
+    // 落账：active = 目标条目；files = **并集**（故切换条目无需重新下载）
     write_manifest(
         &dir,
         &Manifest {
-            entry: entry.id.to_string(),
+            entry: target.id.to_string(),
             repo: repo.to_string(),
             revision: revision.to_string(),
             files: manifest_files,
         },
     )?;
-    cleanup_obsolete_files(spec, entry, &dir);
+    cleanup_undeclared(spec, previous.as_ref(), &dir);
     Ok(())
 }
 
-/// 切换条目后的清理：只删"该模型其他条目声明过、且不属于目标条目"的文件；
-/// 未声明的第三方文件一律不碰（避免误删用户手放的东西）
-fn cleanup_obsolete_files(
+/// 清理：只删"上一份 manifest 记录过、且当前没有任何条目再声明"的文件。
+///
+/// 并集里的文件全部保留（切换条目不再重下）；未声明的第三方文件一律不碰。
+fn cleanup_undeclared(
     spec: &'static crate::tts::spec::ModelSpec,
-    target: &crate::tts::spec::DownloadEntry,
+    previous: Option<&Manifest>,
     dir: &Path,
 ) {
-    let keep: Vec<&str> = target.files.iter().map(|f| f.name).collect();
-    let mut obsolete: Vec<&str> = Vec::new();
-    for entry in spec.entries {
-        for f in entry.files {
-            if !keep.contains(&f.name) && !obsolete.contains(&f.name) {
-                obsolete.push(f.name);
-            }
-        }
-    }
-    for name in obsolete {
-        let path = dir.join(name);
-        if !path.is_file() {
+    let Some(prev) = previous else {
+        return;
+    };
+    let declared: Vec<&str> = entry_union(spec).iter().map(|f| f.name).collect();
+    for (name, _) in &prev.files {
+        if declared.contains(&name.as_str()) {
             continue;
         }
-        if std::fs::remove_file(&path).is_ok() {
-            log::info!("[download] 切换条目清理旧文件: {}", path.display());
-        } else {
-            log::warn!("[download] 旧文件删除失败（可能被引擎占用）: {}", path.display());
+        let path = dir.join(name);
+        if path.is_file() && std::fs::remove_file(&path).is_ok() {
+            log::info!("[download] 清理已不再声明的旧文件: {}", path.display());
         }
     }
 }
@@ -823,7 +874,7 @@ fn run_download(
                 spec.entry(&entry_id)
             }
             .ok_or_else(|| format!("unknown entry: {entry_id}"))?;
-            download_entry_files(&app, spec, entry, cancel.clone())?;
+            download_model_files(&app, spec, entry, cancel.clone())?;
             return Ok(dest);
         }
         // 无条目的模型：整包下载（GitHub release 资产）后解压
@@ -903,7 +954,7 @@ fn download_github_release(
     app: &AppHandle,
     cancel: &AtomicBool,
 ) -> Result<PathBuf, String> {
-    let client = build_download_client()?;
+    let client = build_net_client(3600)?;
     let tmp_dir = get_model_root().join(".tmp");
     let arch = tmp_dir.join(format!("{model_name}.{}", crate::net::url_suffix(url)));
     let on_progress = download_progress_emitter(app.clone(), model_name);
@@ -940,7 +991,7 @@ fn download_single_file(
     app: &AppHandle,
     cancel: &AtomicBool,
 ) -> Result<(), String> {
-    let client = build_download_client()?;
+    let client = build_net_client(3600)?;
     let on_progress = download_progress_emitter(app.clone(), model_name);
     crate::net::download(
         &client,
@@ -956,12 +1007,23 @@ fn download_single_file(
 }
 
 /// 下载用 reqwest 客户端（同一超时与代理口径；代理经 env + CONFIG 单一来源）
-fn build_download_client() -> Result<reqwest::blocking::Client, String> {
-    let proxy = { CONFIG.read().proxy.clone() };
+/// 统一下载客户端（模型与框架共用）：超时 + **显式**代理。
+///
+/// reqwest 是 `default-features = false`（未启 system-proxy）→ **仅写 HTTP(S)_PROXY 环境变量无效**，
+/// 必须 `builder.proxy(Proxy::all(..))`。框架下载早已如此，模型/HF 侧此前漏了（代理形同虚设）。
+pub fn build_net_client(timeout_secs: u64) -> Result<reqwest::blocking::Client, String> {
+    let proxy = CONFIG.read().proxy.clone();
     let _env_guard = ENV_SCOPE_LOCK.lock();
     apply_proxy_env(&proxy);
-    reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(3600))
+    let mut builder =
+        reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(timeout_secs));
+    let p = proxy.trim();
+    if !p.is_empty() {
+        let parsed = reqwest::Proxy::all(p)
+            .map_err(|_| format!("代理格式无效（支持 http:// 或 socks5://）: {p}"))?;
+        builder = builder.proxy(parsed);
+    }
+    builder
         .build()
         .map_err(|e| format!("HTTP client build failed: {e}"))
 }
@@ -1136,7 +1198,7 @@ pub fn list_models_payload(kind: Option<&str>) -> Value {
                     "id": e.id,
                     "label_zh": e.label_zh,
                     "label_en": e.label_en,
-                    "size_gb": e.size_gb,
+                    "size_gb": e.size_gb(),
                     "default": e.default,
                     "state": state,
                 })
@@ -1289,44 +1351,75 @@ mod e2e_list_tests {
         assert!(hf_auth_header(hf, "   ").is_none(), "空 token 不带头");
     }
 
-    /// 切条目清理：只删"其他条目声明过"的文件，未声明的第三方文件绝不碰
+    /// 并集：所有条目的文件去重后一次下全 → 切换条目无需重新下载
     #[test]
-    fn test_cleanup_obsolete_files_scope() {
+    fn test_entry_union_and_switch_without_download() {
         let spec = gguf_spec();
-        let dir = tmp_model_dir("cleanup");
-        let keep_entry = spec.default_entry().expect("默认条目");
-        // 制造"另一个条目独有文件" + 用户手放文件
-        let other = spec
+        let union = entry_union(spec);
+        let expected = spec
             .entries
             .iter()
-            .find(|e| e.id != keep_entry.id)
-            .expect("该模型应有第二条目");
-        let other_only: Vec<&str> = other
-            .files
-            .iter()
-            .map(|f| f.name)
-            .filter(|n| {
-                keep_entry.file(crate::tts::spec::FileRole::Main) != Some(*n)
-                    && keep_entry.file(crate::tts::spec::FileRole::Mmproj) != Some(*n)
-            })
-            .collect();
-        assert!(!other_only.is_empty(), "该模型两条目应有独有文件");
-        for f in keep_entry.files {
-            std::fs::write(dir.join(f.name), b"x").expect("写目标条目文件");
-        }
-        for n in &other_only {
-            std::fs::write(dir.join(n), b"x").expect("写他人文件");
-        }
-        let stray = dir.join("我的笔记.txt");
-        std::fs::write(&stray, b"mine").expect("写用户文件");
+            .flat_map(|e| e.files.iter().map(|f| f.name))
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        assert_eq!(union.len(), expected, "并集必须按文件名去重");
+        assert!(union.len() > spec.entries[0].files.len(), "两条目应有共享+独有文件");
 
-        cleanup_obsolete_files(spec, keep_entry, &dir);
-
-        assert!(dir.join(keep_entry.file(crate::tts::spec::FileRole::Main).unwrap()).is_file(), "目标条目主文件必须保留");
-        for n in &other_only {
-            assert!(!dir.join(n).exists(), "其他条目独有文件应被清理: {n}");
+        // 模拟"下全后切到另一条"：并集文件齐 + manifest 记 size → 两条都判已装（无需再下载）
+        let dir = tmp_model_dir("union");
+        let mut files = Vec::new();
+        for f in &union {
+            std::fs::write(dir.join(f.name), vec![0u8; 32]).expect("写入");
+            files.push((f.name.to_string(), 32u64));
         }
-        assert!(stray.is_file(), "未声明的第三方文件不得删除");
+        write_manifest(
+            &dir,
+            &Manifest {
+                entry: spec.entries[0].id.to_string(),
+                repo: "r".into(),
+                revision: "main".into(),
+                files,
+            },
+        )
+        .expect("写清单");
+        for e in spec.entries {
+            assert!(entry_installed(&dir, spec, e.id), "并集下齐后 {} 应判已装", e.id);
+        }
+        // 大小不符 → 该条目判未装（上游改名/文件被改动能被发现）
+        std::fs::write(dir.join(spec.entries[1].files[0].name), vec![0u8; 8]).expect("改大小");
+        assert!(!entry_installed(&dir, spec, spec.entries[1].id), "大小不符必须判未装");
+    }
+
+    /// 清理：只删"上一份 manifest 记录过、且当前无条目声明"的文件；并集文件与第三方文件都不动
+    #[test]
+    fn test_cleanup_scope() {
+        let spec = gguf_spec();
+        let dir = tmp_model_dir("cleanup");
+        let union = entry_union(spec);
+        let mut prev_files = Vec::new();
+        for f in &union {
+            std::fs::write(dir.join(f.name), b"x").expect("写并集文件");
+            prev_files.push((f.name.to_string(), 1u64));
+        }
+        let stale = "old-quant-from-previous-spec.gguf";
+        std::fs::write(dir.join(stale), b"x").expect("写旧文件");
+        prev_files.push((stale.to_string(), 1u64));
+        let stray = "我的笔记.txt";
+        std::fs::write(dir.join(stray), b"mine").expect("写用户文件");
+
+        let prev = Manifest {
+            entry: spec.entries[0].id.to_string(),
+            repo: "r".into(),
+            revision: "main".into(),
+            files: prev_files,
+        };
+        cleanup_undeclared(spec, Some(&prev), &dir);
+
+        for f in &union {
+            assert!(dir.join(f.name).is_file(), "并集文件必须保留（切换不再重下）: {}", f.name);
+        }
+        assert!(!dir.join(stale).exists(), "不再声明的旧文件应被清理");
+        assert!(dir.join(stray).is_file(), "未声明的第三方文件不得删除");
     }
 
     /// payload：有条目的模型下发 entries/active_entry，取值为契约枚举

@@ -155,6 +155,8 @@ pub enum FileRole {
 pub struct EntryFile {
     pub role: FileRole,
     pub name: &'static str,
+    /// 该文件的体积（MB）。已实测的写实测值；未实测的按同族估算（注释标明）
+    pub size_mb: u64,
 }
 
 /// 精选下载条目：一组"我们调试后定死"的文件组合。
@@ -169,8 +171,6 @@ pub struct DownloadEntry {
     pub label_en: &'static str,
     /// 要下载的文件（顺序 = 下载顺序）
     pub files: &'static [EntryFile],
-    /// 展示用体积（GB；实际大小以下载时探测为准）
-    pub size_gb: f64,
     pub default: bool,
 }
 
@@ -178,6 +178,11 @@ impl DownloadEntry {
     /// 按角色取文件名（该角色未声明 → None）
     pub fn file(&self, role: FileRole) -> Option<&'static str> {
         self.files.iter().find(|f| f.role == role).map(|f| f.name)
+    }
+
+    /// 条目体积（GB）——由声明文件体积求和（单一真源，不再单独维护）
+    pub fn size_gb(&self) -> f64 {
+        self.files.iter().map(|f| f.size_mb).sum::<u64>() as f64 / 1024.0
     }
 }
 
@@ -315,10 +320,9 @@ pub static SPECS: &[ModelSpec] = &[
                 label_zh: "Q8_0 主权重 + bf16 解码器 · 推荐",
                 label_en: "Q8_0 weights + bf16 decoder · Recommended",
                 files: &[
-                    EntryFile { role: FileRole::Main, name: "Qwen3-ASR-0.6B-Q8_0.gguf" },
-                    EntryFile { role: FileRole::Mmproj, name: "mmproj-Qwen3-ASR-0.6B-bf16.gguf" },
+                    EntryFile { role: FileRole::Main, name: "Qwen3-ASR-0.6B-Q8_0.gguf", size_mb: 768 },
+                    EntryFile { role: FileRole::Mmproj, name: "mmproj-Qwen3-ASR-0.6B-bf16.gguf", size_mb: 410 },
                 ],
-                size_gb: 1.24, // 估算：bf16 解码器体积待实测校正
                 default: true,
             },
             DownloadEntry {
@@ -326,10 +330,9 @@ pub static SPECS: &[ModelSpec] = &[
                 label_zh: "Q8_0 主权重 + Q8_0 解码器（更省显存）",
                 label_en: "Q8_0 weights + Q8_0 decoder (lower VRAM)",
                 files: &[
-                    EntryFile { role: FileRole::Main, name: "Qwen3-ASR-0.6B-Q8_0.gguf" },
-                    EntryFile { role: FileRole::Mmproj, name: "mmproj-Qwen3-ASR-0.6B-Q8_0.gguf" },
+                    EntryFile { role: FileRole::Main, name: "Qwen3-ASR-0.6B-Q8_0.gguf", size_mb: 768 },
+                    EntryFile { role: FileRole::Mmproj, name: "mmproj-Qwen3-ASR-0.6B-Q8_0.gguf", size_mb: 205 },
                 ],
-                size_gb: 0.95,
                 default: false,
             },
         ],
@@ -361,10 +364,9 @@ pub static SPECS: &[ModelSpec] = &[
                 label_zh: "Q8_0 主权重 + bf16 解码器 · 推荐",
                 label_en: "Q8_0 weights + bf16 decoder · Recommended",
                 files: &[
-                    EntryFile { role: FileRole::Main, name: "Qwen3-ASR-1.7B-Q8_0.gguf" },
-                    EntryFile { role: FileRole::Mmproj, name: "mmproj-Qwen3-ASR-1.7B-bf16.gguf" },
+                    EntryFile { role: FileRole::Main, name: "Qwen3-ASR-1.7B-Q8_0.gguf", size_mb: 2350 },
+                    EntryFile { role: FileRole::Mmproj, name: "mmproj-Qwen3-ASR-1.7B-bf16.gguf", size_mb: 410 },
                 ],
-                size_gb: 2.80, // 估算：bf16 解码器体积待实测校正
                 default: true,
             },
             DownloadEntry {
@@ -372,10 +374,9 @@ pub static SPECS: &[ModelSpec] = &[
                 label_zh: "Q8_0 主权重 + Q8_0 解码器（更省显存）",
                 label_en: "Q8_0 weights + Q8_0 decoder (lower VRAM)",
                 files: &[
-                    EntryFile { role: FileRole::Main, name: "Qwen3-ASR-1.7B-Q8_0.gguf" },
-                    EntryFile { role: FileRole::Mmproj, name: "mmproj-Qwen3-ASR-1.7B-Q8_0.gguf" },
+                    EntryFile { role: FileRole::Main, name: "Qwen3-ASR-1.7B-Q8_0.gguf", size_mb: 2350 },
+                    EntryFile { role: FileRole::Mmproj, name: "mmproj-Qwen3-ASR-1.7B-Q8_0.gguf", size_mb: 205 },
                 ],
-                size_gb: 2.35,
                 default: false,
             },
         ],
@@ -833,7 +834,10 @@ mod tests {
                 if e.default {
                     defaults += 1;
                 }
-                assert!(e.size_gb > 0.0, "{} 条目 {} 体积必须为正", m.id, e.id);
+                assert!(e.size_gb() > 0.0, "{} 条目 {} 体积必须为正", m.id, e.id);
+                for f in e.files {
+                    assert!(f.size_mb > 0, "{} 条目 {} 文件 {} 体积必须为正", m.id, e.id, f.name);
+                }
                 assert!(
                     !e.label_zh.is_empty() && !e.label_en.is_empty(),
                     "{} 条目 {} 缺中英标签",

@@ -416,24 +416,8 @@ pub fn download_runtime(app: &tauri::AppHandle, framework: &str) -> Result<(), S
     }
     std::fs::create_dir_all(&tmp).map_err(|e| format!("create tmp: {e}"))?;
 
-    // 1. 代理（直连则留空；不通就明确报错）
-    let proxy = crate::model_manager::get_proxy();
-    let _env_guard = crate::model_manager::ENV_SCOPE_LOCK.lock();
-    crate::model_manager::apply_proxy_env(&proxy);
-    let mut builder = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(3600));
-    // 显式挂代理（http:// 或 socks5://）。仅改 env 无效：reqwest 无 system-proxy feature。
-    let proxy_str = proxy.trim().to_string();
-    if !proxy_str.is_empty() {
-        if let Ok(p) = reqwest::Proxy::all(&proxy_str) {
-            builder = builder.proxy(p);
-        } else {
-            return Err(format!("代理格式无效（支持 http:// 或 socks5://）: {proxy_str}"));
-        }
-    }
-    let client = builder
-        .build()
-        .map_err(|e| format!("HTTP client build failed: {e}"))?;
+    // 1. 客户端（超时 + 显式代理）：与模型下载共用同一实现（仅写 env 对 reqwest 无效）
+    let client = crate::model_manager::build_net_client(3600)?;
 
     log::info!("[framework] 开始下载 {} 运行时（主包 + 附件）", pkg.name);
 

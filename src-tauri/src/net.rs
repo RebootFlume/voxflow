@@ -239,6 +239,8 @@ mod tests {
 
     struct Server {
         url: String,
+        /// 仅 host:port（用于当作代理地址）
+        base: String,
         hits: Arc<AtomicUsize>,
         range_hits: Arc<AtomicUsize>,
         stop: Arc<AtomicBool>,
@@ -272,6 +274,7 @@ mod tests {
         });
         Server {
             url: format!("http://{addr}/asset"),
+            base: format!("http://{addr}"),
             hits,
             range_hits,
             stop,
@@ -503,6 +506,47 @@ mod tests {
         .expect("取消后重跑应成功");
         assert_eq!(n, body.len() as u64);
         assert_eq!(std::fs::read(&dest).expect("read"), body);
+    }
+
+    /// 代理必须真的生效：请求打到代理，而不是直连目标。
+    /// （reqwest 是 `default-features = false`（无 system-proxy）→ 只写 HTTP(S)_PROXY 环境变量无效，
+    /// 必须 `builder.proxy(Proxy::all(..))`；这条测试锁住该行为，防回归）
+    #[test]
+    fn proxy_is_actually_used() {
+        let body = body_of(32 * 1024);
+        let target = spawn(ServerCfg {
+            body: body.clone(),
+            support_range: true,
+            fail_first: 0,
+            chunk_delay_ms: 0,
+        });
+        let proxy = spawn(ServerCfg {
+            body: body.clone(),
+            support_range: true,
+            fail_first: 0,
+            chunk_delay_ms: 0,
+        });
+        let dir = tmpdir("proxy");
+        let dest = dir.join("asset.bin");
+        let client = reqwest::blocking::Client::builder()
+            .proxy(reqwest::Proxy::all(&proxy.base).expect("proxy url"))
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("client");
+        download(
+            &client,
+            &Download {
+                url: &target.url,
+                dest: &dest,
+                on_progress: None,
+                cancel: None,
+                headers: &[],
+            },
+        )
+        .expect("通过代理下载");
+        assert_eq!(std::fs::read(&dest).expect("read"), body);
+        assert_eq!(proxy.hits.load(Ordering::SeqCst), 1, "请求必须经过代理");
+        assert_eq!(target.hits.load(Ordering::SeqCst), 0, "配了代理就不应直连目标");
     }
 
     #[test]
