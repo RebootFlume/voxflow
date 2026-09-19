@@ -1129,10 +1129,12 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, event| {
-            // 应用退出：统一清理子进程（llama-server / sherpa server），避免残留
+            // 应用退出：只终止子进程，**不做等待**（llama-server / sherpa server）。
+            // 不用 `unload()`：它会等子进程退出并轮询端口释放（每引擎最多 3s），
+            // 在退出路径上纯属浪费，表现为"点了关闭要等好几秒托盘图标才消失"。
             if let tauri::RunEvent::Exit = event {
-                let _ = crate::inference::llama_server::global_engine().unload();
-                crate::inference::sherpa_asr::global_engine().unload();
+                crate::inference::llama_server::global_engine().kill_for_exit();
+                crate::inference::sherpa_asr::global_engine().kill_for_exit();
             }
         });
 }

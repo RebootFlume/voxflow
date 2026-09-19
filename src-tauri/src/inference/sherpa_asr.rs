@@ -260,6 +260,18 @@ impl SherpaAsrEngine {
         inner.state = SherpaState::Uninitialized;
     }
 
+    /// 退出路径专用：只终止自己的子进程，**不等它退出、不扫描/清理端口占用**。
+    /// 理由同 `llama_server::LlamaServerEngine::kill_for_exit`：进程即将结束，
+    /// 等待只会把关窗拖上数秒。
+    pub fn kill_for_exit(&self) {
+        let mut inner = self.inner.lock();
+        if let Some(mut child) = inner.child.take() {
+            log::info!("[sherpa-asr] 退出：直接终止子进程 PID={:?}", child.id());
+            let _ = child.kill();
+        }
+        inner.state = SherpaState::Uninitialized;
+    }
+
     /// 卸载：杀进程
     pub fn unload(&self) {
         let mut inner = self.inner.lock();

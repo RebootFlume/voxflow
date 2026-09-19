@@ -519,6 +519,19 @@ impl LlamaServerEngine {
         ))))
     }
 
+    /// 退出路径专用：只终止自己的子进程，**不等它退出、不扫描/清理端口占用**。
+    ///
+    /// 进程马上就要结束，这里的等待纯属浪费（`unload()` 会等子进程退出 + 轮询端口最多 3s，
+    /// 在关窗路径上就是"点了关闭要等好几秒托盘图标才消失"）。端口与显存随进程由 OS 回收；
+    /// 外部残留占用在下次启动的 `unload()`/加载前照旧会被清理。
+    pub fn kill_for_exit(&self) {
+        if let Some(mut c) = self.child.lock().take() {
+            log::info!("[llama-server] 退出：直接终止子进程 PID={:?}", c.id());
+            let _ = c.kill();
+        }
+        *self.launched.lock() = None;
+    }
+
     /// 停止子进程
     pub fn unload(&self) -> InferenceResult<()> {
         if let Some(mut c) = self.child.lock().take() {
