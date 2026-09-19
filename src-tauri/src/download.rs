@@ -2,7 +2,7 @@
 //!
 //! 提供同步方式从 Hugging Face Hub 下载模型文件。
 //! 代理：环境变量（HTTP_PROXY/HTTPS_PROXY/NO_PROXY，reqwest system-proxy 自动读取）
-//! 镜像：HFClientBuilder::endpoint() / HF_ENDPOINT
+//! 来源：仅 HuggingFace 官方端点（代理经 HTTP(S)_PROXY 环境变量生效）
 //! Token：仅来自 config.json（huggingfaceToken），无环境变量路径
 //! 并发安全：写入环境变量 + 创建 HFClient 的整段受 ENV_SCOPE_LOCK 保护。
 
@@ -64,7 +64,7 @@ pub struct SyncDownloader {
 
 impl SyncDownloader {
     /// 创建新的同步下载器
-    /// 重要：调用前应已在 ENV_SCOPE_LOCK 内完成 apply_proxy_env/apply_mirror_env；
+    /// 重要：调用前应已在 ENV_SCOPE_LOCK 内完成 apply_proxy_env；
     /// 若未持锁，代理/镜像的环境写入可能被并发 build 覆盖。
     pub fn new(config: &DownloadConfig) -> Result<Self> {
         let mut builder = hf_hub::HFClient::builder();
@@ -86,24 +86,6 @@ impl SyncDownloader {
             .build_sync()
             .map_err(|e| anyhow!("Failed to build HF API client: {}", e))?;
 
-        Ok(Self { client })
-    }
-
-    /// 带镜像端点的快捷创建（endpoint 为空则等价于 new）。
-    /// 调用前需已在 ENV_SCOPE_LOCK 内按需调用 apply_proxy_env/apply_mirror_env。
-    #[allow(dead_code)]
-    pub fn new_with_endpoint(config: &DownloadConfig, endpoint: Option<&str>) -> Result<Self> {
-        let mut builder = hf_hub::HFClient::builder();
-        if let Some(ep) = endpoint.and_then(|s| { let t=s.trim(); if t.is_empty(){None}else{Some(t)}}) {
-            builder = builder.endpoint(ep);
-        }
-        if let Some(ref token) = config.token {
-            builder = builder.token(token);
-        }
-        if let Some(ref cache_dir) = config.cache_dir {
-            builder = builder.cache_dir(cache_dir);
-        }
-        let client = builder.build_sync().map_err(|e| anyhow!("Failed to build HF API client: {}", e))?;
         Ok(Self { client })
     }
 

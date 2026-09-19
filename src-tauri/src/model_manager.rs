@@ -8,6 +8,7 @@
 //! - Token：仅来自 config.json 的 huggingfaceToken（bootstrap 注入 CONFIG），无 env 回退
 
 use std::collections::HashMap;
+use crate::tts::spec::DownloadSource;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -109,7 +110,6 @@ pub fn uses_mmproj(framework: &str) -> bool {
 
 struct RuntimeConfig {
     model_root: PathBuf,
-    mirror: String,
     proxy: String,
     /// HF 下载 token（config.json 可见可管；空 = 匿名/回退 env）
     token: String,
@@ -125,7 +125,6 @@ static CONFIG: once_cell::sync::Lazy<RwLock<RuntimeConfig>> =
     once_cell::sync::Lazy::new(|| {
         RwLock::new(RuntimeConfig {
             model_root: default_model_root(),
-            mirror: String::new(),
             proxy: String::new(),
             token: String::new(),
         })
@@ -150,15 +149,6 @@ pub fn apply_proxy_env(proxy: &str) {
         }
         std::env::set_var("NO_PROXY", "localhost,127.0.0.1");
         std::env::set_var("no_proxy", "localhost,127.0.0.1");
-    }
-}
-
-fn apply_mirror_env(endpoint: &str) {
-    let e = endpoint.trim();
-    if e.is_empty() {
-        std::env::remove_var("HF_ENDPOINT");
-    } else {
-        std::env::set_var("HF_ENDPOINT", e);
     }
 }
 
@@ -187,11 +177,6 @@ pub fn set_model_root(path: &str) -> Result<PathBuf, String> {
     Ok(abs)
 }
 
-pub fn set_mirror(endpoint: &str) {
-    let mut cfg = CONFIG.write();
-    cfg.mirror = endpoint.trim().to_string();
-}
-
 pub fn set_proxy(proxy: &str) -> String {
     let p = proxy.trim().to_string();
     let mut cfg = CONFIG.write();
@@ -208,9 +193,6 @@ pub fn set_token(token: &str) -> String {
 
 pub fn get_model_root() -> PathBuf {
     CONFIG.read().model_root.clone()
-}
-pub fn get_mirror() -> String {
-    CONFIG.read().mirror.clone()
 }
 pub fn get_proxy() -> String {
     CONFIG.read().proxy.clone()
@@ -598,18 +580,11 @@ impl ProgressHandler for IpcProgress {
 }
 
 fn build_client_sync() -> Result<hf_hub::HFClientSync, String> {
-    let (mirror, proxy) = {
-        let cfg = CONFIG.read();
-        (cfg.mirror.clone(), cfg.proxy.clone())
-    };
+    let proxy = CONFIG.read().proxy.clone();
     let token = crate::model_manager::config_token();
     let _env_guard = ENV_SCOPE_LOCK.lock();
     apply_proxy_env(&proxy);
-    apply_mirror_env(&mirror);
     let mut builder = hf_hub::HFClient::builder();
-    if !mirror.trim().is_empty() {
-        builder = builder.endpoint(mirror.trim());
-    }
     let t = token.trim();
     if !t.is_empty() {
         builder = builder.token(t);
@@ -628,13 +603,15 @@ fn run_download(app: AppHandle, spec: &'static crate::tts::spec::ModelSpec, canc
     emit_models_state(&app);
     let result: Result<PathBuf, String> = (|| {
         std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
-        // 优先从 GitHub releases 下载（无需 HF 认证，速度快）
-        if let Some(url) = spec.github_release {
-            return download_github_release(url, &dest, &name, &app, &cancel);
-        }
-        // 回退到 HuggingFace
+        // 来源由描述符声明：GH 直链直下（无需 HF 认证）；HF 走 hf_hub 快照
+        let repo = match spec.source {
+            DownloadSource::GithubRelease(url) => {
+                return download_github_release(url, &dest, &name, &app, &cancel);
+            }
+            DownloadSource::HuggingFace(repo) => repo,
+        };
         let client = build_client_sync()?;
-        let (owner, repo_name) = hf_hub::split_id(spec.repo);
+        let (owner, repo_name) = hf_hub::split_id(repo);
         let handler = IpcProgress::new(app.clone(), name.clone(), cancel.clone());
         let progress = hf_hub::progress::Progress::new(handler);
         // GGUF 模型只下载 Q8_0 量化版（模型 + mmproj），跳过 bf16 全精度与 safetensors 原始版
@@ -675,19 +652,26 @@ fn run_download(app: AppHandle, spec: &'static crate::tts::spec::ModelSpec, canc
     ACTIVE.lock().remove(&name);
     match result {
         Ok(p) => {
-            // ZipVoice 需要额外下载 vocoder（vocos_24khz.onnx）到模型根目录
-            if spec.name == "ZipVoice-distill" {
-                let vocoder_dest = crate::model_manager::get_model_root().join("vocos_24khz.onnx");
-                if !vocoder_dest.exists() {
-                    let _ = app.emit(
-                        "sidecar://event",
-                        json!({ "status": "model_download_progress", "model": "ZipVoice-distill", "progress": 0u32 }),
-                    );
-                    let vocoder_url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models/vocos_24khz.onnx";
-                    match download_single_file(vocoder_url, &vocoder_dest, "vocos_24khz.onnx", &app, &cancel) {
-                        Ok(()) => eprintln!("[download] vocoder downloaded: {}", vocoder_dest.display()),
-                        Err(e) => eprintln!("[download] vocoder download failed: {e}"),
+            // 附加文件（描述符声明，如 ZipVoice 的 vocoder）：落模型根，已存在则跳过
+            for extra in spec.extra_files {
+                let extra_dest = crate::model_manager::get_model_root().join(extra.dest_rel);
+                if extra_dest.exists() {
+                    continue;
+                }
+                let url = match extra.source {
+                    DownloadSource::GithubRelease(url) => url,
+                    DownloadSource::HuggingFace(repo) => {
+                        eprintln!("[download] 附加文件暂不支持 HF 源: {repo}");
+                        continue;
                     }
+                };
+                let _ = app.emit(
+                    "sidecar://event",
+                    json!({ "status": "model_download_progress", "model": name.clone(), "progress": 0u32 }),
+                );
+                match download_single_file(url, &extra_dest, extra.dest_rel, &app, &cancel) {
+                    Ok(()) => eprintln!("[download] extra file downloaded: {}", extra_dest.display()),
+                    Err(e) => eprintln!("[download] extra file download failed: {e}"),
                 }
             }
             let size_bytes = dir_size_bytes(&p);
@@ -901,9 +885,22 @@ fn resolve_download_dir(root: &Path, name: &str) -> PathBuf {
     root.join(name)
 }
 
+/// 来源标签（从下载来源推导，不引入第二真源）：
+/// `github.com/<owner>/<repo>` 或 `huggingface.co/<owner>/<repo>`。前端直接显示。
+fn source_label(source: DownloadSource) -> String {
+    match source {
+        DownloadSource::GithubRelease(url) => url
+            .trim_start_matches("https://")
+            .split("/releases/")
+            .next()
+            .unwrap_or(url)
+            .to_string(),
+        DownloadSource::HuggingFace(repo) => format!("huggingface.co/{repo}"),
+    }
+}
+
 pub fn list_models_payload(kind: Option<&str>) -> Value {
     let root = get_model_root();
-    let mirror = get_mirror();
     let proxy = get_proxy();
     let hub = root.join("hub");
     let _ = std::fs::create_dir_all(&hub);
@@ -935,7 +932,7 @@ pub fn list_models_payload(kind: Option<&str>) -> Value {
             // 新增（只增不改）：前端据此分组/门禁，不再自行做 format→framework 推导
             "engine": framework_spec(spec.framework).map(|f| f.engine).unwrap_or(""),
             "runtime_key": runtime_key(spec.framework).unwrap_or(spec.framework),
-            "repo": spec.repo,
+            "source": source_label(spec.source),
             "size_gb": spec.size_gb,
             "description_zh": spec.description_zh,
             "description_en": spec.description_en,
@@ -975,7 +972,6 @@ pub fn list_models_payload(kind: Option<&str>) -> Value {
     json!({
         "status": "models_state",
         "model_root": root.display().to_string(),
-        "mirror": mirror,
         "proxy": proxy,
         "disk_free_gb": disk_free_gb,
         "models": items,
@@ -990,6 +986,21 @@ pub fn emit_models_state(app: &AppHandle) {
 #[cfg(test)]
 mod e2e_list_tests {
     use super::*;
+
+    /// 来源标签推导（纯函数；前端直接显示，故必须精确）
+    #[test]
+    fn test_source_label_derivation() {
+        assert_eq!(
+            source_label(DownloadSource::GithubRelease(
+                "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2"
+            )),
+            "github.com/k2-fsa/sherpa-onnx"
+        );
+        assert_eq!(
+            source_label(DownloadSource::HuggingFace("ggml-org/Qwen3-ASR-0.6B-GGUF")),
+            "huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF"
+        );
+    }
 
     /// 决策 A 数据通路：models_state payload 为 TTS 模型携带描述符能力字段
     /// （前端语言/克隆 UI 的唯一来源，无需再调独立命令）
@@ -1010,6 +1021,7 @@ mod e2e_list_tests {
         assert_eq!(kokoro["supports_clone"], false);
 
         // 前端数据契约（只增不改）：engine / runtime_key 由 Rust 下发，前端不再做 format→框架推导
+        assert_eq!(kokoro["source"], "github.com/k2-fsa/sherpa-onnx");
         assert_eq!(kokoro["format"], "onnx");
         assert_eq!(kokoro["runtime_key"], "onnx");
         assert_eq!(kokoro["engine"], "sherpa");
@@ -1038,6 +1050,7 @@ mod e2e_list_tests {
             .iter()
             .find(|m| m["name"] == "Qwen3-ASR-0.6B")
             .expect("应含 Qwen3-ASR-0.6B");
+        assert_eq!(qwen["source"], "huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF");
         assert_eq!(qwen["format"], "gguf");
         assert_eq!(qwen["runtime_key"], "gguf");
         assert_eq!(qwen["engine"], "llama");

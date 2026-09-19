@@ -97,9 +97,6 @@ fn dispatch_sidecar_action(
                     let _ = model_manager::set_model_root(root);
                 }
             }
-            if let Some(ep) = payload.get("mirror_endpoint").and_then(|v| v.as_str()) {
-                model_manager::set_mirror(ep);
-            }
             if let Some(proxy) = payload.get("proxy").and_then(|v| v.as_str()) {
                 model_manager::set_proxy(proxy);
             }
@@ -122,13 +119,6 @@ fn dispatch_sidecar_action(
                     return Ok(serde_json::json!({"status": "error", "msg": e}));
                 }
             }
-        }
-        "set_mirror" => {
-            let ep = payload.get("endpoint").and_then(|v| v.as_str()).unwrap_or("");
-            model_manager::set_mirror(ep);
-            let _ = app.emit("sidecar://event", serde_json::json!({"status": "mirror_set", "mirror": ep}));
-            model_manager::emit_models_state(&app);
-            return Ok(serde_json::json!({"ok": true}));
         }
         "set_proxy" => {
             let proxy = payload.get("proxy").and_then(|v| v.as_str()).unwrap_or("");

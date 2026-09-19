@@ -148,6 +148,23 @@ pub enum BackendSpec {
     SherpaTts(SherpaTtsSpec),
 }
 
+/// 模型下载来源（二选一，不存在「两个都可空」的非法状态）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadSource {
+    /// GitHub release 直链（当前 10 个模型；只受代理影响，不受 HF 镜像影响）
+    GithubRelease(&'static str),
+    /// HuggingFace 仓库（hf_hub 快照下载；受代理 / token 影响）
+    HuggingFace(&'static str),
+}
+
+/// 主包之外的附加文件（如 ZipVoice 的 vocoder）：来源 + 落盘相对路径
+/// （相对**模型根**，与 `ArgSpec::ModelsRootFile` 解析同一处；一致性由测试保证）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtraFile {
+    pub source: DownloadSource,
+    pub dest_rel: &'static str,
+}
+
 /// 模型描述符：一条 = 一个模型的全部信息（下载 / 能力 / 引擎参数）
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelSpec {
@@ -159,15 +176,16 @@ pub struct ModelSpec {
     /// 引擎注册键（与 `model_manager::FRAMEWORKS.id` 对应）："gguf" | "onnx" | "sherpa"。
     /// 引擎路由 / 运行时包 / 文件发现全部由它查表 —— 新增框架不再需要改 match。
     pub framework: &'static str,
-    /// 下载源 repo（HF / GitHub 展示用）
-    pub repo: &'static str,
+    /// 下载来源（唯一来源声明；UI 展示标签由它推导，见 model_manager::source_label）
+    pub source: DownloadSource,
     pub size_gb: f64,
     pub description_zh: &'static str,
     pub description_en: &'static str,
     pub available: bool,
     /// CPU 模式体验分级："good" / "slow" / "unsupported"
     pub cpu: &'static str,
-    pub github_release: Option<&'static str>,
+    /// 主包之外的附加文件（默认空）
+    pub extra_files: &'static [ExtraFile],
     /// 量化版本（GGUF: Q8_0 / bf16；ONNX: 无）
     pub quant: Option<&'static str>,
     // ── TTS 能力（仅 kind=Tts 有意义；ASR 置空）──
@@ -233,13 +251,13 @@ pub static SPECS: &[ModelSpec] = &[
         name: "Qwen3-ASR-0.6B",
         kind: ModelKind::Asr,
         framework: "gguf",
-        repo: "ggml-org/Qwen3-ASR-0.6B-GGUF",
+        source: DownloadSource::HuggingFace("ggml-org/Qwen3-ASR-0.6B-GGUF"),
         size_gb: 0.95,
         description_zh: "默认识别模型 · GGUF 量化 · 更快 · 内存占用更低",
         description_en: "Default ASR model · GGUF quantized · faster · lower memory",
         available: true,
         cpu: "good",
-        github_release: None,
+        extra_files: &[],
         quant: Some("Q8_0"),
         languages: &[],
         language_mode: LanguageMode::Fixed,
@@ -255,13 +273,13 @@ pub static SPECS: &[ModelSpec] = &[
         name: "Qwen3-ASR-1.7B",
         kind: ModelKind::Asr,
         framework: "gguf",
-        repo: "ggml-org/Qwen3-ASR-1.7B-GGUF",
+        source: DownloadSource::HuggingFace("ggml-org/Qwen3-ASR-1.7B-GGUF"),
         size_gb: 2.35,
         description_zh: "更准 · GGUF 量化 · 需要更多内存/显存",
         description_en: "More accurate · GGUF quantized · needs more memory",
         available: true,
         cpu: "slow",
-        github_release: None,
+        extra_files: &[],
         quant: Some("Q8_0"),
         languages: &[],
         language_mode: LanguageMode::Fixed,
@@ -278,13 +296,13 @@ pub static SPECS: &[ModelSpec] = &[
         name: "SenseVoice-int8",
         kind: ModelKind::Asr,
         framework: "onnx",
-        repo: "k2-fsa/sherpa-onnx",
         size_gb: 0.23,
         description_zh: "中文全能 · 中英日韩粤 5 语 · 情感/事件/时间戳",
         description_en: "All-round Chinese · zh/en/ja/ko/yue · emotion/event/timestamps",
         available: true,
         cpu: "good",
-        github_release: Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2"),
+        source: DownloadSource::GithubRelease("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2"),
+        extra_files: &[],
         quant: None,
         languages: &[],
         language_mode: LanguageMode::Fixed,
@@ -298,13 +316,13 @@ pub static SPECS: &[ModelSpec] = &[
         name: "Paraformer-zh-small",
         kind: ModelKind::Asr,
         framework: "onnx",
-        repo: "k2-fsa/sherpa-onnx",
         size_gb: 0.1,
         description_zh: "中文超小 · 74MB · 低端 CPU 设备首选",
         description_en: "Tiny Chinese · 74MB · best for low-end CPU",
         available: true,
         cpu: "good",
-        github_release: Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-paraformer-zh-small-2024-03-09.tar.bz2"),
+        source: DownloadSource::GithubRelease("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-paraformer-zh-small-2024-03-09.tar.bz2"),
+        extra_files: &[],
         quant: None,
         languages: &[],
         language_mode: LanguageMode::Fixed,
@@ -319,13 +337,13 @@ pub static SPECS: &[ModelSpec] = &[
         name: "Kokoro-v1_1",
         kind: ModelKind::Tts,
         framework: "sherpa",
-        repo: "k2-fsa/kokoro-multi-lang-v1_1",
         size_gb: 0.32,
         description_zh: "Kokoro 多语言 v1.1 · 中英103音色 · 纯端到端 · sherpa-onnx 推荐",
         description_en: "Kokoro multi-lang v1.1 · zh/en 103 voices · E2E · sherpa-onnx recommended",
         available: true,
         cpu: "good",
-        github_release: Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_1.tar.bz2"),
+        source: DownloadSource::GithubRelease("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_1.tar.bz2"),
+        extra_files: &[],
         quant: None,
         languages: &["zh", "en"],
         language_mode: LanguageMode::Auto,
@@ -368,13 +386,13 @@ pub static SPECS: &[ModelSpec] = &[
         name: "Kokoro-v1_0",
         kind: ModelKind::Tts,
         framework: "sherpa",
-        repo: "k2-fsa/kokoro-multi-lang-v1_0",
         size_gb: 0.32,
         description_zh: "Kokoro 多语言 v1.0 · 中英53音色 · 纯端到端",
         description_en: "Kokoro multi-lang v1.0 · zh/en 53 voices · E2E",
         available: true,
         cpu: "good",
-        github_release: Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2"),
+        source: DownloadSource::GithubRelease("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2"),
+        extra_files: &[],
         quant: None,
         languages: &["zh", "en"],
         language_mode: LanguageMode::Auto,
@@ -417,13 +435,13 @@ pub static SPECS: &[ModelSpec] = &[
         name: "Kokoro-en-v0_19",
         kind: ModelKind::Tts,
         framework: "sherpa",
-        repo: "k2-fsa/kokoro-en-v0_19",
         size_gb: 0.32,
         description_zh: "Kokoro 英文 v0.19 · 11音色 · 纯端到端",
         description_en: "Kokoro English v0.19 · 11 voices · E2E",
         available: true,
         cpu: "good",
-        github_release: Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2"),
+        source: DownloadSource::GithubRelease("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2"),
+        extra_files: &[],
         quant: None,
         languages: &["en"],
         language_mode: LanguageMode::Fixed,
@@ -467,13 +485,13 @@ pub static SPECS: &[ModelSpec] = &[
         name: "Matcha-zh-baker",
         kind: ModelKind::Tts,
         framework: "sherpa",
-        repo: "k2-fsa/matcha-icefall-zh-baker",
         size_gb: 0.3,
         description_zh: "Matcha 中文 · 高质量 · 纯端到端",
         description_en: "Matcha Chinese · high quality · E2E",
         available: true,
         cpu: "good",
-        github_release: Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/matcha-icefall-zh-baker.tar.bz2"),
+        source: DownloadSource::GithubRelease("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/matcha-icefall-zh-baker.tar.bz2"),
+        extra_files: &[],
         quant: None,
         // zh-baker 实为中文单语言（旧注册表 languages 含 en，P2 核对官方包后定）
         languages: &["zh", "en"],
@@ -496,13 +514,17 @@ pub static SPECS: &[ModelSpec] = &[
         name: "ZipVoice-distill",
         kind: ModelKind::Tts,
         framework: "sherpa",
-        repo: "k2-fsa/sherpa-onnx-zipvoice-distill",
         size_gb: 0.4,
         description_zh: "ZipVoice 蒸馏 · 中英 · 语音克隆 · 纯端到端",
         description_en: "ZipVoice distill · zh/en · voice clone · E2E",
         available: true,
         cpu: "good",
-        github_release: Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-zipvoice-distill-int8-zh-en-emilia.tar.bz2"),
+        source: DownloadSource::GithubRelease("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-zipvoice-distill-int8-zh-en-emilia.tar.bz2"),
+        // vocoder 必须落模型根 —— 与 backend 的 ModelsRootFile("--zipvoice-vocoder", "vocos_24khz.onnx") 同处
+        extra_files: &[ExtraFile {
+            source: DownloadSource::GithubRelease("https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models/vocos_24khz.onnx"),
+            dest_rel: "vocos_24khz.onnx",
+        }],
         quant: None,
         languages: &["zh", "en"],
         language_mode: LanguageMode::Cloning,
@@ -536,13 +558,13 @@ pub static SPECS: &[ModelSpec] = &[
         name: "PocketTTS-int8",
         kind: ModelKind::Tts,
         framework: "sherpa",
-        repo: "k2-fsa/sherpa-onnx-pocket-tts-int8",
         size_gb: 0.5,
         description_zh: "Pocket TTS int8 · 快速低延迟 · 纯端到端（克隆未接线）",
         description_en: "Pocket TTS int8 · fast · E2E (clone not wired)",
         available: true,
         cpu: "good",
-        github_release: Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-pocket-tts-int8-2026-01-26.tar.bz2"),
+        source: DownloadSource::GithubRelease("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-pocket-tts-int8-2026-01-26.tar.bz2"),
+        extra_files: &[],
         quant: None,
         // 决策 6：克隆能力待核对官方文档；当前 CLI 未接线参考音频（no-op bug），按无克隆处理
         languages: &["zh", "en"],
@@ -573,13 +595,13 @@ pub static SPECS: &[ModelSpec] = &[
         name: "Supertonic-3-int8",
         kind: ModelKind::Tts,
         framework: "sherpa",
-        repo: "k2-fsa/sherpa-onnx-supertonic-3-tts-int8",
         size_gb: 0.6,
         description_zh: "Supertonic 3 · 31语言 · 高质量 · 纯端到端",
         description_en: "Supertonic 3 · 31 languages · high quality · E2E",
         available: true,
         cpu: "good",
-        github_release: Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-supertonic-3-tts-int8-2026-05-11.tar.bz2"),
+        source: DownloadSource::GithubRelease("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-supertonic-3-tts-int8-2026-05-11.tar.bz2"),
+        extra_files: &[],
         quant: None,
         languages: &[
             "ar", "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hi", "hu",
@@ -622,13 +644,13 @@ pub static SPECS: &[ModelSpec] = &[
         name: "Kitten-nano-en",
         kind: ModelKind::Tts,
         framework: "sherpa",
-        repo: "k2-fsa/kitten-nano-en-v0_1-fp16",
         size_gb: 0.2,
         description_zh: "Kitten nano · 轻量快速 · 英文 · 纯端到端",
         description_en: "Kitten nano · lightweight · en · E2E",
         available: true,
         cpu: "good",
-        github_release: Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kitten-nano-en-v0_1-fp16.tar.bz2"),
+        source: DownloadSource::GithubRelease("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kitten-nano-en-v0_1-fp16.tar.bz2"),
+        extra_files: &[],
         quant: None,
         languages: &["en"],
         language_mode: LanguageMode::Fixed,
@@ -649,6 +671,63 @@ pub static SPECS: &[ModelSpec] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 来源声明合法性：GH 直链必须指向 release 资产；HF 源必须是 owner/repo 形式。
+    /// 防手改出非法状态（如把 HF 直链塞进 HuggingFace、或把仓库名塞进 github_release）。
+    #[test]
+    fn test_download_sources_wellformed() {
+        for m in SPECS {
+            match m.source {
+                DownloadSource::GithubRelease(u) => {
+                    assert!(u.starts_with("https://github.com/"), "{} 的 GH 源需 https://github.com/: {u}", m.id);
+                    assert!(u.contains("/releases/download/"), "{} 的 GH 源需指向 release 资产: {u}", m.id);
+                }
+                DownloadSource::HuggingFace(r) => {
+                    assert!(!r.contains("://"), "{} 的 HF 源应为 owner/repo: {r}", m.id);
+                    assert_eq!(r.matches('/').count(), 1, "{} 的 HF 源应为 owner/repo: {r}", m.id);
+                }
+            }
+            for f in m.extra_files {
+                match f.source {
+                    DownloadSource::GithubRelease(u) => {
+                        assert!(u.starts_with("https://"), "{} 附加文件需 https 地址: {u}", m.id);
+                    }
+                    DownloadSource::HuggingFace(r) => panic!("{} 附加文件未支持 HF 源: {r}", m.id),
+                }
+                assert!(
+                    !f.dest_rel.is_empty() && !f.dest_rel.contains("..")
+                        && !f.dest_rel.contains('\\'),
+                    "{} 附加文件落盘路径非法: {}",
+                    m.id,
+                    f.dest_rel
+                );
+            }
+        }
+    }
+
+    /// 附加文件的落盘路径必须与 backend 的 ModelsRootFile 参数一致
+    /// （下载落点 = 引擎读取点；两处各自的真源由本测试绑定）
+    #[test]
+    fn test_extra_files_match_models_root_args() {
+        for m in SPECS {
+            let rels: Vec<&str> = match &m.backend {
+                BackendSpec::SherpaTts(s) => s
+                    .cli
+                    .iter()
+                    .filter_map(|a| match a {
+                        ArgSpec::ModelsRootFile(_, rel) => Some(*rel),
+                        _ => None,
+                    })
+                    .collect(),
+                BackendSpec::Llama(_) | BackendSpec::SherpaWs(_) => Vec::new(),
+            };
+            let dests: Vec<&str> = m.extra_files.iter().map(|f| f.dest_rel).collect();
+            assert_eq!(rels.len(), dests.len(), "{}: ModelsRootFile 数 != extra_files 数", m.id);
+            for d in &dests {
+                assert!(rels.contains(d), "{}: 附加文件 {d} 未在 backend 的 ModelsRootFile 中声明", m.id);
+            }
+        }
+    }
 
     /// schema 校验：id / 归一化 id / 展示名 / 归一化展示名 全部唯一
     #[test]
