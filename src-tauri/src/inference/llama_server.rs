@@ -733,10 +733,9 @@ pub fn load_requested() -> InferenceResult<String> {
 }
 
 /// 按模型名加载 ASR 引擎（llama-server）。
-/// 模型路径从注册表动态解析：
-///   - 目录 = engine_dir.unwrap_or(name)（如 "Qwen3-ASR-1.7B" → "Qwen3-ASR-1.7B"）
-///   - GGUF 主模型 = 目录内 *-Q8_0.gguf / *-bf16.gguf（按名字段匹配）
-///   - mmproj = 同名 bf16（无损）优先，回退 Q8_0
+/// 模型路径从注册表 + 精选条目解析：
+///   - 目录 = model_dir(name)（如 "Qwen3-ASR-0.6B" → "qwen3-asr-0.6b-gguf"）
+///   - 主模型 / mmproj = 当前条目（manifest）声明的精确文件名（见 `DownloadEntry.files`）
 /// 若当前已加载同模型且同设备则直接返回；否则先卸载旧进程再启动新模型。
 pub fn load_asr_model(name: &str) -> InferenceResult<String> {
     load_asr_model_with_stage(name, "cuda", &mut |_| {})
@@ -790,12 +789,7 @@ fn llama_config_for_model(name: &str, device: &str) -> InferenceResult<LlamaServ
 
     let spec = ModelSpec::find(name)
         .ok_or_else(|| InferenceError::LoadFailed(format!("未知模型: {name}")))?;
-    let BackendSpec::Llama(AsrBackendSpec::Llama {
-        gguf,
-        mmproj_bf16,
-        mmproj_q8,
-    }) = &spec.backend
-    else {
+    let BackendSpec::Llama(AsrBackendSpec::Llama) = &spec.backend else {
         return Err(InferenceError::LoadFailed(format!(
             "{name} 不是 llama 后端模型（backend={:?}）",
             spec.backend
@@ -804,22 +798,25 @@ fn llama_config_for_model(name: &str, device: &str) -> InferenceResult<LlamaServ
 
     // 目录 = model_dir(name)（内部处理 engine_dir：如 "Qwen3-ASR-0.6B" → "qwen3-asr-0.6b-gguf"）
     let dir = crate::model_manager::model_dir(name);
-    let model_path = dir.join(gguf);
-    if !model_path.exists() {
-        return Err(InferenceError::LoadFailed(format!(
-            "在 {} 未找到模型文件（{gguf}）",
-            dir.display()
-        )));
-    }
-    // mmproj：bf16（无损编码器）优先，回退 Q8_0
-    let bf16 = dir.join(mmproj_bf16);
-    let mmproj_path = if bf16.exists() { bf16 } else { dir.join(mmproj_q8) };
-    if !mmproj_path.exists() {
-        return Err(InferenceError::LoadFailed(format!(
-            "在 {} 未找到 mmproj 文件（{mmproj_bf16} / {mmproj_q8}）",
-            dir.display()
-        )));
-    }
+    // 主模型文件 / mmproj 一律按该模型的**精选条目**声明取值（不再按文件存在性猜）
+    let model_path = crate::model_manager::main_model_file(spec, &dir).ok_or_else(|| {
+        InferenceError::LoadFailed(format!(
+            "在 {} 未找到主模型文件（条目 {}）",
+            dir.display(),
+            crate::model_manager::active_entry_of(spec)
+                .map(|e| e.id)
+                .unwrap_or("-")
+        ))
+    })?;
+    let mmproj_path = crate::model_manager::mmproj_file(spec, &dir).ok_or_else(|| {
+        InferenceError::LoadFailed(format!(
+            "在 {} 未找到 mmproj 文件（条目 {}）",
+            dir.display(),
+            crate::model_manager::active_entry_of(spec)
+                .map(|e| e.id)
+                .unwrap_or("-")
+        ))
+    })?;
 
     let runtime = crate::inference::runtime_paths::llama_runtime_dir();
     let is_cpu = device.to_ascii_lowercase().trim() == "cpu";
@@ -979,16 +976,27 @@ mod tests {
         );
     }
 
-    /// 描述符驱动：模型文件路径 / ngl 策略 / mmproj 偏好都由 spec 决定，无模型名分支
+    /// 描述符 + 精选条目驱动：加载用的 --model / --mmproj 必须**逐字等于**当前条目的声明
+    /// （不再有"文件最大 / bf16 优先 / 名字含 mmproj"之类的猜）
     #[test]
     fn test_config_spec_driven() {
+        use crate::tts::spec::{FileRole, ModelSpec};
+        let spec = ModelSpec::find("Qwen3-ASR-0.6B").expect("模型存在");
+        let entry = crate::model_manager::active_entry_of(spec).expect("有精选条目");
         match llama_config_for_model("Qwen3-ASR-0.6B", "cpu") {
             Ok(cfg) => {
-                assert!(cfg.model_path.ends_with("Qwen3-ASR-0.6B-Q8_0.gguf"));
-                assert!(cfg
-                    .mmproj_path
-                    .to_string_lossy()
-                    .contains("mmproj-Qwen3-ASR-0.6B"));
+                let main = entry.file(FileRole::Main).expect("条目声明主文件");
+                let mmproj = entry.file(FileRole::Mmproj).expect("条目声明 mmproj");
+                assert!(
+                    cfg.model_path.ends_with(main),
+                    "加载主文件必须等于条目声明: {:?} vs {main}",
+                    cfg.model_path
+                );
+                assert!(
+                    cfg.mmproj_path.ends_with(mmproj),
+                    "加载 mmproj 必须等于条目声明: {:?} vs {mmproj}",
+                    cfg.mmproj_path
+                );
                 assert_eq!(cfg.n_gpu_layers, 0, "cpu → 0 层");
                 assert!(!cfg.mmproj_offload, "cpu → mmproj 不卸载到 GPU");
             }

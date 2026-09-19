@@ -9,7 +9,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::inference::slot::{EngineSlot, SlotEngine};
-use crate::model_manager::find_main_model_file;
 use crate::tts::engine::sherpa::SherpaTtsEngine;
 use crate::tts::spec::{ModelKind, ModelSpec};
 use crate::tts::traits::TtsEngine;
@@ -72,7 +71,7 @@ impl TtsRegistry {
 
         // 主模型文件（models_root / spec.id / model.onnx 等）
         let dir = crate::model_manager::get_model_root().join(spec.id);
-        let main_file = find_main_model_file(&dir, spec.framework)
+        let main_file = crate::model_manager::main_model_file(spec, &dir)
             .ok_or_else(|| format!("模型 {} 缺少主模型文件", spec.name))?;
 
         engine.load(&main_file, device).map_err(|e| e.to_string())?;

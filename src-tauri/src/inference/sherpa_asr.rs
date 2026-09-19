@@ -120,7 +120,7 @@ impl SherpaAsrEngine {
             return Err(format!("模型 {model_name} 目录不存在: {}", model_dir.display()));
         }
         // 找主 onnx 文件 + tokens.txt
-        let main_file = crate::model_manager::find_main_model_file(&model_dir, spec.framework)
+        let main_file = crate::model_manager::main_model_file(spec, &model_dir)
             .ok_or_else(|| format!("模型 {model_name} 缺少 ONNX 文件"))?;
         let tokens = model_dir.join("tokens.txt");
         if !tokens.exists() {

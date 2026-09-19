@@ -1,11 +1,12 @@
-//! Rust 原生模型管理器 — 替代 Python sidecar 的模型下载/管理
+//! Rust 原生模型管理器 — 模型下载/清单/删除
 //!
-//! 对应技术重构文档 Phase 2-3：`huggingface_hub` → `hf-hub` crate
-//! 事件协议与 Python 侧完全一致（`sidecar://event`），前端 ModelsPanel 无需改动。
-//! - 代理：写入 HTTP(S)_PROXY + NO_PROXY=localhost,127.0.0.1，reqwest `system-proxy` 自动读取
-//!   `ENV_SCOPE_LOCK` 保证「写入环境变量 + build_sync」原子化，避免多线程并发建 Client 时的竞态。
-//! - 镜像：`HFClientBuilder::endpoint()` 显式设置；`HF_ENDPOINT` 环境变量兜底
-//! - Token：仅来自 config.json 的 huggingfaceToken（bootstrap 注入 CONFIG），无 env 回退
+//! - 下载：统一走 `crate::net`（流式 + 断点续传 + 原子 + 取消 + 重试）
+//!   · GitHub release 资产：整包下载后解压
+//!   · HuggingFace：按模型的**精选条目**（`DownloadEntry.files` 精确文件名）逐个直链下载
+//! - 代理：写入 HTTP(S)_PROXY + NO_PROXY=localhost,127.0.0.1；`ENV_SCOPE_LOCK` 保证
+//!   「写环境变量 + 建 client」原子化，避免并发建 Client 的竞态
+//! - Token：仅来自 config.json 的 huggingfaceToken（bootstrap 注入 CONFIG），且**只发 huggingface.co**
+//! - 记账：下载完成写 `.voxflow-manifest.json`（条目 id + repo@revision + 文件与大小）
 
 use std::collections::HashMap;
 use crate::tts::spec::DownloadSource;
@@ -14,7 +15,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 
-use hf_hub::progress::{DownloadEvent, ProgressEvent, ProgressHandler};
 use parking_lot::{Mutex, RwLock};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
@@ -30,7 +30,7 @@ pub enum FilePolicy {
     PreferUnquantized,
 }
 
-/// 框架描述符（引擎级元数据：文件发现 / 下载过滤 / 显存诊断）
+/// 框架描述符（引擎级元数据：文件发现 / 显存诊断）
 ///
 /// **新增推理框架 = 加一条数据 + 实现引擎 + 注册一行**，不再需要改任何 match 分支。
 /// `id` 是引擎注册键（与 `ModelSpec.framework`、registry 注册行一致）。
@@ -46,8 +46,6 @@ pub struct FrameworkSpec {
     pub file_policy: FilePolicy,
     /// 是否附带 mmproj（llama 的视觉/音频投影塔）
     pub uses_mmproj: bool,
-    /// 下载允许的量化文件模式（None = 不过滤）
-    pub quant_allow: Option<&'static [&'static str]>,
     /// 显存诊断：常驻进程名（None = 无常驻进程）
     pub process_name: Option<&'static str>,
 }
@@ -60,7 +58,6 @@ pub static FRAMEWORKS: &[FrameworkSpec] = &[
         main_exts: &[".gguf"],
         file_policy: FilePolicy::Largest,
         uses_mmproj: true,
-        quant_allow: Some(&["*Q8_0.gguf"]),
         process_name: Some("llama-server"),
     },
     FrameworkSpec {
@@ -70,7 +67,6 @@ pub static FRAMEWORKS: &[FrameworkSpec] = &[
         main_exts: &[".onnx"],
         file_policy: FilePolicy::PreferUnquantized,
         uses_mmproj: false,
-        quant_allow: None,
         process_name: Some("sherpa-onnx-offline-websocket-server"),
     },
     FrameworkSpec {
@@ -80,7 +76,6 @@ pub static FRAMEWORKS: &[FrameworkSpec] = &[
         main_exts: &[".onnx"],
         file_policy: FilePolicy::PreferUnquantized,
         uses_mmproj: false,
-        quant_allow: None,
         // TTS 合成是一次性子进程：无常驻进程可探
         process_name: None,
     },
@@ -370,7 +365,8 @@ fn free_bytes_for_root() -> Option<u64> {
 
 // ── 下载管理 ──
 
-static ACTIVE: once_cell::sync::Lazy<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+/// 进行中的下载：模型名 → (取消标志, 目标条目 id)
+static ACTIVE: once_cell::sync::Lazy<Mutex<HashMap<String, (Arc<AtomicBool>, String)>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
 
 pub fn is_downloading(name: &str) -> bool {
@@ -380,12 +376,23 @@ pub fn is_downloading(name: &str) -> bool {
 /// 迁移旧布局：E2E 模型曾下载到展示名目录（如 models/Matcha-zh-baker），
 /// 现在引擎找引擎目录名（matcha-icefall-zh-baker）。应用启动时调用一次，
 /// 把旧目录完整迁移到新目录名，避免用户重新下载。
-pub fn start_download(app: AppHandle, name: &str) -> Result<(), String> {
+/// 开始下载；`entry_id` 为空 = 默认条目（无条目的模型忽略该参数）
+pub fn start_download(app: AppHandle, name: &str, entry_id: &str) -> Result<(), String> {
     let spec = crate::tts::spec::ModelSpec::find(name)
         .ok_or_else(|| format!("unknown model: {name}"))?;
     if !spec.available {
         return Err(format!("engine not available yet: {}", spec.name));
     }
+    let target_entry = if spec.entries.is_empty() {
+        None
+    } else {
+        let entry = if entry_id.is_empty() {
+            spec.default_entry()
+        } else {
+            spec.entry(entry_id)
+        };
+        Some(entry.ok_or_else(|| format!("unknown entry: {entry_id}"))?)
+    };
 
     // 迁移旧布局：E2E 模型曾下载到展示名目录（如 models/Matcha-zh-baker），
     // 现在引擎找引擎目录名（matcha-icefall-zh-baker）。若旧目录已存在且完整，
@@ -407,8 +414,9 @@ pub fn start_download(app: AppHandle, name: &str) -> Result<(), String> {
         }
     }
     if let Some(free) = free_bytes_for_root() {
-        // 峰值 = 下载归档 + 解压产物（解压期间两者并存）≈ 2× 模型体积
-        let need_gb = spec.size_gb * 2.0;
+        // 峰值 = 下载归档 + 解压产物（解压期间两者并存）≈ 2× 体积；
+        // 有条目时按条目体积（如换 bf16 解码器会更大）
+        let need_gb = target_entry.map(|e| e.size_gb).unwrap_or(spec.size_gb) * 2.0;
         let need = (need_gb * 1024f64.powi(3)) as u64;
         if free < need {
             return Err(format!(
@@ -421,21 +429,22 @@ pub fn start_download(app: AppHandle, name: &str) -> Result<(), String> {
     {
         let mut active = ACTIVE.lock();
         if active.contains_key(spec.name) {
-            return Ok(());
+            return Ok(()); // 同模型已在下载（含切条目），忽略重复点击
         }
-        active.insert(spec.name.to_string(), cancel.clone());
+        active.insert(spec.name.to_string(), (cancel.clone(), entry_id.to_string()));
     }
     let app2 = app.clone();
     let name_owned = spec.name.to_string();
+    let entry_owned = entry_id.to_string();
     thread::Builder::new()
         .name(format!("dl-{name_owned}"))
-        .spawn(move || run_download(app2, spec, cancel))
+        .spawn(move || run_download(app2, spec, entry_owned, cancel))
         .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 pub fn request_cancel(name: &str) -> bool {
-    if let Some(flag) = ACTIVE.lock().get(name) {
+    if let Some((flag, _)) = ACTIVE.lock().get(name) {
         flag.store(true, Ordering::SeqCst);
         return true;
     }
@@ -475,140 +484,328 @@ pub fn delete_model(name: &str) -> Result<u64, String> {
     Ok(freed)
 }
 
-// ── Progress 回调 ──
+// ── 模型目录清单（manifest）："这个目录装的是哪条 + 装了哪些文件"的唯一真源 ──
 
-/// 下载取消标记：作为 panic payload 中断 hf_hub 下载。
-/// hf_hub 的 progress 回调无法直接中断下载，只能通过 panic 跳出；
-/// 用类型化 payload + downcast 判定取消，比匹配字符串可靠。
-#[derive(Debug)]
-struct DownloadCancelled;
+/// 清单文件名（模型目录内，隐藏文件）
+pub const MANIFEST_FILE: &str = ".voxflow-manifest.json";
 
-struct IpcProgress {
-    app: AppHandle,
-    model: String,
-    cancel: Arc<AtomicBool>,
-    state: Mutex<ProgressState>,
+#[derive(Debug, Clone)]
+pub struct Manifest {
+    /// 当前安装的精选条目 id
+    pub entry: String,
+    pub repo: String,
+    pub revision: String,
+    /// (相对模型目录的路径, 字节数)
+    pub files: Vec<(String, u64)>,
 }
-struct ProgressState {
-    total_bytes: u64,
-    files: HashMap<String, (u64, u64)>,
-    last_emit: std::time::Instant,
+
+pub fn manifest_path(dir: &Path) -> PathBuf {
+    dir.join(MANIFEST_FILE)
 }
-impl IpcProgress {
-    fn new(app: AppHandle, model: String, cancel: Arc<AtomicBool>) -> Self {
-        Self {
-            app,
-            model,
-            cancel,
-            state: Mutex::new(ProgressState {
-                total_bytes: 0,
-                files: HashMap::new(),
-                last_emit: std::time::Instant::now() - std::time::Duration::from_secs(10),
-            }),
+
+/// 读清单（缺失 / 损坏 → None，调用方按旧式目录处理）
+pub fn read_manifest(dir: &Path) -> Option<Manifest> {
+    let raw = std::fs::read_to_string(manifest_path(dir)).ok()?;
+    let v: Value = serde_json::from_str(&raw).ok()?;
+    let entry = v.get("entry")?.as_str()?.to_string();
+    let files = v
+        .get("files")?
+        .as_array()?
+        .iter()
+        .filter_map(|f| {
+            Some((
+                f.get("path")?.as_str()?.to_string(),
+                f.get("size").and_then(|x| x.as_u64()).unwrap_or(0),
+            ))
+        })
+        .collect();
+    Some(Manifest {
+        entry,
+        repo: v.get("repo").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+        revision: v.get("revision").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+        files,
+    })
+}
+
+/// 原子写清单（临时文件 + rename；失败即报错，不留下半个清单）
+pub fn write_manifest(dir: &Path, m: &Manifest) -> Result<(), String> {
+    let files: Vec<Value> = m
+        .files
+        .iter()
+        .map(|(path, size)| json!({ "path": path, "size": size }))
+        .collect();
+    let payload = json!({
+        "entry": m.entry,
+        "repo": m.repo,
+        "revision": m.revision,
+        "files": files,
+    });
+    let tmp = dir.join(format!("{MANIFEST_FILE}.tmp"));
+    let text = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
+    std::fs::write(&tmp, text).map_err(|e| format!("write manifest: {e}"))?;
+    std::fs::rename(&tmp, manifest_path(dir)).map_err(|e| format!("rename manifest: {e}"))
+}
+
+/// 该模型当前安装的条目：manifest 优先 → 默认条目（无条目的模型 → None）
+pub fn active_entry_of(
+    spec: &'static crate::tts::spec::ModelSpec,
+) -> Option<&'static crate::tts::spec::DownloadEntry> {
+    if spec.entries.is_empty() {
+        return None;
+    }
+    let dir = resolve_download_dir(&get_model_root(), spec.name);
+    if let Some(m) = read_manifest(&dir) {
+        if let Some(e) = spec.entry(&m.entry) {
+            return Some(e);
         }
     }
-    fn emit(&self, file: Option<String>, downloaded: u64, total: u64) {
-        let percent = if total > 0 {
-            Some((downloaded as f64 / total as f64 * 100.0 * 10.0).round() / 10.0)
+    // 旧式目录（无 manifest）：按"文件是否真的在"判定，避免 active 指向未安装的条目
+    if let Some(def) = spec.default_entry() {
+        if entry_installed(&dir, spec, def.id) {
+            return Some(def);
+        }
+    }
+    spec.entries.iter().find(|e| entry_installed(&dir, spec, e.id))
+}
+
+/// 条目是否已完整落盘：清单声明过的文件按 size 核，未记录 size 的只核存在
+pub fn entry_installed(
+    dir: &Path,
+    spec: &'static crate::tts::spec::ModelSpec,
+    entry_id: &str,
+) -> bool {
+    let Some(entry) = spec.entry(entry_id) else {
+        return false;
+    };
+    if entry.files.is_empty() {
+        return false;
+    }
+    let manifest = read_manifest(dir);
+    for f in entry.files {
+        let path = dir.join(f.name);
+        if !path.is_file() {
+            return false;
+        }
+        if let Some(m) = &manifest {
+            if m.entry == entry_id {
+                if let Some((_, size)) = m.files.iter().find(|(name, _)| name == f.name) {
+                    if *size > 0 {
+                        let actual = std::fs::metadata(&path).map(|md| md.len()).unwrap_or(0);
+                        if actual != *size {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+/// 加载端取主文件：条目声明优先 → 退回框架策略（无条目的模型）
+pub fn main_model_file(
+    spec: &'static crate::tts::spec::ModelSpec,
+    dir: &Path,
+) -> Option<PathBuf> {
+    if let Some(entry) = active_entry_of(spec) {
+        if let Some(name) = entry.file(crate::tts::spec::FileRole::Main) {
+            let path = dir.join(name);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+    find_main_model_file(dir, spec.framework)
+}
+
+/// 加载端取 mmproj：条目声明优先 → 退回旧策略
+pub fn mmproj_file(spec: &'static crate::tts::spec::ModelSpec, dir: &Path) -> Option<PathBuf> {
+    if let Some(entry) = active_entry_of(spec) {
+        if let Some(name) = entry.file(crate::tts::spec::FileRole::Mmproj) {
+            let path = dir.join(name);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+    find_mmproj_file(dir)
+}
+
+// ── HuggingFace 逐文件下载（条目驱动；不用任何 HF 客户端库）──
+
+/// `owner/name` + revision + 仓库内相对路径 → 直链（路径分段百分号编码）
+pub fn hf_file_url(repo: &str, revision: &str, name: &str) -> String {
+    let encoded: Vec<String> = name.split('/').map(encode_path_segment).collect();
+    format!(
+        "https://huggingface.co/{repo}/resolve/{revision}/{}",
+        encoded.join("/")
+    )
+}
+
+/// 路径分段百分号编码（保留 unreserved 与 RFC3986 子分隔符；HF 文件名常见空格/中文）
+fn encode_path_segment(seg: &str) -> String {
+    let mut out = String::with_capacity(seg.len());
+    for b in seg.bytes() {
+        let c = b as char;
+        let keep = c.is_ascii_alphanumeric()
+            || matches!(
+                c,
+                '-' | '_' | '.' | '~' | '(' | ')' | '!' | '*' | '\'' | '$' | ',' | ';' | '=' | ':'
+                    | '@' | '&' | '+'
+            );
+        if keep {
+            out.push(c);
         } else {
-            None
-        };
-        let payload = json!({
-            "status": "model_download_progress",
-            "model": self.model,
-            "file": file,
-            "downloaded_bytes": downloaded,
-            "total_bytes": if total > 0 { Value::Number(total.into()) } else { Value::Null },
-            "percent": percent,
-        });
-        let _ = self.app.emit("sidecar://event", payload);
-    }
-}
-impl ProgressHandler for IpcProgress {
-    fn on_progress(&self, event: &ProgressEvent) {
-        if self.cancel.load(Ordering::Relaxed) {
-            std::panic::panic_any(DownloadCancelled);
-        }
-        match event {
-            ProgressEvent::Download(DownloadEvent::Start { total_bytes, .. }) => {
-                let mut s = self.state.lock();
-                s.total_bytes = *total_bytes;
-            }
-            ProgressEvent::Download(DownloadEvent::Progress { files }) => {
-                let mut s = self.state.lock();
-                for f in files {
-                    s.files.insert(f.filename.clone(), (f.bytes_completed, f.total_bytes));
-                }
-                let now = std::time::Instant::now();
-                if now.duration_since(s.last_emit) < std::time::Duration::from_millis(200) {
-                    return;
-                }
-                s.last_emit = now;
-                let downloaded: u64 = s.files.values().map(|(c, _)| *c).sum();
-                let total = s.total_bytes;
-                let cur = files
-                    .iter()
-                    .find(|f| f.bytes_completed < f.total_bytes)
-                    .map(|f| {
-                        Path::new(&f.filename)
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or(&f.filename)
-                            .to_string()
-                    })
-                    .or_else(|| {
-                        files.last().map(|f| {
-                            Path::new(&f.filename)
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or(&f.filename)
-                                .to_string()
-                        })
-                    });
-                drop(s);
-                self.emit(cur, downloaded, total);
-            }
-            ProgressEvent::Download(DownloadEvent::AggregateProgress {
-                bytes_completed,
-                total_bytes,
-                ..
-            }) => {
-                let mut s = self.state.lock();
-                let now = std::time::Instant::now();
-                if now.duration_since(s.last_emit) < std::time::Duration::from_millis(200) {
-                    return;
-                }
-                s.last_emit = now;
-                let total = if *total_bytes > 0 { *total_bytes } else { s.total_bytes };
-                drop(s);
-                self.emit(None, *bytes_completed, total);
-            }
-            ProgressEvent::Download(DownloadEvent::Complete) => {
-                let s = self.state.lock();
-                let downloaded: u64 = s.files.values().map(|(c, _)| *c).sum();
-                let total = s.total_bytes;
-                drop(s);
-                self.emit(None, downloaded, total);
-            }
-            _ => {}
+            out.push_str(&format!("%{b:02X}"));
         }
     }
+    out
 }
 
-fn build_client_sync() -> Result<hf_hub::HFClientSync, String> {
-    let proxy = CONFIG.read().proxy.clone();
-    let token = crate::model_manager::config_token();
-    let _env_guard = ENV_SCOPE_LOCK.lock();
-    apply_proxy_env(&proxy);
-    let mut builder = hf_hub::HFClient::builder();
+/// 是否给该 URL 附 HF token：**只发 huggingface.co**（绝不泄漏给 GitHub 等其他 host）
+pub fn hf_auth_header(url: &str, token: &str) -> Option<(&'static str, String)> {
     let t = token.trim();
-    if !t.is_empty() {
-        builder = builder.token(t);
+    if t.is_empty() || !url.starts_with("https://huggingface.co/") {
+        return None;
     }
-    builder.build_sync().map_err(|e| e.to_string())
+    Some(("Authorization", format!("Bearer {t}")))
 }
 
-fn run_download(app: AppHandle, spec: &'static crate::tts::spec::ModelSpec, cancel: Arc<AtomicBool>) {
+/// HEAD 取文件大小（失败 → Err；仅用于进度权重，不阻断下载）
+fn head_size(client: &reqwest::blocking::Client, url: &str) -> Result<u64, String> {
+    let resp = client
+        .head(url)
+        .send()
+        .map_err(|e| format!("HEAD failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("HEAD {}", resp.status()));
+    }
+    Ok(resp.content_length().unwrap_or(0))
+}
+
+/// 按条目下载该组文件并落账 manifest（HF 源）
+fn download_entry_files(
+    app: &AppHandle,
+    spec: &'static crate::tts::spec::ModelSpec,
+    entry: &'static crate::tts::spec::DownloadEntry,
+    cancel: Arc<AtomicBool>,
+) -> Result<(), String> {
+    let crate::tts::spec::DownloadSource::HuggingFace { repo, revision } = spec.source else {
+        return Err(format!("{}：条目下载要求 HuggingFace 源", spec.name));
+    };
+    let dir = resolve_download_dir(&get_model_root(), spec.name);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let client = build_download_client()?;
+    let urls: Vec<String> = entry
+        .files
+        .iter()
+        .map(|f| hf_file_url(repo, revision, f.name))
+        .collect();
+    // 体积权重：HEAD 失败不阻断（退化为该文件停在区间起点，只报字节数）
+    let head_sizes: Vec<Option<u64>> = urls.iter().map(|u| head_size(&client, u).ok()).collect();
+    let weighted = head_sizes.iter().all(|s| s.is_some());
+    let total: u64 = head_sizes.iter().filter_map(|s| *s).sum();
+    let mut spans: Vec<(u32, u32)> = Vec::with_capacity(urls.len());
+    let mut cursor = 0u32;
+    for size in &head_sizes {
+        if weighted && total > 0 {
+            let w = (size.unwrap_or(0) as f64 / total as f64 * 100.0).round() as u32;
+            let end = (cursor + w).min(100);
+            spans.push((cursor, end));
+            cursor = end;
+        } else {
+            spans.push((cursor, cursor));
+        }
+    }
+    if let Some(last) = spans.last_mut() {
+        last.1 = 100;
+    }
+
+    let token = config_token();
+    let mut manifest_files: Vec<(String, u64)> = Vec::with_capacity(entry.files.len());
+    for ((file, url), (span_start, span_end)) in entry.files.iter().zip(&urls).zip(&spans) {
+        let dest = dir.join(file.name);
+        let (s, e) = (*span_start, *span_end);
+        let on_progress = |downloaded: u64, total: Option<u64>| {
+            let pct = match total {
+                Some(t) if t > 0 => {
+                    s + ((e.saturating_sub(s)) as f64 * (downloaded as f64 / t as f64)) as u32
+                }
+                _ => s,
+            };
+            let _ = app.emit(
+                "sidecar://event",
+                json!({
+                    "status": "model_download_progress",
+                    "model": spec.name,
+                    "progress": pct,
+                    "downloaded": downloaded,
+                    "total": total.unwrap_or(0),
+                }),
+            );
+        };
+        let headers: Vec<(&str, String)> = hf_auth_header(url, &token).into_iter().collect();
+        let written = crate::net::download(
+            &client,
+            &crate::net::Download {
+                url,
+                dest: &dest,
+                on_progress: Some(&on_progress),
+                cancel: Some(&cancel),
+                headers: &headers,
+            },
+        )?;
+        manifest_files.push((file.name.to_string(), written));
+    }
+    // 先落账（此后的目录状态可自证），再清理旧条目独有的文件
+    write_manifest(
+        &dir,
+        &Manifest {
+            entry: entry.id.to_string(),
+            repo: repo.to_string(),
+            revision: revision.to_string(),
+            files: manifest_files,
+        },
+    )?;
+    cleanup_obsolete_files(spec, entry, &dir);
+    Ok(())
+}
+
+/// 切换条目后的清理：只删"该模型其他条目声明过、且不属于目标条目"的文件；
+/// 未声明的第三方文件一律不碰（避免误删用户手放的东西）
+fn cleanup_obsolete_files(
+    spec: &'static crate::tts::spec::ModelSpec,
+    target: &crate::tts::spec::DownloadEntry,
+    dir: &Path,
+) {
+    let keep: Vec<&str> = target.files.iter().map(|f| f.name).collect();
+    let mut obsolete: Vec<&str> = Vec::new();
+    for entry in spec.entries {
+        for f in entry.files {
+            if !keep.contains(&f.name) && !obsolete.contains(&f.name) {
+                obsolete.push(f.name);
+            }
+        }
+    }
+    for name in obsolete {
+        let path = dir.join(name);
+        if !path.is_file() {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            log::info!("[download] 切换条目清理旧文件: {}", path.display());
+        } else {
+            log::warn!("[download] 旧文件删除失败（可能被引擎占用）: {}", path.display());
+        }
+    }
+}
+
+fn run_download(
+    app: AppHandle,
+    spec: &'static crate::tts::spec::ModelSpec,
+    entry_id: String,
+    cancel: Arc<AtomicBool>,
+) {
     let name = spec.name.to_string();
     // 下载目标目录：E2E 模型用引擎目录名（与 TTS 引擎查找一致）
     let dest = resolve_download_dir(&get_model_root(), &name);
@@ -618,51 +815,27 @@ fn run_download(app: AppHandle, spec: &'static crate::tts::spec::ModelSpec, canc
     );
     emit_models_state(&app);
     let result: Result<PathBuf, String> = (|| {
+        // 有条目的模型（HF 源）：按条目精确文件逐个下载 + 落账 manifest
+        if !spec.entries.is_empty() {
+            let entry = if entry_id.is_empty() {
+                spec.default_entry()
+            } else {
+                spec.entry(&entry_id)
+            }
+            .ok_or_else(|| format!("unknown entry: {entry_id}"))?;
+            download_entry_files(&app, spec, entry, cancel.clone())?;
+            return Ok(dest);
+        }
+        // 无条目的模型：整包下载（GitHub release 资产）后解压
         std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
-        // 来源由描述符声明：GH 直链直下（无需 HF 认证）；HF 走 hf_hub 快照
-        let repo = match spec.source {
+        match spec.source {
             DownloadSource::GithubRelease(url) => {
-                return download_github_release(url, &dest, &name, &app, &cancel);
+                download_github_release(url, &dest, &name, &app, &cancel)
             }
-            DownloadSource::HuggingFace(repo) => repo,
-        };
-        let client = build_client_sync()?;
-        let (owner, repo_name) = hf_hub::split_id(repo);
-        let handler = IpcProgress::new(app.clone(), name.clone(), cancel.clone());
-        let progress = hf_hub::progress::Progress::new(handler);
-        // GGUF 模型只下载 Q8_0 量化版（模型 + mmproj），跳过 bf16 全精度与 safetensors 原始版
-        // （bf16 单个 4G+，全量 snapshot 会白白下载 6G+；llama-server 只用 Q8_0）
-        let allow_q8: Option<Vec<String>> = framework_spec(spec.framework)
-            .and_then(|f| f.quant_allow)
-            .map(|pats| pats.iter().map(|p| p.to_string()).collect());
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client
-                .model(owner, repo_name)
-                .snapshot_download()
-                .maybe_allow_patterns(allow_q8)
-                .local_dir(dest.clone())
-                .max_workers(2)
-                .progress(progress)
-                .send()
-        }));
-        match outcome {
-            Ok(Ok(p)) => Ok(p),
-            Ok(Err(e)) => {
-                let msg = e.to_string();
-                // 若 hf_hub 把取消 panic 转成了 Err，或取消标志已置位 → 视为取消
-                if cancel.load(Ordering::Relaxed) {
-                    Err("__CANCELLED__".into())
-                } else {
-                    Err(msg)
-                }
-            }
-            Err(payload) => {
-                if payload.downcast_ref::<DownloadCancelled>().is_some() {
-                    Err("__CANCELLED__".into())
-                } else {
-                    Err("download panicked".into())
-                }
-            }
+            DownloadSource::HuggingFace { repo, .. } => Err(format!(
+                "{}：HF 源必须声明精选条目（entries），当前为 {repo}",
+                spec.name
+            )),
         }
     })();
     ACTIVE.lock().remove(&name);
@@ -676,7 +849,7 @@ fn run_download(app: AppHandle, spec: &'static crate::tts::spec::ModelSpec, canc
                 }
                 let url = match extra.source {
                     DownloadSource::GithubRelease(url) => url,
-                    DownloadSource::HuggingFace(repo) => {
+                    DownloadSource::HuggingFace { repo, .. } => {
                         eprintln!("[download] 附加文件暂不支持 HF 源: {repo}");
                         continue;
                     }
@@ -741,6 +914,7 @@ fn download_github_release(
             dest: &arch,
             on_progress: Some(&on_progress),
             cancel: Some(cancel),
+            headers: &[],
         },
     )?;
 
@@ -775,6 +949,7 @@ fn download_single_file(
             dest,
             on_progress: Some(&on_progress),
             cancel: Some(cancel),
+            headers: &[],
         },
     )?;
     Ok(())
@@ -914,7 +1089,7 @@ fn source_label(source: DownloadSource) -> String {
             .next()
             .unwrap_or(url)
             .to_string(),
-        DownloadSource::HuggingFace(repo) => format!("huggingface.co/{repo}"),
+        DownloadSource::HuggingFace { repo, .. } => format!("huggingface.co/{repo}"),
     }
 }
 
@@ -941,6 +1116,33 @@ pub fn list_models_payload(kind: Option<&str>) -> Value {
             "not_downloaded"
         };
         let dir = real_dir;
+        // 精选条目：每条的安装状态（manifest 核大小）+ 当前安装条目标记
+        let downloading_entry = ACTIVE
+            .lock()
+            .get(spec.name)
+            .map(|(_, id)| id.clone());
+        let entries_json: Vec<Value> = spec
+            .entries
+            .iter()
+            .map(|e| {
+                let state = if downloading_entry.as_deref() == Some(e.id) {
+                    "downloading"
+                } else if entry_installed(&dir, spec, e.id) {
+                    "downloaded"
+                } else {
+                    "not_downloaded"
+                };
+                json!({
+                    "id": e.id,
+                    "label_zh": e.label_zh,
+                    "label_en": e.label_en,
+                    "size_gb": e.size_gb,
+                    "default": e.default,
+                    "state": state,
+                })
+            })
+            .collect();
+        let active_entry: Option<&str> = active_entry_of(spec).map(|e| e.id);
         // 兼容旧布局残留：引擎目录不存在但展示名目录存在（如下载失败留了 Kokoro-v1_1）
         let legacy_dir = root.join(spec.name);
         let dir_exists = dir.is_dir() || (legacy_dir != dir && legacy_dir.is_dir());
@@ -952,6 +1154,8 @@ pub fn list_models_payload(kind: Option<&str>) -> Value {
             "engine": framework_spec(spec.framework).map(|f| f.engine).unwrap_or(""),
             "runtime_key": runtime_key(spec.framework).unwrap_or(spec.framework),
             "source": source_label(spec.source),
+            "entries": entries_json,
+            "active_entry": active_entry,
             "size_gb": spec.size_gb,
             "description_zh": spec.description_zh,
             "description_en": spec.description_en,
@@ -967,11 +1171,11 @@ pub fn list_models_payload(kind: Option<&str>) -> Value {
             let gb = (bytes as f64 / 1024f64.powi(3) * 100.0).round() / 100.0;
             obj["size_on_disk_gb"] = json!(gb);
             // 附带主模型文件路径，方便前端直接加载
-            if let Some(main_file) = find_main_model_file(&dir, spec.framework) {
+            if let Some(main_file) = main_model_file(spec, &dir) {
                 obj["model_path"] = json!(main_file.display().to_string());
                 // GGUF 模型额外附带 mmproj 路径
                 if uses_mmproj(spec.framework) {
-                    if let Some(mmproj) = find_mmproj_file(&dir) {
+                    if let Some(mmproj) = mmproj_file(spec, &dir) {
                         obj["mmproj_path"] = json!(mmproj.display().to_string());
                     }
                 }
@@ -1006,6 +1210,171 @@ pub fn emit_models_state(app: &AppHandle) {
 mod e2e_list_tests {
     use super::*;
 
+    fn tmp_model_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("voxflow_mm_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("mkdir");
+        d
+    }
+
+    fn gguf_spec() -> &'static crate::tts::spec::ModelSpec {
+        crate::tts::spec::ModelSpec::find("Qwen3-ASR-0.6B").expect("模型存在")
+    }
+
+    /// manifest 往返 + 条目安装判定（大小不一致/文件缺失/未知条目都必须为 false）
+    #[test]
+    fn test_manifest_roundtrip_and_entry_installed() {
+        let spec = gguf_spec();
+        let dir = tmp_model_dir("manifest");
+        let entry = spec.default_entry().expect("默认条目");
+        let mut files = Vec::new();
+        for f in entry.files {
+            std::fs::write(dir.join(f.name), b"0123456789").expect("写入");
+            files.push((f.name.to_string(), 10u64));
+        }
+        write_manifest(
+            &dir,
+            &Manifest {
+                entry: entry.id.to_string(),
+                repo: "ggml-org/Qwen3-ASR-0.6B-GGUF".into(),
+                revision: "main".into(),
+                files: files.clone(),
+            },
+        )
+        .expect("写清单");
+
+        let read = read_manifest(&dir).expect("读回");
+        assert_eq!(read.entry, entry.id);
+        assert_eq!(read.revision, "main");
+        assert_eq!(read.files.len(), entry.files.len());
+        assert!(entry_installed(&dir, spec, entry.id), "清单齐全应判定已安装");
+        let other = spec
+            .entries
+            .iter()
+            .find(|e| e.id != entry.id)
+            .expect("该模型应有第二条目");
+        assert!(!entry_installed(&dir, spec, other.id), "另一条目的独有文件缺失 → 未装");
+        assert!(!entry_installed(&dir, spec, "__no_such_entry__"), "未知条目为 false");
+
+        // 大小不符 → 视为未完整（能发现截断/上游改名导致的半成品）
+        std::fs::write(dir.join(entry.files[0].name), b"short").expect("截断");
+        assert!(!entry_installed(&dir, spec, entry.id), "大小不符必须判 false");
+
+        // 文件缺失 → false
+        std::fs::write(dir.join(entry.files[0].name), b"0123456789").expect("恢复");
+        std::fs::remove_file(dir.join(entry.files[1].name)).expect("删除");
+        assert!(!entry_installed(&dir, spec, entry.id), "缺文件必须判 false");
+    }
+
+    /// HF 直链拼装（子目录 / 空格 / 非 ASCII 需百分号编码）
+    #[test]
+    fn test_hf_file_url_encoding() {
+        assert_eq!(
+            hf_file_url("owner/repo", "main", "model.safetensors"),
+            "https://huggingface.co/owner/repo/resolve/main/model.safetensors"
+        );
+        assert_eq!(
+            hf_file_url("owner/repo", "abc123", "sub dir/权重.bin"),
+            "https://huggingface.co/owner/repo/resolve/abc123/sub%20dir/%E6%9D%83%E9%87%8D.bin"
+        );
+    }
+
+    /// token 只发 huggingface.co（绝不泄漏给 GitHub）
+    #[test]
+    fn test_hf_auth_header_host_scoped() {
+        let hf = "https://huggingface.co/o/r/resolve/main/a.bin";
+        let gh = "https://github.com/k2-fsa/sherpa-onnx/releases/download/x/a.tar.bz2";
+        assert!(hf_auth_header(hf, "hf_abc").is_some());
+        assert!(hf_auth_header(gh, "hf_abc").is_none(), "GH 请求不得携带 HF token");
+        assert!(hf_auth_header(hf, "   ").is_none(), "空 token 不带头");
+    }
+
+    /// 切条目清理：只删"其他条目声明过"的文件，未声明的第三方文件绝不碰
+    #[test]
+    fn test_cleanup_obsolete_files_scope() {
+        let spec = gguf_spec();
+        let dir = tmp_model_dir("cleanup");
+        let keep_entry = spec.default_entry().expect("默认条目");
+        // 制造"另一个条目独有文件" + 用户手放文件
+        let other = spec
+            .entries
+            .iter()
+            .find(|e| e.id != keep_entry.id)
+            .expect("该模型应有第二条目");
+        let other_only: Vec<&str> = other
+            .files
+            .iter()
+            .map(|f| f.name)
+            .filter(|n| {
+                keep_entry.file(crate::tts::spec::FileRole::Main) != Some(*n)
+                    && keep_entry.file(crate::tts::spec::FileRole::Mmproj) != Some(*n)
+            })
+            .collect();
+        assert!(!other_only.is_empty(), "该模型两条目应有独有文件");
+        for f in keep_entry.files {
+            std::fs::write(dir.join(f.name), b"x").expect("写目标条目文件");
+        }
+        for n in &other_only {
+            std::fs::write(dir.join(n), b"x").expect("写他人文件");
+        }
+        let stray = dir.join("我的笔记.txt");
+        std::fs::write(&stray, b"mine").expect("写用户文件");
+
+        cleanup_obsolete_files(spec, keep_entry, &dir);
+
+        assert!(dir.join(keep_entry.file(crate::tts::spec::FileRole::Main).unwrap()).is_file(), "目标条目主文件必须保留");
+        for n in &other_only {
+            assert!(!dir.join(n).exists(), "其他条目独有文件应被清理: {n}");
+        }
+        assert!(stray.is_file(), "未声明的第三方文件不得删除");
+    }
+
+    /// payload：有条目的模型下发 entries/active_entry，取值为契约枚举
+    #[test]
+    fn test_payload_carries_entries() {
+        let payload = list_models_payload(Some("asr"));
+        let models = payload["models"].as_array().expect("models 数组");
+        let qwen = models
+            .iter()
+            .find(|m| m["name"] == "Qwen3-ASR-0.6B")
+            .expect("应含 Qwen3-ASR-0.6B");
+        let entries = qwen["entries"].as_array().expect("entries 数组");
+        assert_eq!(entries.len(), 2, "GGUF 模型应有两条精选条目");
+        assert_eq!(entries.iter().filter(|e| e["default"] == true).count(), 1, "恰有一条默认");
+        for e in entries {
+            let state = e["state"].as_str().unwrap_or("");
+            assert!(
+                matches!(state, "downloaded" | "not_downloaded" | "downloading"),
+                "条目状态取值非法: {state}"
+            );
+            assert!(e["size_gb"].as_f64().unwrap_or(0.0) > 0.0);
+            assert!(!e["label_zh"].as_str().unwrap_or("").is_empty());
+        }
+        // active_entry：null 或必须是本模型条目 id
+        match qwen["active_entry"].as_str() {
+            Some(id) => assert!(entries.iter().any(|e| e["id"] == id), "active_entry 必须是本模型条目"),
+            None => assert!(qwen["active_entry"].is_null(), "无安装时为 null"),
+        }
+        // 无条目的模型：空数组 + null（前端据此走旧路径）
+        let sherpa = models
+            .iter()
+            .find(|m| m["name"] == "SenseVoice-int8")
+            .expect("应含 SenseVoice-int8");
+        assert_eq!(sherpa["entries"].as_array().map(|a| a.len()), Some(0));
+        assert!(sherpa["active_entry"].is_null());
+    }
+
+    /// 有条目模型的 active_entry 解析：manifest 缺失时退回默认条目
+    #[test]
+    fn test_active_entry_falls_back_to_default() {
+        let spec = gguf_spec();
+        // 环境中的 model_root 可能未安装该模型 → active_entry_of 仍应返回默认条目
+        let e = active_entry_of(spec).expect("有条目的模型必须能解析出条目");
+        assert!(spec.entry(e.id).is_some());
+        assert_eq!(spec.entries.is_empty(), false);
+    }
+
+
     /// 来源标签推导（纯函数；前端直接显示，故必须精确）
     #[test]
     fn test_source_label_derivation() {
@@ -1016,7 +1385,10 @@ mod e2e_list_tests {
             "github.com/k2-fsa/sherpa-onnx"
         );
         assert_eq!(
-            source_label(DownloadSource::HuggingFace("ggml-org/Qwen3-ASR-0.6B-GGUF")),
+            source_label(DownloadSource::HuggingFace {
+                repo: "ggml-org/Qwen3-ASR-0.6B-GGUF",
+                revision: "main",
+            }),
             "huggingface.co/ggml-org/Qwen3-ASR-0.6B-GGUF"
         );
     }

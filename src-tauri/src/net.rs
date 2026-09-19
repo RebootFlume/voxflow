@@ -35,6 +35,8 @@ pub struct Download<'a> {
     /// 进度回调（已节流；`None` 总大小 = 服务器未给 Content-Length）
     pub on_progress: Option<&'a dyn Fn(u64, Option<u64>)>,
     pub cancel: Option<&'a AtomicBool>,
+    /// 附加请求头（如 HF token；调用方负责只在需要的 host 上带）
+    pub headers: &'a [(&'a str, String)],
 }
 
 /// 失败分类：决定是否重试
@@ -118,6 +120,9 @@ fn fetch_once(
 ) -> Result<u64, Fail> {
     let existing = std::fs::metadata(part).map(|m| m.len()).unwrap_or(0);
     let mut req = client.get(d.url);
+    for (k, v) in d.headers {
+        req = req.header(*k, v.as_str());
+    }
     if existing > 0 {
         req = req.header(reqwest::header::RANGE, format!("bytes={existing}-"));
     }
@@ -371,6 +376,7 @@ mod tests {
                 dest: &dest,
                 on_progress: Some(&cb),
                 cancel: None,
+                headers: &[],
             },
         )
         .expect("download");
@@ -396,7 +402,7 @@ mod tests {
         std::fs::write(part_path(&dest), &body[..50 * 1024]).expect("seed part");
         let n = download(
             &client(),
-            &Download { url: &srv.url, dest: &dest, on_progress: None, cancel: None },
+            &Download { url: &srv.url, dest: &dest, on_progress: None, cancel: None, headers: &[] },
         )
         .expect("download");
         assert_eq!(n, body.len() as u64);
@@ -418,7 +424,7 @@ mod tests {
         std::fs::write(part_path(&dest), &body[..50 * 1024]).expect("seed part");
         download(
             &client(),
-            &Download { url: &srv.url, dest: &dest, on_progress: None, cancel: None },
+            &Download { url: &srv.url, dest: &dest, on_progress: None, cancel: None, headers: &[] },
         )
         .expect("download");
         // 服务器忽略 Range（返 200 全量）：必须截断重下，绝不能把全量追加到旧分片后
@@ -440,7 +446,7 @@ mod tests {
         std::fs::write(part_path(&dest), vec![0u8; body.len() + 4096]).expect("seed part");
         download(
             &client(),
-            &Download { url: &srv.url, dest: &dest, on_progress: None, cancel: None },
+            &Download { url: &srv.url, dest: &dest, on_progress: None, cancel: None, headers: &[] },
         )
         .expect("download");
         assert_eq!(std::fs::read(&dest).expect("read"), body);
@@ -473,6 +479,7 @@ mod tests {
                 dest: &dest,
                 on_progress: Some(&cb),
                 cancel: Some(&cancel),
+                headers: &[],
             },
         )
         .expect_err("应被取消");
@@ -490,6 +497,7 @@ mod tests {
                 dest: &dest,
                 on_progress: None,
                 cancel: Some(&AtomicBool::new(false)),
+                headers: &[],
             },
         )
         .expect("取消后重跑应成功");
@@ -510,7 +518,7 @@ mod tests {
         std::fs::write(&dest, b"already here").expect("seed dest");
         let n = download(
             &client(),
-            &Download { url: &srv.url, dest: &dest, on_progress: None, cancel: None },
+            &Download { url: &srv.url, dest: &dest, on_progress: None, cancel: None, headers: &[] },
         )
         .expect("skip");
         assert_eq!(n, 12);
@@ -531,7 +539,7 @@ mod tests {
         let dest = dir.join("asset.bin");
         download(
             &client(),
-            &Download { url: &srv.url, dest: &dest, on_progress: None, cancel: None },
+            &Download { url: &srv.url, dest: &dest, on_progress: None, cancel: None, headers: &[] },
         )
         .expect("retry then ok");
         assert_eq!(std::fs::read(&dest).expect("read"), body);

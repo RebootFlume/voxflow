@@ -154,12 +154,28 @@ fn dispatch_sidecar_action(
         }
         "download_model" => {
             let name = payload.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let entry = payload.get("entry").and_then(|v| v.as_str()).unwrap_or("").to_string();
             if name.is_empty() {
                 let msg = "missing model".to_string();
                 emit_error(&app, msg.clone());
                 return Ok(serde_json::json!({"status": "error", "msg": msg}));
             }
-            match model_manager::start_download(app.clone(), &name) {
+            // 切换条目（目标 != 当前安装）时必须先卸载：Windows 下引擎占用着旧文件
+            if let Some(spec) = crate::tts::spec::ModelSpec::find(&name) {
+                if !spec.entries.is_empty() && is_model_in_use(tts, &name) {
+                    let active = model_manager::active_entry_of(spec).map(|e| e.id);
+                    let switching = match active {
+                        Some(cur) => !entry.is_empty() && entry != cur,
+                        None => false,
+                    };
+                    if switching {
+                        let msg = format!("模型正在使用：请先卸载再切换量化（{}）", spec.name);
+                        emit_error(&app, msg.clone());
+                        return Ok(serde_json::json!({"status": "error", "msg": msg}));
+                    }
+                }
+            }
+            match model_manager::start_download(app.clone(), &name, &entry) {
                 Ok(()) => {
                     let _ = app.emit("sidecar://event", serde_json::json!({"status": "model_download_started", "model": name}));
                     // 触发前端轮询态
@@ -227,7 +243,7 @@ fn dispatch_sidecar_action(
             };
             let dir = model_manager::model_dir(name);
             // 根据格式查找主模型文件
-            let main_file = match model_manager::find_main_model_file(&dir, spec.framework) {
+            let main_file = match model_manager::main_model_file(spec, &dir) {
                 Some(f) => f,
                 None => {
                     let msg = format!("model file not found for {name} (framework: {})", spec.framework);

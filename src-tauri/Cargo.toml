@@ -27,7 +27,6 @@ arboard = "3"
 enigo = "0.2"
 
 # 推理引擎依赖
-hf-hub = { version = "1.0", features = ["blocking"] }  # Hugging Face 模型下载
 anyhow = "1"                                            # 错误处理
 dirs = "5"                                            # 目录路径
 windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }  # 磁盘剩余空间（Windows）
@@ -40,5 +39,5 @@ llama-cpp-2 = "0.1"         # llama.cpp GGUF 推理
 # llama-server 子进程 + HTTP 桥接（ASR）
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "multipart", "json", "rustls-tls", "socks"] }
 tungstenite = "0.24"
-log = "0.4"                 # 轻量日志（llama_server 子进程状态输出）
+log = { version = "0.4", features = ["std"] }
 tiny_http = "0.12"

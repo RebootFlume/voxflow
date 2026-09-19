@@ -377,6 +377,7 @@ fn download_to_file(
             dest: out,
             on_progress: Some(&on_progress),
             cancel: Some(cancel),
+            headers: &[],
         },
     )?;
     Ok(())

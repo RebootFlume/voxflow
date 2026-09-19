@@ -124,15 +124,8 @@ pub struct SherpaTtsSpec {
 /// ASR 后端（llama-server / sherpa websocket server）引擎参数
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AsrBackendSpec {
-    /// llama-server（GGUF）：文件命名模板
-    Llama {
-        /// 主模型文件（相对模型目录，如 "Qwen3-ASR-0.6B-Q8_0.gguf"）
-        gguf: &'static str,
-        /// mmproj 首选（bf16，无损编码器）
-        mmproj_bf16: &'static str,
-        /// mmproj 回退（Q8_0 量化）
-        mmproj_q8: &'static str,
-    },
+    /// llama-server（GGUF）：文件由该模型的精选条目声明（`DownloadEntry.files`），此处无数据
+    Llama,
     /// sherpa-onnx websocket server：主模型 flag
     SherpaWs {
         /// "--sense-voice-model" 或 "--paraformer"
@@ -148,13 +141,57 @@ pub enum BackendSpec {
     SherpaTts(SherpaTtsSpec),
 }
 
-/// 模型下载来源（二选一，不存在「两个都可空」的非法状态）
+/// 条目内文件的角色（加载端据此取值，不再"猜哪个文件是主模型"）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileRole {
+    /// 主权重 / 主模型文件
+    Main,
+    /// 多模态投影（GGUF 的音频编码器 mmproj）
+    Mmproj,
+}
+
+/// 条目里的一个文件（相对仓库根 / 模型目录的文件名，可含子目录）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntryFile {
+    pub role: FileRole,
+    pub name: &'static str,
+}
+
+/// 精选下载条目：一组"我们调试后定死"的文件组合。
+///
+/// 用户看到的是一行标签，点下载即安装这一组文件；代码里不再做任何文件名推导。
+/// 加新组合 = 加一条数据；同一模型只允许同时安装一条（切换 = 换文件集）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DownloadEntry {
+    /// 稳定键（manifest / IPC 用）
+    pub id: &'static str,
+    pub label_zh: &'static str,
+    pub label_en: &'static str,
+    /// 要下载的文件（顺序 = 下载顺序）
+    pub files: &'static [EntryFile],
+    /// 展示用体积（GB；实际大小以下载时探测为准）
+    pub size_gb: f64,
+    pub default: bool,
+}
+
+impl DownloadEntry {
+    /// 按角色取文件名（该角色未声明 → None）
+    pub fn file(&self, role: FileRole) -> Option<&'static str> {
+        self.files.iter().find(|f| f.role == role).map(|f| f.name)
+    }
+}
+
+/// 模型下载来源
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DownloadSource {
-    /// GitHub release 直链（当前 10 个模型；只受代理影响，不受 HF 镜像影响）
+    /// GitHub release 直链（当前 10 个模型；只受代理影响）
     GithubRelease(&'static str),
-    /// HuggingFace 仓库（hf_hub 快照下载；受代理 / token 影响）
-    HuggingFace(&'static str),
+    /// HuggingFace 仓库（按 `entries` 里的文件名逐个直链下载；受代理 / token 影响）
+    HuggingFace {
+        repo: &'static str,
+        /// "main" 或 commit hash（钉住版本保证可复现）
+        revision: &'static str,
+    },
 }
 
 /// 主包之外的附加文件（如 ZipVoice 的 vocoder）：来源 + 落盘相对路径
@@ -178,6 +215,8 @@ pub struct ModelSpec {
     pub framework: &'static str,
     /// 下载来源（唯一来源声明；UI 展示标签由它推导，见 model_manager::source_label）
     pub source: DownloadSource,
+    /// 精选下载条目（空 = 无条目概念：按 old 路径整体下载，如 GitHub tarball 模型）
+    pub entries: &'static [DownloadEntry],
     pub size_gb: f64,
     pub description_zh: &'static str,
     pub description_en: &'static str,
@@ -205,6 +244,19 @@ impl ModelSpec {
     /// 全部 TTS 模型（描述符驱动；前端列表 / 能力数据源）
     pub fn all_tts() -> Vec<&'static ModelSpec> {
         SPECS.iter().filter(|m| m.kind == ModelKind::Tts).collect()
+    }
+
+    /// 按 id 取精选条目（未知 → None）
+    pub fn entry(&self, id: &str) -> Option<&'static DownloadEntry> {
+        self.entries.iter().find(|e| e.id == id)
+    }
+
+    /// 默认条目（无条目 → None；未标 default 时取第一条）
+    pub fn default_entry(&self) -> Option<&'static DownloadEntry> {
+        self.entries
+            .iter()
+            .find(|e| e.default)
+            .or_else(|| self.entries.first())
     }
 
     /// 按别名查找：精确 id > 归一化 id > 归一化目录名（id）> 归一化展示名。
@@ -251,7 +303,36 @@ pub static SPECS: &[ModelSpec] = &[
         name: "Qwen3-ASR-0.6B",
         kind: ModelKind::Asr,
         framework: "gguf",
-        source: DownloadSource::HuggingFace("ggml-org/Qwen3-ASR-0.6B-GGUF"),
+        source: DownloadSource::HuggingFace {
+            repo: "ggml-org/Qwen3-ASR-0.6B-GGUF",
+            revision: "main",
+        },
+        // 精选条目：文件组合由我们调试后定死，用户只选一条；同一模型同时只装一条。
+        // 默认 = 主权重 Q8_0 + 解码器 bf16（调试结论：解码器取无损 bf16，质量优先）
+        entries: &[
+            DownloadEntry {
+                id: "q8_0__mp_bf16",
+                label_zh: "Q8_0 主权重 + bf16 解码器 · 推荐",
+                label_en: "Q8_0 weights + bf16 decoder · Recommended",
+                files: &[
+                    EntryFile { role: FileRole::Main, name: "Qwen3-ASR-0.6B-Q8_0.gguf" },
+                    EntryFile { role: FileRole::Mmproj, name: "mmproj-Qwen3-ASR-0.6B-bf16.gguf" },
+                ],
+                size_gb: 1.24, // 估算：bf16 解码器体积待实测校正
+                default: true,
+            },
+            DownloadEntry {
+                id: "q8_0__mp_q8",
+                label_zh: "Q8_0 主权重 + Q8_0 解码器（更省显存）",
+                label_en: "Q8_0 weights + Q8_0 decoder (lower VRAM)",
+                files: &[
+                    EntryFile { role: FileRole::Main, name: "Qwen3-ASR-0.6B-Q8_0.gguf" },
+                    EntryFile { role: FileRole::Mmproj, name: "mmproj-Qwen3-ASR-0.6B-Q8_0.gguf" },
+                ],
+                size_gb: 0.95,
+                default: false,
+            },
+        ],
         size_gb: 0.95,
         description_zh: "默认识别模型 · GGUF 量化 · 更快 · 内存占用更低",
         description_en: "Default ASR model · GGUF quantized · faster · lower memory",
@@ -262,18 +343,42 @@ pub static SPECS: &[ModelSpec] = &[
         languages: &[],
         language_mode: LanguageMode::Fixed,
         voice_mode: VoiceMode::Fixed,
-        backend: BackendSpec::Llama(AsrBackendSpec::Llama {
-            gguf: "Qwen3-ASR-0.6B-Q8_0.gguf",
-            mmproj_bf16: "mmproj-Qwen3-ASR-0.6B-bf16.gguf",
-            mmproj_q8: "mmproj-Qwen3-ASR-0.6B-Q8_0.gguf",
-        }),
+        backend: BackendSpec::Llama(AsrBackendSpec::Llama),
     },
     ModelSpec {
         id: "Qwen3-ASR-1.7B",
         name: "Qwen3-ASR-1.7B",
         kind: ModelKind::Asr,
         framework: "gguf",
-        source: DownloadSource::HuggingFace("ggml-org/Qwen3-ASR-1.7B-GGUF"),
+        source: DownloadSource::HuggingFace {
+            repo: "ggml-org/Qwen3-ASR-1.7B-GGUF",
+            revision: "main",
+        },
+        // 精选条目同上（默认 = 主 Q8_0 + 解码器 bf16）
+        entries: &[
+            DownloadEntry {
+                id: "q8_0__mp_bf16",
+                label_zh: "Q8_0 主权重 + bf16 解码器 · 推荐",
+                label_en: "Q8_0 weights + bf16 decoder · Recommended",
+                files: &[
+                    EntryFile { role: FileRole::Main, name: "Qwen3-ASR-1.7B-Q8_0.gguf" },
+                    EntryFile { role: FileRole::Mmproj, name: "mmproj-Qwen3-ASR-1.7B-bf16.gguf" },
+                ],
+                size_gb: 2.80, // 估算：bf16 解码器体积待实测校正
+                default: true,
+            },
+            DownloadEntry {
+                id: "q8_0__mp_q8",
+                label_zh: "Q8_0 主权重 + Q8_0 解码器（更省显存）",
+                label_en: "Q8_0 weights + Q8_0 decoder (lower VRAM)",
+                files: &[
+                    EntryFile { role: FileRole::Main, name: "Qwen3-ASR-1.7B-Q8_0.gguf" },
+                    EntryFile { role: FileRole::Mmproj, name: "mmproj-Qwen3-ASR-1.7B-Q8_0.gguf" },
+                ],
+                size_gb: 2.35,
+                default: false,
+            },
+        ],
         size_gb: 2.35,
         description_zh: "更准 · GGUF 量化 · 需要更多内存/显存",
         description_en: "More accurate · GGUF quantized · needs more memory",
@@ -284,11 +389,7 @@ pub static SPECS: &[ModelSpec] = &[
         languages: &[],
         language_mode: LanguageMode::Fixed,
         voice_mode: VoiceMode::Fixed,
-        backend: BackendSpec::Llama(AsrBackendSpec::Llama {
-            gguf: "Qwen3-ASR-1.7B-Q8_0.gguf",
-            mmproj_bf16: "mmproj-Qwen3-ASR-1.7B-bf16.gguf",
-            mmproj_q8: "mmproj-Qwen3-ASR-1.7B-Q8_0.gguf",
-        }),
+        backend: BackendSpec::Llama(AsrBackendSpec::Llama),
     },
     // ══════════════ ASR：sherpa-onnx websocket server ══════════════
     ModelSpec {
@@ -302,6 +403,7 @@ pub static SPECS: &[ModelSpec] = &[
         available: true,
         cpu: "good",
         source: DownloadSource::GithubRelease("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2"),
+        entries: &[],
         extra_files: &[],
         quant: None,
         languages: &[],
@@ -322,6 +424,7 @@ pub static SPECS: &[ModelSpec] = &[
         available: true,
         cpu: "good",
         source: DownloadSource::GithubRelease("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-paraformer-zh-small-2024-03-09.tar.bz2"),
+        entries: &[],
         extra_files: &[],
         quant: None,
         languages: &[],
@@ -343,6 +446,7 @@ pub static SPECS: &[ModelSpec] = &[
         available: true,
         cpu: "good",
         source: DownloadSource::GithubRelease("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_1.tar.bz2"),
+        entries: &[],
         extra_files: &[],
         quant: None,
         languages: &["zh", "en"],
@@ -392,6 +496,7 @@ pub static SPECS: &[ModelSpec] = &[
         available: true,
         cpu: "good",
         source: DownloadSource::GithubRelease("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2"),
+        entries: &[],
         extra_files: &[],
         quant: None,
         languages: &["zh", "en"],
@@ -441,6 +546,7 @@ pub static SPECS: &[ModelSpec] = &[
         available: true,
         cpu: "good",
         source: DownloadSource::GithubRelease("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2"),
+        entries: &[],
         extra_files: &[],
         quant: None,
         languages: &["en"],
@@ -491,6 +597,7 @@ pub static SPECS: &[ModelSpec] = &[
         available: true,
         cpu: "good",
         source: DownloadSource::GithubRelease("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/matcha-icefall-zh-baker.tar.bz2"),
+        entries: &[],
         extra_files: &[],
         quant: None,
         // zh-baker 实为中文单语言（旧注册表 languages 含 en，P2 核对官方包后定）
@@ -520,6 +627,7 @@ pub static SPECS: &[ModelSpec] = &[
         available: true,
         cpu: "good",
         source: DownloadSource::GithubRelease("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-zipvoice-distill-int8-zh-en-emilia.tar.bz2"),
+        entries: &[],
         // vocoder 必须落模型根 —— 与 backend 的 ModelsRootFile("--zipvoice-vocoder", "vocos_24khz.onnx") 同处
         extra_files: &[ExtraFile {
             source: DownloadSource::GithubRelease("https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models/vocos_24khz.onnx"),
@@ -564,6 +672,7 @@ pub static SPECS: &[ModelSpec] = &[
         available: true,
         cpu: "good",
         source: DownloadSource::GithubRelease("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-pocket-tts-int8-2026-01-26.tar.bz2"),
+        entries: &[],
         extra_files: &[],
         quant: None,
         // 决策 6：克隆能力待核对官方文档；当前 CLI 未接线参考音频（no-op bug），按无克隆处理
@@ -601,6 +710,7 @@ pub static SPECS: &[ModelSpec] = &[
         available: true,
         cpu: "good",
         source: DownloadSource::GithubRelease("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-supertonic-3-tts-int8-2026-05-11.tar.bz2"),
+        entries: &[],
         extra_files: &[],
         quant: None,
         languages: &[
@@ -650,6 +760,7 @@ pub static SPECS: &[ModelSpec] = &[
         available: true,
         cpu: "good",
         source: DownloadSource::GithubRelease("https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kitten-nano-en-v0_1-fp16.tar.bz2"),
+        entries: &[],
         extra_files: &[],
         quant: None,
         languages: &["en"],
@@ -682,9 +793,11 @@ mod tests {
                     assert!(u.starts_with("https://github.com/"), "{} 的 GH 源需 https://github.com/: {u}", m.id);
                     assert!(u.contains("/releases/download/"), "{} 的 GH 源需指向 release 资产: {u}", m.id);
                 }
-                DownloadSource::HuggingFace(r) => {
-                    assert!(!r.contains("://"), "{} 的 HF 源应为 owner/repo: {r}", m.id);
-                    assert_eq!(r.matches('/').count(), 1, "{} 的 HF 源应为 owner/repo: {r}", m.id);
+                DownloadSource::HuggingFace { repo, revision } => {
+                    assert!(!repo.contains("://"), "{} 的 HF repo 应为 owner/repo: {repo}", m.id);
+                    assert_eq!(repo.matches('/').count(), 1, "{} 的 HF repo 应为 owner/repo: {repo}", m.id);
+                    assert!(!revision.trim().is_empty(), "{} 的 HF revision 不可为空", m.id);
+                    assert!(!m.entries.is_empty(), "{} 用 HF 源必须声明精选条目", m.id);
                 }
             }
             for f in m.extra_files {
@@ -692,7 +805,9 @@ mod tests {
                     DownloadSource::GithubRelease(u) => {
                         assert!(u.starts_with("https://"), "{} 附加文件需 https 地址: {u}", m.id);
                     }
-                    DownloadSource::HuggingFace(r) => panic!("{} 附加文件未支持 HF 源: {r}", m.id),
+                    DownloadSource::HuggingFace { repo, .. } => {
+                        panic!("{} 附加文件未支持 HF 源: {repo}", m.id)
+                    }
                 }
                 assert!(
                     !f.dest_rel.is_empty() && !f.dest_rel.contains("..")
@@ -702,6 +817,58 @@ mod tests {
                     f.dest_rel
                 );
             }
+        }
+    }
+
+    /// 精选条目结构约束：id 唯一、恰有一条默认、文件为非空相对路径、必有主文件、体积为正
+    #[test]
+    fn test_download_entries_wellformed() {
+        for m in SPECS {
+            let mut ids: Vec<&str> = Vec::new();
+            let mut defaults = 0;
+            for e in m.entries {
+                assert!(!e.id.trim().is_empty(), "{} 有条目 id 为空", m.id);
+                assert!(!ids.contains(&e.id), "{} 条目 id 重复: {}", m.id, e.id);
+                ids.push(e.id);
+                if e.default {
+                    defaults += 1;
+                }
+                assert!(e.size_gb > 0.0, "{} 条目 {} 体积必须为正", m.id, e.id);
+                assert!(
+                    !e.label_zh.is_empty() && !e.label_en.is_empty(),
+                    "{} 条目 {} 缺中英标签",
+                    m.id,
+                    e.id
+                );
+                assert!(!e.files.is_empty(), "{} 条目 {} 未声明文件", m.id, e.id);
+                let mut has_main = false;
+                for f in e.files {
+                    let bad = f.name.is_empty()
+                        || f.name.starts_with('/')
+                        || f.name.contains("..")
+                        || f.name.contains('\\');
+                    assert!(!bad, "{} 条目 {} 文件名非法: {}", m.id, e.id, f.name);
+                    if f.role == FileRole::Main {
+                        has_main = true;
+                    }
+                }
+                assert!(has_main, "{} 条目 {} 缺主文件（FileRole::Main）", m.id, e.id);
+            }
+            if !m.entries.is_empty() {
+                assert_eq!(defaults, 1, "{} 必须有且仅有一条默认条目", m.id);
+            }
+        }
+    }
+
+    /// 有主权重条目时，条目里的主文件必须能被默认条目取到（加载端依赖它）
+    #[test]
+    fn test_default_entry_resolves_main() {
+        for m in SPECS {
+            if let Some(e) = m.default_entry() {
+                assert!(e.file(FileRole::Main).is_some(), "{} 默认条目缺主文件", m.id);
+                assert!(m.entry(e.id).is_some(), "{} 默认条目必须可按 id 查回", m.id);
+            }
+            assert!(m.entry("__not_exist__").is_none());
         }
     }
 
