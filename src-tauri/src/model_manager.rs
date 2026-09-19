@@ -1296,7 +1296,9 @@ pub fn list_models_payload(kind: Option<&str>) -> Value {
                 .iter()
                 .find(|e| Some(e.id) == active_entry)
                 .or_else(|| spec.default_entry())
-                .and_then(|e| entry_vram_estimate_mb(&dir, e)),
+                .into_iter()
+                .chain(spec.entries.iter())
+                .find_map(|e| entry_vram_estimate_mb(&dir, e)),
             "description_zh": spec.description_zh,
             "description_en": spec.description_en,
             "available": spec.available,
