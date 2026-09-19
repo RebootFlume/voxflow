@@ -86,6 +86,11 @@ impl SherpaAsrEngine {
         self.inner.lock().device.clone()
     }
 
+    /// 当前 websocket server 子进程 PID（未加载 → None）
+    pub fn pid(&self) -> Option<u32> {
+        self.inner.lock().child.as_ref().map(|c| c.id())
+    }
+
     /// 定位 websocket server 可执行文件（规范布局：<sherpa_runtime_dir>/bin/…，
     /// 与下载 marker、TTS 引擎共用 runtime_paths::sherpa_exe 单一真源）
     fn server_exe() -> PathBuf {
@@ -408,6 +413,10 @@ impl super::engine::AsrEngine for SherpaAsrAdapter {
 
     fn transcribe(&self, samples: &[f32], sample_rate: u32) -> Result<String, String> {
         self.engine.transcribe(samples, sample_rate)
+    }
+
+    fn pid(&self) -> Option<u32> {
+        self.engine.pid()
     }
 
     fn vram_estimate_mb(&self) -> Option<u64> {

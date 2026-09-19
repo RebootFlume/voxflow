@@ -140,14 +140,20 @@ fn smoke_long_audio_segmented() {
     let adapter_vram = crate::inference::llama_server::LlamaAsrAdapter::new();
     let est = crate::inference::engine::AsrEngine::vram_estimate_mb(&adapter_vram)
         .expect("GPU 模式应有预估");
-    let truth = crate::vram_by_process_wmi()
-        .get("llama-server.exe")
-        .copied();
-    println!("[smoke] 预计显存 = {est} MiB | WMI 真值(含其它实例) = {truth:?} MiB");
+    let our_pid = engine.pid();
+    let truth = crate::wmi_gpu_process_rows()
+        .into_iter()
+        .find(|(p, _, _)| Some(*p) == our_pid)
+        .map(|(_, _, mb)| mb);
+    println!("[smoke] 预计显存 = {est} MiB | 本引擎 pid={our_pid:?} 驱动真值 = {truth:?} MiB");
     assert!(
         (1500..=2200).contains(&est),
         "0.6B/ctx2048/Q8 的预估应在 1.5–2.2 GiB 量级（实测 1768），实际 {est}"
     );
+    if let Some(t) = truth {
+        let err = (est as f64 - t as f64).abs() / t as f64;
+        assert!(err < 0.25, "预估 {est} MiB 与真值 {t} MiB 偏差 {:.0}% 过大", err * 100.0);
+    }
 
     // 真实语音铺满 180s（> 3 × 60s 段，触发滑动窗口分段）
     let wav =

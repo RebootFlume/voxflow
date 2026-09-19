@@ -76,4 +76,12 @@ pub trait AsrEngine: Send + Sync {
 
     /// 估算当前模型显存占用（MB），用于显存监控（无权限时回退估算）
     fn vram_estimate_mb(&self) -> Option<u64>;
+
+    /// 引擎当前**子进程** PID（未加载/无子进程 → None）。
+    ///
+    /// 显存监控用它按 PID 精确取真值：按进程名求和会被残留或同名实例顶高
+    /// （实测踩过：我自己的测试残留实例把"我们的占用"顶到 4.3 GB）。
+    fn pid(&self) -> Option<u32> {
+        None
+    }
 }

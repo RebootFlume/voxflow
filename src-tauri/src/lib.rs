@@ -396,18 +396,30 @@ fn get_vram_status_sync() -> serde_json::Value {
     // （新增框架无需改此处）。关键：引擎已卸载时不得回退到"模型目录大小"估算——
     // 那会在引擎死后假报占用；只有引擎 is_loaded() 却查不到 nvidia-smi 明细（无权限）
     // 时才用目录大小近似（见 active_engine_dir_mb）。
-    // 真值优先：WMI（Windows 驱动口径）→ nvidia-smi（其他平台/旧权限）→ 预估（标注 estimate）
-    let wmi = vram_by_process_wmi();
+    // 真值优先：**我们自己的子进程 PID**（精确）→ 按进程名求和（可能含残留/同名实例）
+    // → nvidia-smi（其他平台）→ 预估（标注 estimate）
+    let rows = wmi_gpu_process_rows();
+    let mut by_pid: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+    let mut by_name: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for (pid, name, mb) in &rows {
+        by_pid.insert(*pid, *mb);
+        *by_name.entry(name.to_ascii_lowercase()).or_insert(0) += mb;
+    }
+    let reg = crate::inference::registry::registry();
     let mut by_engine: std::collections::BTreeMap<&'static str, (u64, &'static str)> =
         std::collections::BTreeMap::new();
     for fw in crate::model_manager::FRAMEWORKS {
-        let hit = fw
-            .process_name
-            .and_then(|n| {
-                wmi.get(&n.to_ascii_lowercase())
-                    .map(|mb| (*mb, "wmi"))
-                    .or_else(|| vram_of_process(n).map(|mb| (mb, "smi")))
+        // 1) 本引擎的子进程（精确；残留实例不会被算进来）
+        let ours = reg
+            .engine(fw.id)
+            .and_then(|e| e.pid())
+            .and_then(|p| by_pid.get(&p).map(|mb| (*mb, "pid")));
+        let hit = ours
+            .or_else(|| {
+                fw.process_name
+                    .and_then(|n| by_name.get(&n.to_ascii_lowercase()).map(|mb| (*mb, "wmi")))
             })
+            .or_else(|| fw.process_name.and_then(|n| vram_of_process(n).map(|mb| (mb, "smi"))))
             .or_else(|| registry_vram_mb_if_active(fw.id).map(|mb| (mb, "estimate")));
         if let Some(v) = hit {
             by_engine.insert(fw.engine, v); // 非空覆盖（同一展示名可能对应多个注册键）
@@ -450,10 +462,9 @@ fn registry_vram_mb_if_active(framework: &'static str) -> Option<u64> {
 /// ——把文件体积当显存，系统性少算 KV + 固定开销（本机实测差 ~1.3 GiB）。
 /// WMI 计数器给的是驱动口径的 DedicatedUsage，无需管理员（本机实测与进程一一对应）。
 /// 非 Windows 返回空表 → 调用方回退 nvidia-smi。
-pub(crate) fn vram_by_process_wmi() -> std::collections::HashMap<String, u64> {
-    let mut out = std::collections::HashMap::new();
+pub(crate) fn wmi_gpu_process_rows() -> Vec<(u32, String, u64)> {
     if !cfg!(windows) {
-        return out;
+        return Vec::new();
     }
     // 一次 PowerShell 拿全部（逐行查 Win32_Process 太慢）；>50MB 才回传，行数很少
     let script = r#"
@@ -463,26 +474,32 @@ Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory 
   Where-Object { $_.DedicatedUsage -gt 52428800 } |
   ForEach-Object {
     $p = [int]($_.Name -replace '^pid_(\d+)_.*$', '$1')
-    if ($procs.ContainsKey($p)) { '{0},{1}' -f $procs[$p], [int]($_.DedicatedUsage / 1MB) }
+    if ($procs.ContainsKey($p)) { '{0},{1},{2}' -f $p, $procs[$p], [int]($_.DedicatedUsage / 1MB) }
   }
 "#;
     let mut cmd = std::process::Command::new("powershell");
     crate::process_hidden::hide_console_window(&mut cmd);
     let Ok(o) = cmd.args(["-NoProfile", "-NonInteractive", "-Command", script]).output() else {
-        return out;
+        return Vec::new();
     };
     if !o.status.success() {
-        return out;
+        return Vec::new();
     }
-    for line in String::from_utf8_lossy(&o.stdout).lines() {
-        if let Some((name, mb)) = line.trim().split_once(',') {
-            if let Ok(mb) = mb.trim().parse::<u64>() {
-                // 同名多实例（如两个 llama-server）要**累加**，否则后一行覆盖前一行会少报
-                *out.entry(name.trim().to_ascii_lowercase()).or_insert(0) += mb;
-            }
-        }
-    }
-    out
+    parse_wmi_rows(&String::from_utf8_lossy(&o.stdout))
+}
+
+/// 解析 WMI 输出行（`pid,name,MB`）——纯函数，便于单测
+fn parse_wmi_rows(stdout: &str) -> Vec<(u32, String, u64)> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let mut it = line.trim().split(',');
+            let pid = it.next()?.trim().parse::<u32>().ok()?;
+            let name = it.next()?.trim().to_string();
+            let mb = it.next()?.trim().parse::<u64>().ok()?;
+            Some((pid, name, mb))
+        })
+        .collect()
 }
 
 /// 查询指定进程名的显存占用（MB）——按 PID 匹配 nvidia-smi
@@ -1075,4 +1092,28 @@ pub fn run() {
                 crate::inference::sherpa_asr::global_engine().unload();
             }
         });
+}
+
+#[cfg(test)]
+mod wmi_parse_tests {
+    use super::parse_wmi_rows;
+
+    /// WMI 输出解析：坏行/非数字必须被丢弃，正常行按 pid,name,MB 解析
+    #[test]
+    fn parses_valid_rows_and_skips_garbage() {
+        let out = "1234,llama-server.exe,1768\n5678,dwm.exe,567\n\nnot-a-row\n9999,chrome.exe,NaN\n";
+        let rows = parse_wmi_rows(out);
+        assert_eq!(
+            rows,
+            vec![
+                (1234, "llama-server.exe".to_string(), 1768),
+                (5678, "dwm.exe".to_string(), 567),
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_input_yields_no_rows() {
+        assert!(parse_wmi_rows("").is_empty());
+    }
 }

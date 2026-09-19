@@ -667,6 +667,11 @@ impl LlamaServerEngine {
         self.config.lock().clone()
     }
 
+    /// 当前 llama-server 子进程 PID（未加载 → None）
+    pub fn pid(&self) -> Option<u32> {
+        self.child.lock().as_ref().map(|c| c.id())
+    }
+
     pub fn current_model_path(&self) -> PathBuf {
         self.config.lock().model_path.clone()
     }
@@ -1010,6 +1015,10 @@ impl super::engine::AsrEngine for LlamaAsrAdapter {
         self.engine
             .transcribe_with_context(samples, sample_rate, ctx)
             .map_err(|e| e.to_string())
+    }
+
+    fn pid(&self) -> Option<u32> {
+        self.engine.pid()
     }
 
     fn vram_estimate_mb(&self) -> Option<u64> {
