@@ -111,6 +111,19 @@ export function rustClearTtsCloneVoice(): Promise<Record<string, unknown>> {
   return invoke("rust_clear_tts_clone_voice");
 }
 
+/**
+ * 录制 TTS 克隆参考音频（16kHz 单声道 wav）。
+ * seconds 由 Rust 钳制到 3–30；peak = 峰值，< 0.01 视为基本静音（UI 提示重录）。
+ */
+export function rustRecordTtsReference(seconds: number): Promise<{
+  path: string;
+  seconds: number;
+  sample_rate: number;
+  peak: number;
+}> {
+  return invoke("rust_record_tts_reference", { seconds });
+}
+
 /** 查询当前 TTS 模型的说话人列表 */
 export function rustListTtsSpeakers(): Promise<{
   model: string;

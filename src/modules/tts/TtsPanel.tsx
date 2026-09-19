@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Loader2, Mic, Play, Sparkles, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FileAudio, Loader2, Mic, Play, Sparkles, Trash2 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,7 +11,16 @@ import { ModelSelector } from "@/components/ModelSelector";
 import { ModelStatusBadge } from "@/components/ModelStatusBadge";
 import { useAppStore } from "@/stores";
 import { t } from "@/lib/i18n";
-import { rustListTtsSpeakers, rustSetTtsCloneVoice, rustClearTtsCloneVoice, rustSetTtsLanguage, rustSynthesize } from "@/lib/tauri";
+import {
+  openPath,
+  rustListTtsSpeakers,
+  rustSetTtsCloneVoice,
+  rustClearTtsCloneVoice,
+  rustSetTtsLanguage,
+  rustSynthesize,
+  rustRecordTtsReference,
+} from "@/lib/tauri";
+import { runtimeKeyOf } from "@/lib/modelState";
 import { loadTtsModel } from "@/lib/modelLoader";
 import { useExportDir } from "@/lib/useExportDir";
 
@@ -24,6 +33,26 @@ function ModelDevicePage() {
   const gpu = useAppStore((s) => s.gpu);
   const ttsModelStatus = useAppStore((s) => s.ttsModelStatus);
   const locale = useAppStore((s) => s.locale);
+  const updateTts = useAppStore((s) => s.updateTts);
+  const modelItems = useAppStore((s) => s.models.items);
+  const runtimePackages = useAppStore((s) => s.runtime.packages);
+
+  // 框架下拉项：TTS 模型清单里的运行时包 key 去重（顺序 = 清单顺序，确定性）；
+  // label 优先取运行时包名，无包则直接用 key —— 目前只有 sherpa 一项也照常显示，接入新框架无需改前端
+  const frameworkOptions: { key: string; label: string }[] = [];
+  const seenKeys = new Set<string>();
+  for (const m of modelItems) {
+    if (m.kind !== "tts") continue;
+    const key = runtimeKeyOf(m);
+    if (!key || seenKeys.has(key)) continue;
+    seenKeys.add(key);
+    frameworkOptions.push({ key, label: runtimePackages?.find((p) => p.framework === key)?.name ?? key });
+  }
+  // 当前选中值不在清单里（清单未到/模型已下架）→ 补一项，避免选择框空白
+  if (tts.framework && !seenKeys.has(tts.framework)) {
+    const pkg = runtimePackages?.find((p) => p.framework === tts.framework);
+    frameworkOptions.unshift({ key: tts.framework, label: pkg?.name ?? tts.framework });
+  }
 
   return (
     <div className="space-y-4">
@@ -56,6 +85,23 @@ function ModelDevicePage() {
           <CardTitle className="text-base">{t(locale, "tts.model")}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
+          {/* 推理框架（运行时包 key）：TTS 模型统一由它加载，切换即改变后续加载路由 */}
+          <div className="flex items-center gap-3">
+            <label className="shrink-0 text-sm font-medium">{t(locale, "tts.framework.label")}</label>
+            <Select value={tts.framework} onValueChange={(framework) => updateTts({ framework })}>
+              <SelectTrigger className="w-56">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {frameworkOptions.map((o) => (
+                  <SelectItem key={o.key} value={o.key}>{o.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {t(locale, "tts.framework.hint", { framework: tts.framework })}
+          </p>
           <ModelSelector
             kind="tts"
             selected={tts.model}
@@ -77,14 +123,36 @@ function ModelDevicePage() {
 // 音色设置子页面
 // ============================================================
 
+// 录音时长（秒）：Rust 侧钳制到 3–30
+const RECORD_SECONDS = 6;
+
+/** 音色名自带语言后缀（如 "alloy (EN)" / "zf_xiaobei (ZH)"）→ 取分组用的语言标签，无后缀返回 "" */
+function voiceLangTag(name: string): string {
+  return name.match(/\(([A-Za-z]{2,3})\)\s*$/)?.[1]?.toUpperCase() ?? "";
+}
+
 function VoiceSettingsPage() {
   const locale = useAppStore((s) => s.locale);
   const tts = useAppStore((s) => s.tts);
   const ttsClone = useAppStore((s) => s.ttsClone);
   const updateTts = useAppStore((s) => s.updateTts);
   const updateTtsClone = useAppStore((s) => s.updateTtsClone);
+  const modelItems = useAppStore((s) => s.models.items);
   const [speakers, setSpeakers] = useState<{ sid: number; name: string }[]>([]);
   const [numSpeakers, setNumSpeakers] = useState(0);
+  /** 试听：合成中标志（局部态，与任务列表解耦）+ 失败信息 */
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const [previewError, setPreviewError] = useState("");
+  /** 录音倒计时（>0 = 录制中） */
+  const [recordLeft, setRecordLeft] = useState(0);
+  const [recordError, setRecordError] = useState("");
+  const [recordSilent, setRecordSilent] = useState(false);
+  const recordTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** 音色筛选（语言后缀分组 + 名称搜索） */
+  const [voiceQuery, setVoiceQuery] = useState("");
+  const [voiceLang, setVoiceLang] = useState("");
+  // 试听合成到共享导出目录（与合成页同一份）
+  const { exportDir } = useExportDir();
 
   // 音色控件由描述符能力字段驱动（决策 A：models.items 单一来源），不再由 numSpeakers>1 派生嗅探。
   // vm 缺失（旧 payload / 未声明能力）→ 各开关退回既有行为（等价 preset 路径 + supports_clone 兜底）。
@@ -92,18 +160,63 @@ function VoiceSettingsPage() {
   const vm = info?.voice_mode;
   const mode = vm?.type;
   const cloneActive = ttsClone.active;
+  /** 未选中/清单里找不到模型 → 两张卡片都引导「先加载模型」，不再整块隐藏 */
+  const noModel = !info;
   /** Fixed（单音色）：隐藏音色遍历/网格，改为固定音色名文本。
    *  vm 缺失（旧 payload）时按方案 §4.2 的兜底判定：无克隆能力且音色数 ≤1 → 视为单音色模型。 */
   const fixedVoice = mode === "fixed" || (vm === undefined && info?.supports_clone === false && numSpeakers <= 1);
-  /** Clone / PresetAndClone：显示克隆卡片；vm 缺失时退回 supports_clone */
-  const isCloningModel =
-    mode === "clone" || mode === "preset_and_clone" || (vm === undefined && info?.supports_clone === true);
+  /** 克隆能力：能力字段优先（clone / preset_and_clone），旧 payload 退回 supports_clone */
+  const cloneCapable = !!info && (mode === "clone" || mode === "preset_and_clone" || info.supports_clone === true);
   /** Clone + overrides_preset：克隆激活后隐藏 sid 控件（不是禁用） */
   const sidHidden = mode === "clone" && cloneActive && vm?.overrides_preset === true;
   /** PresetAndClone：克隆激活时 sid 控件禁用（保留可见） */
   const sidDisabled = mode === "preset_and_clone" && cloneActive;
   /** per_language（sid 按语言独立，如 Supertonic）：语言切换后重新拉取音色列表 */
   const speakerLangDep = vm?.per_language === true ? tts.language : "";
+  /** requires_text 缺省（旧 payload / 未声明）→ 保持必填 */
+  const requiresText = vm?.requires_text !== false;
+  const canApplyClone = !!ttsClone.audioPath && (!requiresText || ttsClone.referenceText.trim().length > 0);
+  /** 试听用 voice：单音色模型没有可切换 sid，直接用模型第一个音色 */
+  const previewVoice = fixedVoice && speakers.length > 0 ? String(speakers[0].sid) : tts.voice;
+  const canPreview = !!tts.model && (speakers.length > 0 || cloneActive);
+  /** 试听文本跟随合成语言（不是 UI locale） */
+  const sampleText = t(locale, tts.language === "zh" ? "tts.preview.sample.zh" : "tts.preview.sample.en");
+
+  /** 清单里支持克隆的 TTS 模型（当前模型不支持时用于引导切换） */
+  const cloneModels = useMemo(
+    () => modelItems.filter((m) => m.kind === "tts" && m.supports_clone === true),
+    [modelItems],
+  );
+
+  const voiceLangs = useMemo(() => {
+    const langs = new Set<string>();
+    for (const sp of speakers) {
+      const tag = voiceLangTag(sp.name);
+      if (tag) langs.add(tag);
+    }
+    return [...langs];
+  }, [speakers]);
+  const shownSpeakers = useMemo(() => {
+    const q = voiceQuery.trim().toLowerCase();
+    return speakers.filter((sp) => {
+      if (voiceLang && voiceLangTag(sp.name) !== voiceLang) return false;
+      return !q || sp.name.toLowerCase().includes(q);
+    });
+  }, [speakers, voiceQuery, voiceLang]);
+  /** 音色多（Kokoro 36 个等）或存在语言分组时才给筛选控件，避免少音色模型噪音 */
+  const showFilter = !fixedVoice && (speakers.length > 12 || voiceLangs.length > 1);
+
+  /** sid 越界（如持久化 voice="47" 但该模型只有 0..35）→ 高亮提示 + 一键改为第一个音色。
+   *  "default" 是引擎默认值哨兵，不算越界。 */
+  const voiceOutOfRange =
+    !noModel &&
+    !fixedVoice &&
+    speakers.length > 0 &&
+    tts.voice !== "" &&
+    tts.voice !== "default" &&
+    !speakers.some((sp) => String(sp.sid) === tts.voice);
+  const sidMin = speakers.length > 0 ? Math.min(...speakers.map((sp) => sp.sid)) : 0;
+  const sidMax = speakers.length > 0 ? Math.max(...speakers.map((sp) => sp.sid)) : 0;
 
   // 加载模型的说话人列表（per_language 模型随语言变化重新请求）
   useEffect(() => {
@@ -113,6 +226,17 @@ function VoiceSettingsPage() {
     }).catch(() => {});
   }, [tts.model, speakerLangDep]);
 
+  // 卸载时清掉录音倒计时
+  useEffect(() => () => {
+    clearInterval(recordTimer.current ?? 0);
+  }, []);
+
+  function goModelManager() {
+    const s = useAppStore.getState();
+    s.setActiveModule("models");
+    s.setActiveSubMenu("tts");
+  }
+
   async function handlePickAudio() {
     const dialog = await import("@tauri-apps/plugin-dialog");
     const picked = await dialog.open({
@@ -121,7 +245,46 @@ function VoiceSettingsPage() {
       title: t(locale, "tts.voice.clone.pickAudio"),
     });
     if (picked && typeof picked === "string") {
+      setRecordSilent(false);
       updateTtsClone({ audioPath: picked, status: "idle", error: "" });
+    }
+  }
+
+  /** 录音：录制固定时长，成功后写回 audioPath；peak < 0.01 视为没录到声音 */
+  async function handleRecord() {
+    if (recordLeft > 0) return;
+    setRecordError("");
+    setRecordSilent(false);
+    setRecordLeft(RECORD_SECONDS);
+    recordTimer.current = setInterval(() => setRecordLeft((s) => (s <= 1 ? 0 : s - 1)), 1000);
+    try {
+      const r = await rustRecordTtsReference(RECORD_SECONDS);
+      updateTtsClone({ audioPath: r.path, status: "idle", error: "" });
+      setRecordSilent(r.peak < 0.01);
+    } catch (e) {
+      setRecordError(String(e));
+    } finally {
+      if (recordTimer.current) clearInterval(recordTimer.current);
+      recordTimer.current = null;
+      setRecordLeft(0);
+    }
+  }
+
+  /** 试听：合成到导出目录后用系统默认播放器打开（与任务列表 playAudio 同一条路径） */
+  async function handlePreview(voice: string) {
+    if (previewBusy) return;
+    setPreviewBusy(true);
+    setPreviewError("");
+    try {
+      const r = await rustSynthesize(sampleText, voice, exportDir);
+      const saved = typeof r.saved_path === "string" ? r.saved_path : "";
+      if (saved) await openPath(saved);
+    } catch (e) {
+      const msg = String(e);
+      setPreviewError(msg);
+      useAppStore.getState().addLog(`[tts] preview failed: ${msg}`, "error");
+    } finally {
+      setPreviewBusy(false);
     }
   }
 
@@ -146,7 +309,7 @@ function VoiceSettingsPage() {
 
   return (
     <div className="space-y-4">
-      {/* 预设音色 */}
+      {/* 预设音色（常显：未加载模型 / 单音色模型时说明原因，不再整块隐藏） */}
       <Card>
         <CardHeader>
           <CardTitle className="text-base">{t(locale, "tts.voice.preset")}</CardTitle>
@@ -156,115 +319,292 @@ function VoiceSettingsPage() {
               : t(locale, "tts.voice.presetDesc")}
           </CardDescription>
         </CardHeader>
-        <CardContent>
-          {fixedVoice ? (
-            // Fixed（单音色模型）：不渲染音色遍历，显示固定音色名
-            <p className="text-sm font-medium">{speakers[0]?.name ?? t(locale, "tts.voice.default")}</p>
-          ) : speakers.length > 0 ? (
-            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-2">
-              {speakers.map((sp) => {
-                const selected = tts.voice === String(sp.sid);
-                return (
-                  <button
-                    key={sp.sid}
-                    className={`rounded-lg border px-3 py-2 text-left transition-all ${
-                      selected
-                        ? "border-primary bg-primary/10 ring-1 ring-primary/20"
-                        : "border-border hover:border-primary/40 hover:bg-muted/50"
-                    }`}
-                    onClick={() => {
-                      updateTts({ voice: String(sp.sid) });
-                      if (ttsClone.active) handleClearClone();
-                    }}
-                  >
-                    <span className={`block text-sm font-medium leading-tight truncate ${
-                      selected ? "text-primary" : ""
-                    }`}>{sp.name}</span>
-                    <span className="block text-[10px] text-muted-foreground mt-0.5">sid {sp.sid}</span>
-                  </button>
-                );
-              })}
+        <CardContent className="space-y-3">
+          {noModel ? (
+            <div className="space-y-2">
+              <p className="text-sm font-medium">{t(locale, "tts.voice.needModel")}</p>
+              <p className="text-xs text-muted-foreground">{t(locale, "tts.voice.needModelDesc")}</p>
+              <Button variant="outline" size="sm" className="h-8" onClick={goModelManager}>
+                {t(locale, "tts.gotoModels")}
+              </Button>
             </div>
           ) : (
-            <p className="text-xs text-muted-foreground">{t(locale, "tts.voice.noSpeakers")}</p>
-          )}
-          {!fixedVoice && numSpeakers > 1 && !sidHidden && (
-            <div className="flex items-center gap-2 mt-3 pt-3 border-t">
-              <span className="text-xs text-muted-foreground">sid:</span>
-              <Input
-                type="number"
-                min={0}
-                max={numSpeakers - 1}
-                value={tts.voice}
-                disabled={sidDisabled}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
-                  const v = e.target.value;
-                  if (v !== "") updateTts({ voice: v });
-                }}
-                className="h-8 w-20 text-xs"
-              />
-              <span className="text-xs text-muted-foreground">/ {numSpeakers - 1}</span>
-            </div>
+            <>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  disabled={!canPreview || previewBusy}
+                  onClick={() => void handlePreview(previewVoice)}
+                >
+                  {previewBusy ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Play className="mr-1.5 h-3.5 w-3.5" />}
+                  {t(locale, "tts.voice.previewCurrent")}
+                </Button>
+                {fixedVoice && (
+                  <span className="text-xs text-muted-foreground">{t(locale, "tts.voice.fixedDesc")}</span>
+                )}
+              </div>
+              {previewError && (
+                <p className="text-xs text-destructive">{t(locale, "tts.voice.previewFailed", { msg: previewError })}</p>
+              )}
+              {/* sid 越界（持久化的 voice 不在当前模型音色列表里）→ 高亮 + 一键回到列表第一个音色 */}
+              {voiceOutOfRange && (
+                <div className="flex flex-wrap items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-600 dark:text-amber-400">
+                  <span>{t(locale, "tts.voice.outOfRange", { min: sidMin, max: sidMax })}</span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-6 px-2 text-xs"
+                    onClick={() => updateTts({ voice: String(speakers[0].sid) })}
+                  >
+                    {t(locale, "tts.voice.fixVoice")}
+                  </Button>
+                </div>
+              )}
+              {fixedVoice ? (
+                // Fixed（单音色模型）：不渲染音色遍历，显示固定音色名 + 原因
+                <p className="text-sm font-medium">{speakers[0]?.name ?? t(locale, "tts.voice.default")}</p>
+              ) : speakers.length > 0 ? (
+                <>
+                  {/* 音色多时给筛选：语言后缀分组（Kokoro 类）+ 名称搜索 */}
+                  {showFilter && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Input
+                        value={voiceQuery}
+                        onChange={(e: React.ChangeEvent<HTMLInputElement>) => setVoiceQuery(e.target.value)}
+                        placeholder={t(locale, "tts.voice.search")}
+                        className="h-8 w-48 text-xs"
+                      />
+                      {voiceLangs.length > 1 && (
+                        <div className="flex flex-wrap items-center gap-1">
+                          {["", ...voiceLangs].map((lang) => (
+                            <button
+                              key={lang || "all"}
+                              className={`rounded-md border px-2 py-1 text-[11px] transition-colors ${
+                                voiceLang === lang
+                                  ? "border-primary bg-primary/10 text-primary"
+                                  : "border-border text-muted-foreground hover:border-primary/40"
+                              }`}
+                              onClick={() => setVoiceLang(lang)}
+                            >
+                              {lang || t(locale, "tts.voice.filterAll")}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-2">
+                    {shownSpeakers.map((sp) => {
+                      const selected = tts.voice === String(sp.sid);
+                      return (
+                        <div key={sp.sid} className="relative">
+                          <button
+                            className={`w-full rounded-lg border px-3 py-2 pr-8 text-left transition-all ${
+                              selected
+                                ? "border-primary bg-primary/10 ring-1 ring-primary/20"
+                                : "border-border hover:border-primary/40 hover:bg-muted/50"
+                            }`}
+                            onClick={() => {
+                              updateTts({ voice: String(sp.sid) });
+                              if (ttsClone.active) void handleClearClone();
+                            }}
+                          >
+                            <span className={`block text-sm font-medium leading-tight truncate ${
+                              selected ? "text-primary" : ""
+                            }`}>{sp.name}</span>
+                            <span className="block text-[10px] text-muted-foreground mt-0.5">sid {sp.sid}</span>
+                          </button>
+                          {/* 试听只挂在选中卡片上：36 个音色不必各挂一个播放任务 */}
+                          {selected && (
+                            <button
+                              className="absolute right-1 top-1 rounded p-1 text-muted-foreground hover:bg-muted hover:text-primary disabled:opacity-50"
+                              disabled={previewBusy}
+                              title={t(locale, "tts.voice.preview")}
+                              onClick={() => void handlePreview(String(sp.sid))}
+                            >
+                              {previewBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {shownSpeakers.length === 0 && (
+                    <p className="text-xs text-muted-foreground">{t(locale, "tts.voice.noMatch")}</p>
+                  )}
+                </>
+              ) : (
+                <p className="text-xs text-muted-foreground">{t(locale, "tts.voice.noSpeakers")}</p>
+              )}
+              {!fixedVoice && numSpeakers > 1 && !sidHidden && (
+                <div className="flex items-center gap-2 pt-3 border-t">
+                  <span className="text-xs text-muted-foreground">sid:</span>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={numSpeakers - 1}
+                    value={tts.voice}
+                    disabled={sidDisabled}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                      const v = e.target.value;
+                      if (v !== "") updateTts({ voice: v });
+                    }}
+                    className="h-8 w-20 text-xs"
+                  />
+                  <span className="text-xs text-muted-foreground">/ {numSpeakers - 1}</span>
+                </div>
+              )}
+            </>
           )}
         </CardContent>
       </Card>
 
-      {/* 语音克隆（voice_mode.type = clone / preset_and_clone 时显示） */}
-      {isCloningModel && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base flex items-center gap-2">
-              {t(locale, "tts.voice.clone")}
-              <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4">{t(locale, "tts.voice.clone.supported")}</Badge>
-            </CardTitle>
-            <CardDescription>{t(locale, "tts.voice.cloneDesc")}</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {ttsClone.active && (
-              <div className="flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-xs text-emerald-600 dark:text-emerald-400">
-                <Sparkles className="h-3.5 w-3.5" />
-                {t(locale, "tts.voice.clone.active")}
-              </div>
-            )}
-            <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" onClick={() => void handlePickAudio()}>
-                <Mic className="mr-2 h-4 w-4" />
-                {t(locale, "tts.voice.clone.pickAudio")}
+      {/* 克隆音色（常显：不支持时说明原因并列出可切换模型，不再整块隐藏） */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            {t(locale, "tts.voice.clone")}
+            <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4">
+              {cloneCapable ? t(locale, "tts.voice.clone.supported") : t(locale, "tts.voice.clone.unsupported")}
+            </Badge>
+          </CardTitle>
+          <CardDescription>{t(locale, "tts.voice.cloneDesc")}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {noModel ? (
+            <div className="space-y-2">
+              <p className="text-sm font-medium">{t(locale, "tts.voice.needModel")}</p>
+              <p className="text-xs text-muted-foreground">{t(locale, "tts.voice.clone.needModel")}</p>
+              <Button variant="outline" size="sm" className="h-8" onClick={goModelManager}>
+                {t(locale, "tts.gotoModels")}
               </Button>
-              {ttsClone.audioPath && (
-                <span className="flex-1 truncate text-xs text-muted-foreground" title={ttsClone.audioPath}>
-                  {ttsClone.audioPath.split(/[\\/]/).pop()}
-                </span>
+            </div>
+          ) : !cloneCapable ? (
+            <div className="space-y-2">
+              <p className="text-sm font-medium">
+                {t(locale, "tts.voice.clone.unsupportedTitle", { model: tts.model })}
+              </p>
+              <p className="text-xs text-muted-foreground">{t(locale, "tts.voice.clone.unsupportedDesc")}</p>
+              {cloneModels.length > 0 ? (
+                <div className="space-y-1.5">
+                  <span className="text-xs text-muted-foreground">{t(locale, "tts.voice.clone.cloneModels")}</span>
+                  {cloneModels.map((m) => (
+                    <div key={m.name} className="flex items-center justify-between gap-2 rounded-md border px-3 py-1.5">
+                      <span className="min-w-0 flex-1 truncate text-xs">{m.name}</span>
+                      {m.state === "downloaded" ? (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 shrink-0"
+                          onClick={() => void loadTtsModel(m.name, tts.device)}
+                        >
+                          {t(locale, "tts.voice.clone.switch")}
+                        </Button>
+                      ) : (
+                        <Button variant="ghost" size="sm" className="h-7 shrink-0" onClick={goModelManager}>
+                          {t(locale, "tts.gotoModels")}
+                        </Button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground">{t(locale, "tts.voice.clone.noCloneModels")}</p>
               )}
             </div>
-            {ttsClone.audioPath && (
-              <Input
-                value={ttsClone.referenceText}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => updateTtsClone({ referenceText: e.target.value, status: "idle", error: "" })}
-                placeholder={t(locale, "tts.voice.clone.placeholder")}
-                className="h-8 text-xs"
-              />
-            )}
-            {ttsClone.audioPath && ttsClone.referenceText.trim() && (
-              <div className="flex items-center gap-2">
-                <Button size="sm" className="h-8" disabled={ttsClone.status === "setting"} onClick={() => void handleApplyClone()}>
-                  {ttsClone.status === "setting" && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
-                  {t(locale, "tts.voice.clone.apply")}
+          ) : (
+            <>
+              {ttsClone.active && (
+                <div className="flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-xs text-emerald-600 dark:text-emerald-400">
+                  <Sparkles className="h-3.5 w-3.5" />
+                  {t(locale, "tts.voice.clone.active")}
+                </div>
+              )}
+              {/* 参考音频来源：录音（6 秒）或本地文件 */}
+              <div className="flex flex-wrap items-center gap-2">
+                <Button variant="outline" size="sm" onClick={() => void handleRecord()} disabled={recordLeft > 0}>
+                  {recordLeft > 0 ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Mic className="mr-2 h-4 w-4" />}
+                  {recordLeft > 0
+                    ? t(locale, "tts.voice.clone.recording", { left: recordLeft })
+                    : t(locale, "tts.voice.record")}
                 </Button>
-                {ttsClone.active && (
-                  <Button variant="ghost" size="sm" className="h-8" onClick={() => void handleClearClone()}>
-                    {t(locale, "tts.voice.clone.clear")}
-                  </Button>
+                <Button variant="outline" size="sm" onClick={() => void handlePickAudio()}>
+                  <FileAudio className="mr-2 h-4 w-4" />
+                  {t(locale, "tts.voice.clone.pickAudio")}
+                </Button>
+                {ttsClone.audioPath && (
+                  <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={ttsClone.audioPath}>
+                    {ttsClone.audioPath.split(/[\\/]/).pop()}
+                  </span>
                 )}
               </div>
-            )}
-            {ttsClone.status === "error" && ttsClone.error && (
-              <p className="text-xs text-destructive">{ttsClone.error}</p>
-            )}
-            <p className="text-[11px] text-muted-foreground">{t(locale, "tts.voice.clone.hint")}</p>
-          </CardContent>
-        </Card>
-      )}
+              {recordSilent && (
+                <p className="text-xs text-amber-600 dark:text-amber-400">{t(locale, "tts.voice.clone.recordSilent")}</p>
+              )}
+              {recordError && (
+                <p className="text-xs text-destructive">
+                  {t(locale, "tts.voice.clone.recordFailed", { msg: recordError })}
+                </p>
+              )}
+              {ttsClone.audioPath && (
+                <>
+                  <Input
+                    value={ttsClone.referenceText}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => updateTtsClone({ referenceText: e.target.value, status: "idle", error: "" })}
+                    placeholder={t(locale, "tts.voice.clone.placeholder")}
+                    className="h-8 text-xs"
+                  />
+                  {/* requires_text 由模型能力决定：false 时留空即可，true 时必须与音频一致 */}
+                  <p className="text-[11px] text-muted-foreground">
+                    {requiresText
+                      ? t(locale, "tts.voice.clone.textRequired")
+                      : t(locale, "tts.voice.clone.textOptional")}
+                  </p>
+                </>
+              )}
+              {ttsClone.audioPath && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    size="sm"
+                    className="h-8"
+                    disabled={ttsClone.status === "setting" || !canApplyClone}
+                    onClick={() => void handleApplyClone()}
+                  >
+                    {ttsClone.status === "setting" && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+                    {t(locale, "tts.voice.clone.apply")}
+                  </Button>
+                  {ttsClone.active && (
+                    <>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-8"
+                        disabled={previewBusy || !tts.model}
+                        onClick={() => void handlePreview(previewVoice)}
+                      >
+                        {previewBusy ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Play className="mr-1 h-3 w-3" />}
+                        {t(locale, "tts.voice.clone.preview")}
+                      </Button>
+                      <Button variant="ghost" size="sm" className="h-8" onClick={() => void handleClearClone()}>
+                        {t(locale, "tts.voice.clone.clear")}
+                      </Button>
+                    </>
+                  )}
+                </div>
+              )}
+              {previewError && (
+                <p className="text-xs text-destructive">{t(locale, "tts.voice.previewFailed", { msg: previewError })}</p>
+              )}
+              {ttsClone.status === "error" && ttsClone.error && (
+                <p className="text-xs text-destructive">{ttsClone.error}</p>
+              )}
+              <p className="text-[11px] text-muted-foreground">{t(locale, "tts.voice.clone.hint")}</p>
+            </>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

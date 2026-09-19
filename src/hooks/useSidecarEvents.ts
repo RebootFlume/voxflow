@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { onSidecarEvent, sendToSidecar } from "@/lib/tauri";
+import { onSidecarEvent, rustSetTtsCloneVoice, sendToSidecar } from "@/lib/tauri";
 import { applyEngineStatus, applyAsrFrameworkFromRust, syncAsrFrameworkFromLoaded, resolveModelKind, runtimeKeyOf } from "@/lib/modelState";
 import { useAppStore, type EngineState } from "@/stores";
 import { t } from "@/lib/i18n";
@@ -22,6 +22,8 @@ export function useSidecarEvents() {
     let disposed = false;
     /** 已消费的最大状态快照 seq（Rust 单调递增），用于丢弃乱序到达的陈旧快照 */
     let lastStatusSeq = 0;
+    /** 已恢复克隆音色的 TTS 模型名（model_ready / model_loaded 双事件只恢复一次） */
+    let cloneRestoredFor = "";
 
     void onSidecarEvent((payload) => {
       const store = useAppStore.getState();
@@ -229,6 +231,19 @@ export function useSidecarEvents() {
               // 框架标签：事件权威 framework（Rust 注册表决定），前端不猜
               if (typeof payload.framework === "string") {
                 store.setEngineStatus("tts", { framework: payload.framework });
+              }
+              // TTS 就绪后恢复已持久化的克隆音色（模型切换/重启都会丢，需要重新下发参数）
+              const clone = useAppStore.getState().ttsClone;
+              if (
+                clone.active &&
+                typeof clone.audioPath === "string" &&
+                clone.audioPath !== "" &&
+                cloneRestoredFor !== model
+              ) {
+                cloneRestoredFor = model;
+                void rustSetTtsCloneVoice(clone.audioPath, clone.referenceText).catch((e) => {
+                  useAppStore.getState().addLog(`[tts] 恢复克隆音色失败: ${String(e)}`, "error");
+                });
               }
             } else if (kind === "asr") {
               store.updateAsr({ modelStatus: "ready", device: device as "cpu" | "cuda" });

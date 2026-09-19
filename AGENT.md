@@ -247,6 +247,22 @@ src-tauri/src/inference/
 - ❌ 禁止绕过 registry 直接调用具体引擎（`sherpa_asr::global_engine()` 只允许在 adapter 内部用）
 - ❌ 禁止改动 `AsrEngine` trait 的既有方法签名（新增方法用默认实现向下兼容）
 
+#### TTS 侧同样适用（脚手架已就位）
+
+TTS 域与 ASR 域共用 `slot::EngineSlot`（互斥 + 路由），新增 TTS 框架**不需要改任何调用方**：
+
+| 步骤 | 落点 |
+|---|---|
+| ① 实现引擎 | `tts/traits.rs` 的 `TtsEngine` + 新建 `tts/engine/<framework>.rs` |
+| ② 注册一行 | `tts/registry.rs` 的 `TtsRegistry::new()` 里的 `EngineSlot::new(vec![...])` |
+| ③ 声明后端参数 | `tts/spec.rs` 的 `BackendSpec` 增一个变体（与 `SherpaTts` 同级） |
+| ④ 运行时包 + 文件发现 | `model_manager.rs` 的 `FRAMEWORKS` / `RUNTIME_PACKAGES` 各加一行 |
+| ⑤ 模型行填 `framework` | `tts/spec.rs` 的 `SPECS`（模型轴是数据，不写代码） |
+
+**UI 无需改动**：模型页已有框架下拉（`TtsPanel` 的「模型与设备」页），选项由 `models_state` 的 `runtime_key` 去重生成，新框架落地后自动出现。
+
+> ⚠️ 两个 key 的口径**不同**（实现时踩过）：`ModelSpec.framework` 是 spec 里的框架名（TTS 为 `"sherpa"`），而**下发给前端**的 `runtime_key` 是运行时包 key（TTS 的 sherpa 模型是 `"onnx"`，见 `model_manager.rs` 单测断言）。前端下拉/持久化一律用 `runtime_key`，用 framework 名会出现「选择框空白」。
+
 #### 现有框架映射
 
 | 模型格式 | 框架标识 | 引擎 | 进程 |

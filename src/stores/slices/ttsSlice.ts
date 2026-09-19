@@ -6,6 +6,8 @@ export interface TtsSlice {
     device: string;
     language: string;
     voice: string;
+    /** 推理框架 = 运行时包 key（Rust payload 的 runtime_key，如 onnx）；接入新框架后由此切换 */
+    framework: string;
   };
   ttsModelStatus: "idle" | "loading" | "ready" | "error";
   ttsTasks: TtsTask[];
@@ -26,7 +28,7 @@ export interface TtsSlice {
 }
 
 export const createTtsSlice = (set: (partial: Partial<TtsSlice> | ((s: TtsSlice) => Partial<TtsSlice>)) => void): TtsSlice => ({
-  tts: { model: "", device: "cpu", language: "zh", voice: "default" },
+  tts: { model: "", device: "cpu", language: "zh", voice: "default", framework: "onnx" },
   ttsModelStatus: "idle",
   ttsTasks: [],
   ttsClone: { active: false, audioPath: "", referenceText: "", status: "idle", error: "" },

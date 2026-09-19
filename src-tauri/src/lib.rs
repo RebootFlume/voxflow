@@ -594,6 +594,25 @@ fn rust_list_audio_devices() -> serde_json::Value {
     })
 }
 
+/// 录制 TTS 克隆参考音频（16kHz 单声道 wav）→ `{ path, seconds, sample_rate, peak }`。
+///
+/// 逻辑在 `tts::reference_audio`（与运行时解耦，可单测/冒烟）；这里只取数据目录并进阻塞池：
+/// cpal 流的建/停/释放必须在同一线程（`AudioCapture` 非 Send）。
+#[tauri::command]
+async fn rust_record_tts_reference(
+    app: tauri::AppHandle,
+    seconds: Option<f64>,
+) -> Result<serde_json::Value, String> {
+    use crate::tts::reference_audio;
+    let secs = reference_audio::clamp_seconds(seconds.unwrap_or(reference_audio::DEFAULT_SECONDS));
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = crate::data_root::get_data_root(&app).join("tts-reference");
+        reference_audio::record_to(&dir, secs)
+    })
+    .await
+    .map_err(|e| format!("录音任务失败: {e}"))?
+}
+
 /// 卸载 sherpa ASR 引擎（杀 websocket server 进程）
 ///
 /// async + 阻塞池：卸载含杀进程 + 等端口关闭，不可占主线程。
@@ -1057,6 +1076,7 @@ pub fn run() {
             rust_check_vram,
             decode_audio_file,
             rust_list_audio_devices,
+            rust_record_tts_reference,
             rust_unload_sherpa_asr,
             rust_start_llama_server,
             rust_stop_llama_server,
