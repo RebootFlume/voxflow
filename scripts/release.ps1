@@ -36,7 +36,18 @@ if (-not (Test-Path $zip) -or -not (Test-Path $exe)) {
     Write-Error "产物缺失: 期望 $zip / $exe"
 }
 
-# 3. git 提交 + 推送（版本号改动若未提交则一并提交）
+# 3. release notes（缺省 = 最近提交信息）
+#    必须在提交 "release: v$ver" **之前**取：那条提交的正文是空的，之后取就成了空 notes。
+#    另外空 notes 会被 PowerShell 5.1 当成"没有参数"丢掉 → gh 报错，所以一律走 --notes-file。
+if ([string]::IsNullOrWhiteSpace($Notes)) {
+    Push-Location $root
+    $Notes = git log -1 --pretty=%B
+    Pop-Location
+}
+$notesFile = Join-Path $env:TEMP "voxflow-release-$ver.md"
+[IO.File]::WriteAllText($notesFile, $Notes, [Text.UTF8Encoding]::new($false))
+
+# 4. git 提交 + 推送（版本号改动若未提交则一并提交）
 Push-Location $root
 $dirty = git status --porcelain
 if ($dirty) {
@@ -47,21 +58,21 @@ git push origin master
 if ($LASTEXITCODE -ne 0) { Pop-Location; Write-Error "git push 失败" }
 Pop-Location
 
-# 4. release notes（缺省 = 最近提交信息）
-if ([string]::IsNullOrWhiteSpace($Notes)) {
-    Push-Location $root
-    $Notes = git log -1 --pretty=%B
-    Pop-Location
-}
-
 # 5. gh release（同名已存在则更新资产，避免重复建）
-gh release view "v$ver" --repo RebootFlume/voxflow 2>$null
+#    注意：PowerShell 5.1 在 $ErrorActionPreference=Stop 下会把原生命令写 stderr 当作**终止错误**，
+#    而 gh 的 "release not found"（这里的预期分支：不存在就创建）与上传进度都走 stderr
+#    → 本段临时改为 Continue，并显式检查每个 gh 命令的退出码。
+$ErrorActionPreference = "Continue"
+gh release view "v$ver" --repo RebootFlume/voxflow *> $null
 if ($LASTEXITCODE -eq 0) {
     Write-Host "release v$ver 已存在 → 更新资产" -ForegroundColor Yellow
-    gh release upload "v$ver" $zip $exe --repo RebootFlume/voxflow --clobber
 } else {
-    gh release create "v$ver" --repo RebootFlume/voxflow --title "v$ver" --notes $Notes
-    gh release upload "v$ver" $zip $exe --repo RebootFlume/voxflow --clobber
+    gh release create "v$ver" --repo RebootFlume/voxflow --title "v$ver" --notes-file $notesFile
+    if ($LASTEXITCODE -ne 0) { throw "gh release create v$ver 失败" }
 }
+gh release upload "v$ver" $zip $exe --repo RebootFlume/voxflow --clobber
+if ($LASTEXITCODE -ne 0) { throw "gh release upload 失败" }
+$ErrorActionPreference = "Stop"
+Remove-Item $notesFile -Force -ErrorAction SilentlyContinue
 
 Write-Host "`n=== 发版 v$ver 完成 ===" -ForegroundColor Green
