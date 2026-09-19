@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FileAudio, Loader2, Mic, Pencil, Play, Sparkles, Trash2, Volume2, X, type LucideIcon } from "lucide-react";
+import { FileAudio, Info, Loader2, Mic, Pencil, Play, Sparkles, Trash2, Volume2, X, type LucideIcon } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -1122,25 +1122,34 @@ function VoiceSettingsPage() {
               </Button>
             </div>
 
-            {/* 能力门控：不支持时说明原因 + 可切换模型清单；音色库仍照常可见 */}
+            {/* 能力门控：**只占一行**（下面的音色平铺才是主体，别让提示吃掉高度）。
+                不列"可切到哪些克隆模型"：用哪个模型由用户自己决定（后续接入 PyTorch 等更多引擎后
+                更不该由这里替他选），这里只给状态 + 一个去模型页的入口。 */}
             {noModel ? (
-              <div className="shrink-0 space-y-1.5 rounded-md border border-amber-500/30 bg-amber-500/5 p-3">
-                <p className="text-sm font-medium">{t(locale, "tts.voice.needModel")}</p>
-                <p className="text-xs text-muted-foreground">{t(locale, "tts.voice.clone.needModel")}</p>
-                <Button variant="outline" size="sm" className="h-8" onClick={goModelManager}>
+              <div className="flex shrink-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                <Info className="h-3.5 w-3.5 shrink-0" />
+                <span className="min-w-0 truncate">{t(locale, "tts.voice.needModel")}</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 shrink-0 px-2 text-[11px]"
+                  onClick={goModelManager}
+                >
                   {t(locale, "tts.gotoModels")}
                 </Button>
               </div>
             ) : !cloneCapable ? (
-              <div className="shrink-0 space-y-2 rounded-md border border-amber-500/30 bg-amber-500/5 p-3">
-                <p className="text-sm font-medium">
+              <div className="flex shrink-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                <Info className="h-3.5 w-3.5 shrink-0" />
+                <span className="min-w-0 truncate">
                   {t(locale, "tts.voice.clone.unsupportedTitle", { model: tts.model })}
-                </p>
-                {/* 不列"可切到哪些克隆模型"：由用户自己决定用哪个模型（后续接入 PyTorch 等更多
-                    引擎后更不该由这里替他选）。只说明"需要支持克隆的模型" + 一个去模型页的入口
-                    （与上面的 noModel 分支同一动作，不预设他该选哪个）。 */}
-                <p className="text-xs text-muted-foreground">{t(locale, "tts.voice.clone.needModel")}</p>
-                <Button variant="outline" size="sm" className="h-8" onClick={goModelManager}>
+                </span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 shrink-0 px-2 text-[11px]"
+                  onClick={goModelManager}
+                >
                   {t(locale, "tts.gotoModels")}
                 </Button>
               </div>
