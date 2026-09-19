@@ -268,14 +268,16 @@ mod tests {
                 ],
             ),
             (
+                // 修正：英文包不含中文词表/规则（官方 Python/C/C++ 示例连 en 词表都不传），
+                // 原来给这个模型塞 lexicon-zh.txt + 三个 zh FST ⇒ 参数无意义，且 required 校验
+                // 把 lexicon-zh.txt 当必需文件 ⇒ 已下载的包永远被判"缺文件"。
                 "kokoro-en-v0_19",
                 &[
                     "--kokoro-model=<DIR>/model.onnx",
                     "--kokoro-voices=<DIR>/voices.bin",
                     "--kokoro-tokens=<DIR>/tokens.txt",
                     "--kokoro-data-dir=<DIR>/espeak-ng-data",
-                    "--kokoro-lexicon=<DIR>/lexicon-us-en.txt,<DIR>/lexicon-gb-en.txt,<DIR>/lexicon-zh.txt",
-                    "--tts-rule-fsts=<DIR>/date-zh.fst,<DIR>/phone-zh.fst,<DIR>/number-zh.fst",
+                    "--kokoro-lexicon=<DIR>/lexicon-us-en.txt,<DIR>/lexicon-gb-en.txt",
                     "--sid=0",
                     "--provider=cuda",
                     "--num-threads=4",

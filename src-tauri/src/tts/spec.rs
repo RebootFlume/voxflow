@@ -565,28 +565,15 @@ pub static SPECS: &[ModelSpec] = &[
                 ArgSpec::File("--kokoro-voices", "voices.bin"),
                 ArgSpec::File("--kokoro-tokens", "tokens.txt"),
                 ArgSpec::File("--kokoro-data-dir", "espeak-ng-data"),
-                ArgSpec::JoinableFiles(
-                    "--kokoro-lexicon",
-                    &["lexicon-us-en.txt", "lexicon-gb-en.txt", "lexicon-zh.txt"],
-                    ',',
-                ),
-                ArgSpec::JoinableFiles(
-                    "--tts-rule-fsts",
-                    &["date-zh.fst", "phone-zh.fst", "number-zh.fst"],
-                    ',',
-                ),
+                // 英文包无中文词表/规则（官方示例连 en 词表都不传）：lexicon 可选加入，zh 相关一律不声明
+                ArgSpec::JoinableFiles("--kokoro-lexicon", &["lexicon-us-en.txt", "lexicon-gb-en.txt"], ','),
                 ArgSpec::RuntimeVar("--sid", RuntimeKey::SpeakerId),
                 ArgSpec::RuntimeVar("--provider", RuntimeKey::Provider),
                 ArgSpec::RuntimeVar("--num-threads", RuntimeKey::NumThreads),
             ],
-            // 注意：英文包可能不含 lexicon-zh.txt（required 校验时核对官方包）
-            required_files: &[
-                "model.onnx",
-                "voices.bin",
-                "tokens.txt",
-                "lexicon-zh.txt",
-                "lexicon-us-en.txt",
-            ],
+            // 必需文件以官方用法为准：model/voices/tokens 三件（英文包不含 zh 词表，
+            // 原来把 lexicon-zh.txt 列为必需 ⇒ 已下载的包会被判"缺文件"，永远补不齐）
+            required_files: &["model.onnx", "voices.bin", "tokens.txt"],
         }),
     },
     ModelSpec {
@@ -611,7 +598,8 @@ pub static SPECS: &[ModelSpec] = &[
         }],
         quant: None,
         // zh-baker 实为中文单语言（旧注册表 languages 含 en，P2 核对官方包后定）
-        languages: &["zh", "en"],
+        // icefall 中文 baker 女声，单语言模型 ⇒ 只声明 zh（Fixed 模式显示 langs[0]）
+        languages: &["zh"],
         language_mode: LanguageMode::Fixed,
         voice_mode: VoiceMode::Fixed,
         backend: BackendSpec::SherpaTts(SherpaTtsSpec {
@@ -697,7 +685,9 @@ pub static SPECS: &[ModelSpec] = &[
         extra_files: &[],
         quant: None,
         // 决策 6：克隆能力待核对官方文档；当前 CLI 未接线参考音频（no-op bug），按无克隆处理
-        languages: &["zh", "en"],
+        // 上游 Pocket TTS 的 2026-01 版只有英文（六语言 en/fr/de/es/pt/it 是 2026-05 才加），
+        // 而本包名即 sherpa-onnx-pocket-tts-int8-2026-01-26 ⇒ 只声明 en
+        languages: &["en"],
         language_mode: LanguageMode::Fixed,
         voice_mode: VoiceMode::Fixed,
         backend: BackendSpec::SherpaTts(SherpaTtsSpec {

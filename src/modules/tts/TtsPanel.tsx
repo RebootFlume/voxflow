@@ -1182,19 +1182,23 @@ function VoiceSettingsPage() {
 // 文字转语音子页面（合成 + 任务列表）
 // ============================================================
 
-// 固定英文显示，不跟随软件 locale 切换（用户要求）
-const langLabel: Record<string, string> = {
-  zh: "Chinese",
-  en: "English",
-  ja: "Japanese",
-  ko: "Korean",
-  fr: "French",
-  de: "German",
-  es: "Spanish",
-  ru: "Russian",
-  ar: "Arabic",
-  vi: "Vietnamese",
-};
+// 固定英文显示，不跟随软件 locale 切换（用户要求）。
+// 用内置 Intl.DisplayNames 而不是手写表：手写表只有 10 种，Supertonic 声明的 31 种里
+// 有 22 种会漏成裸语言码（"bg"、"hr"、"et"…），而 Intl 覆盖全部 BCP-47 语言码。
+const enLangNames = (() => {
+  try {
+    return new Intl.DisplayNames(["en"], { type: "language" });
+  } catch {
+    return null; // 老 WebView 不支持 → 退回语言码
+  }
+})();
+function langLabel(code: string): string {
+  try {
+    return enLangNames?.of(code) ?? code;
+  } catch {
+    return code;
+  }
+}
 
 /**
  * 当前 TTS 模型的描述符能力（语言 / 音色模式 / 克隆）。
@@ -1242,13 +1246,15 @@ function LanguageSelector() {
   const updateTts = useAppStore((s) => s.updateTts);
   const info = useTtsModelInfo(ttsModel);
 
-  // 语言对齐：当前语言不在模型支持列表 → 切到模型默认（zh 优先，否则首个支持语言）
+  // 语言对齐：当前语言不在模型支持列表 → 切到模型默认（zh 优先 → en → 首个支持语言）。
+  // 中间的 en 不能省：Supertonic 的 31 种语言里没有 zh，只按"zh 否则首项"会落到 `ar`
+  // （阿拉伯语）——中文界面切过去莫名变成阿拉伯语。
   const langs = info?.languages ?? [];
   useEffect(() => {
     if (!info || langs.length === 0) return;
     const cur = useAppStore.getState().tts.language;
     if (!langs.includes(cur)) {
-      const def = langs.includes("zh") ? "zh" : langs[0];
+      const def = langs.includes("zh") ? "zh" : langs.includes("en") ? "en" : langs[0];
       updateTts({ language: def });
       void rustSetTtsLanguage(def).catch(() => {
         useAppStore.getState().addLog(`[tts] switch language failed: ${def}`, "error");
@@ -1274,7 +1280,7 @@ function LanguageSelector() {
     const fixedLang = langs[0] ?? "en";
     return (
       <span className="inline-flex items-center rounded-md border border-border bg-muted/50 px-2.5 py-1 text-xs text-muted-foreground">
-        {langLabel[fixedLang] ?? fixedLang}
+        {langLabel(fixedLang)}
       </span>
     );
   }
@@ -1304,7 +1310,7 @@ function LanguageSelector() {
       <SelectContent>
         {langs.map((l) => (
           <SelectItem key={l} value={l}>
-            {langLabel[l] ?? l}
+            {langLabel(l)}
           </SelectItem>
         ))}
       </SelectContent>
