@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { CheckCircle2, Cpu, Download, Loader2, RefreshCw, X } from "lucide-react";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Cpu, Download, Loader2, PackageOpen, RefreshCw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useAppStore } from "@/stores";
@@ -137,178 +136,186 @@ export function FrameworkPanel() {
 
 
   return (
-    <div className="space-y-4">
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">{t(locale, "framework.title")}</CardTitle>
-          <CardDescription>{t(locale, "framework.desc")}</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {!packages ? (
-            <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              {t(locale, "framework.loading")}
-            </div>
-          ) : (
-            <>
-              {packages.map((pkg) => {
-                const meta = frameworkMeta[pkg.framework] ?? { descKey: "" };
-                return (
-                  <div
-                    key={pkg.framework}
-                    className="flex items-center gap-3 rounded-lg border p-3"
-                  >
-                    <div
-                      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
-                        pkg.state === "ready"
-                          ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-                          : pkg.state === "incomplete"
-                            ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
-                            : "bg-muted text-muted-foreground"
-                      }`}
-                    >
+    <div className="space-y-3">
+      {/* 与模型列表页同一套页头（h3 + 右侧刷新图标）与行样式（rounded-lg border）：
+          此前这里外层再套一张 Card，形成"方框套方框"，与模型下载页完全两种风格 */}
+      <div className="flex items-center justify-between">
+        <h3 className="flex items-center gap-1.5 text-sm font-semibold">
+          <PackageOpen className="h-4 w-4 text-muted-foreground" />
+          {t(locale, "framework.title")}
+        </h3>
+        <Button variant="ghost" size="icon" onClick={refresh} aria-label="refresh">
+          <RefreshCw className="h-4 w-4" />
+        </Button>
+      </div>
+      <p className="text-xs text-muted-foreground">{t(locale, "framework.desc")}</p>
+
+      {!packages ? (
+        <div className="flex h-16 items-center justify-center text-sm text-muted-foreground">
+          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          {t(locale, "framework.loading")}
+        </div>
+      ) : (
+        <>
+          {packages.map((pkg) => {
+            const meta = frameworkMeta[pkg.framework] ?? { descKey: "" };
+            return (
+              <div key={pkg.framework} className="rounded-lg border">
+                {/* 主行：状态图标 + 名称/变体/版本/状态 + 右侧动作（与模型行同构） */}
+                <div className="flex items-center gap-3 px-4 py-3">
+                  {pkg.state === "ready" ? (
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+                      ✓
+                    </span>
+                  ) : pkg.state === "incomplete" ? (
+                    <Loader2 className="h-4 w-4 shrink-0 animate-spin text-amber-600 dark:text-amber-400" />
+                  ) : (
+                    <Download className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  )}
+                  <div className="min-w-0 flex-1">
+                    {/* 单行主信息：名称 + 变体 + 版本 + 状态 + 能力 + 说明 + 目录（与模型行同构，
+                        说明与路径都内联，行高不再比模型行多出两行） */}
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span className="shrink-0 text-sm font-medium">{pkg.name}</span>
+                      {pkg.variant ? (
+                        <Badge
+                          variant="outline"
+                          className="shrink-0 font-mono text-[10px] uppercase"
+                          title={pkg.variant}
+                        >
+                          {pkg.variant}
+                        </Badge>
+                      ) : null}
+                      {pkg.version ? (
+                        <span className="shrink-0 font-mono text-[11px] text-muted-foreground" title={pkg.version}>
+                          {pkg.version}
+                        </span>
+                      ) : null}
                       {pkg.state === "ready" ? (
-                        <CheckCircle2 className="h-4 w-4" />
+                        <Badge
+                          variant="outline"
+                          className="shrink-0 border-emerald-500/20 bg-emerald-500/10 text-[10px] text-emerald-600 dark:text-emerald-400"
+                        >
+                          {t(locale, "framework.installed")}
+                        </Badge>
                       ) : pkg.state === "incomplete" ? (
-                        <Loader2 className="h-4 w-4" />
+                        <Badge variant="outline" className="shrink-0 text-[10px] text-amber-600 dark:text-amber-400">
+                          {t(locale, "framework.incomplete")}
+                        </Badge>
                       ) : (
-                        <Download className="h-4 w-4" />
+                        <Badge variant="outline" className="shrink-0 text-[10px] text-amber-600 dark:text-amber-400">
+                          {t(locale, "framework.notInstalled")}
+                        </Badge>
                       )}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium">{pkg.name}</span>
-                        {pkg.variant ? (
-                          <span className="font-mono text-[11px] text-muted-foreground" title={pkg.variant}>
-                            {pkg.variant}
-                          </span>
-                        ) : null}
-                        {pkg.version ? (
-                          <span className="font-mono text-[11px] text-muted-foreground" title={pkg.version}>
-                            {pkg.version}
-                          </span>
-                        ) : null}
-                        {pkg.state === "ready" ? (
-                          <Badge variant="secondary" className="text-[10px]">
-                            {t(locale, "framework.installed")}
-                          </Badge>
-                        ) : pkg.state === "incomplete" ? (
-                          <Badge variant="outline" className="text-[10px] text-amber-600 dark:text-amber-400">
-                            {t(locale, "framework.incomplete")}
-                          </Badge>
-                        ) : (
-                          <Badge variant="outline" className="text-[10px] text-amber-600 dark:text-amber-400">
-                            {t(locale, "framework.notInstalled")}
-                          </Badge>
-                        )}
-                      </div>
-                      <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                        {pkg.framework === "pytorch-cpu"
-                          ? "PyTorch CPU runtime"
-                          : pkg.framework === "pytorch-cuda130"
-                            ? "PyTorch CUDA 13.0 runtime; CPU fallback supported"
-                            : meta.descKey
-                              ? t(locale, meta.descKey)
-                              : ""}
-                      </p>
                       {(pkg.supports_cpu || pkg.supports_cuda) && (
-                        <p className="text-[10px] text-muted-foreground">
-                          {pkg.supports_cpu ? "CPU" : ""}{pkg.supports_cpu && pkg.supports_cuda ? " · " : ""}{pkg.supports_cuda ? "CUDA" : ""}
-                        </p>
+                        <span className="shrink-0 text-[11px] text-muted-foreground">
+                          {pkg.supports_cpu ? "CPU" : ""}
+                          {pkg.supports_cpu && pkg.supports_cuda ? " · " : ""}
+                          {pkg.supports_cuda ? "CUDA" : ""}
+                        </span>
                       )}
-                      <p className="truncate font-mono text-[10px] text-muted-foreground/60">{pkg.dir}</p>
-                      {verifyResult[pkg.framework] && (
-                        <p
-                          className={`mt-1 text-[11px] ${
-                            verifyResult[pkg.framework]!.ok
-                              ? "text-emerald-600 dark:text-emerald-400"
-                              : "text-destructive"
-                          }`}
-                        >
-                          {verifyResult[pkg.framework]!.msg}
-                        </p>
-                      )}
-                      {deviceInfo[pkg.framework] && (
-                        <p
-                          className={`mt-1 text-[11px] ${
-                            deviceInfo[pkg.framework]!.ok
-                              ? "text-emerald-600 dark:text-emerald-400"
-                              : "text-destructive"
-                          }`}
-                        >
-                          {deviceInfo[pkg.framework]!.msg}
-                        </p>
-                      )}
-                      {dl.framework === pkg.framework && (
-                        <div className="mt-2 space-y-1">
-                          <div className="h-1.5 overflow-hidden rounded-full bg-muted">
-                            <div
-                              className={`h-full bg-primary transition-all ${dl.phase === "extracting" ? "animate-pulse" : ""}`}
-                              style={{ width: `${dl.pct}%` }}
-                            />
-                          </div>
-                          <p className="text-[10px] text-muted-foreground">
-                            {dl.phase === "extracting"
-                              ? t(locale, "framework.extracting")
-                              : `${t(locale, "framework.downloading")}: ${dl.pct}%`}
-                          </p>
-                        </div>
-                      )}
+                      <span className="truncate text-xs text-muted-foreground">
+                        {meta.descKey ? t(locale, meta.descKey) : ""}
+                      </span>
+                      <span
+                        className="inline-block max-w-[260px] shrink-0 truncate align-bottom font-mono text-[11px] text-muted-foreground/70"
+                        title={pkg.dir}
+                      >
+                        {pkg.dir}
+                      </span>
                     </div>
-                    <div className="flex shrink-0 gap-1.5">
-                      {pkg.state === "ready" ? (
-                        <>
-                          <Button size="sm" variant="outline" onClick={() => void doVerify(pkg.framework)}>
-                            <RefreshCw className="mr-1 h-3.5 w-3.5" />
-                            {t(locale, "framework.verify")}
-                          </Button>
-                          {pkg.engine === "pytorch" && (
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() => void doProbeDevice(pkg.framework)}
-                              disabled={deviceInfo[pkg.framework] === null}
-                            >
-                              <Cpu className="mr-1 h-3.5 w-3.5" />
-                              {t(locale, "framework.probeDevice")}
-                            </Button>
-                          )}
+                    {verifyResult[pkg.framework] && (
+                      <p
+                        className={`mt-1 text-[11px] ${
+                          verifyResult[pkg.framework]!.ok
+                            ? "text-emerald-600 dark:text-emerald-400"
+                            : "text-destructive"
+                        }`}
+                      >
+                        {verifyResult[pkg.framework]!.msg}
+                      </p>
+                    )}
+                    {deviceInfo[pkg.framework] && (
+                      <p
+                        className={`mt-1 text-[11px] ${
+                          deviceInfo[pkg.framework]!.ok
+                            ? "text-emerald-600 dark:text-emerald-400"
+                            : "text-destructive"
+                        }`}
+                      >
+                        {deviceInfo[pkg.framework]!.msg}
+                      </p>
+                    )}
+                    {dl.framework === pkg.framework && (
+                      <div className="mt-2 space-y-1">
+                        <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+                          <div
+                            className={`h-full bg-primary transition-all ${dl.phase === "extracting" ? "animate-pulse" : ""}`}
+                            style={{ width: `${dl.pct}%` }}
+                          />
+                        </div>
+                        <p className="text-[10px] text-muted-foreground">
+                          {dl.phase === "extracting"
+                            ? t(locale, "framework.extracting")
+                            : `${t(locale, "framework.downloading")}: ${dl.pct}%`}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex shrink-0 gap-1.5">
+                    {pkg.state === "ready" ? (
+                      <>
+                        <Button size="sm" variant="outline" onClick={() => void doVerify(pkg.framework)}>
+                          <RefreshCw className="mr-1 h-3.5 w-3.5" />
+                          {t(locale, "framework.verify")}
+                        </Button>
+                        {pkg.engine === "pytorch" && (
                           <Button
                             size="sm"
                             variant="outline"
-                            onClick={() => void doDownload(pkg.framework)}
-                            disabled={dl.framework !== null}
+                            onClick={() => void doProbeDevice(pkg.framework)}
+                            disabled={deviceInfo[pkg.framework] === null}
                           >
-                            <Download className="mr-1 h-3.5 w-3.5" />
-                            {t(locale, "framework.update")}
+                            <Cpu className="mr-1 h-3.5 w-3.5" />
+                            {t(locale, "framework.probeDevice")}
                           </Button>
-                        </>
-                      ) : pkg.state === "incomplete" ? (
-                        <>
-                          <Button size="sm" variant="outline" onClick={() => void doVerify(pkg.framework)}>
-                            <RefreshCw className="mr-1 h-3.5 w-3.5" />
-                            {t(locale, "framework.verify")}
-                          </Button>
-                          <Button
-                            size="sm"
-                            onClick={() => void doDownload(pkg.framework)}
-                            disabled={dl.framework !== null}
-                          >
-                            <Download className="mr-1 h-3.5 w-3.5" />
-                            {t(locale, "framework.repair")}
-                          </Button>
-                        </>
-                      ) : (
-                        <>
-                          {/* 未安装也允许「验证」：手动放置的运行时靠它被识别，
-                              否则用户只能重下（这是本次踩坑的直接原因） */}
-                          <Button size="sm" variant="outline" onClick={() => void doVerify(pkg.framework)}>
-                            <RefreshCw className="mr-1 h-3.5 w-3.5" />
-                            {t(locale, "runtime.verify")}
-                          </Button>
-                          <Button
-                            size="sm"
-                            onClick={() => void doDownload(pkg.framework)}
+                        )}
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void doDownload(pkg.framework)}
+                          disabled={dl.framework !== null}
+                        >
+                          <Download className="mr-1 h-3.5 w-3.5" />
+                          {t(locale, "framework.update")}
+                        </Button>
+                      </>
+                    ) : pkg.state === "incomplete" ? (
+                      <>
+                        <Button size="sm" variant="outline" onClick={() => void doVerify(pkg.framework)}>
+                          <RefreshCw className="mr-1 h-3.5 w-3.5" />
+                          {t(locale, "framework.verify")}
+                        </Button>
+                        <Button
+                          size="sm"
+                          onClick={() => void doDownload(pkg.framework)}
+                          disabled={dl.framework !== null}
+                        >
+                          <Download className="mr-1 h-3.5 w-3.5" />
+                          {t(locale, "framework.repair")}
+                        </Button>
+                      </>
+                    ) : (
+                      <>
+                        {/* 未安装也允许「校验」：手动放置的运行时靠它被识别，
+                            否则用户只能重下（这是本次踩坑的直接原因） */}
+                        <Button size="sm" variant="outline" onClick={() => void doVerify(pkg.framework)}>
+                          <RefreshCw className="mr-1 h-3.5 w-3.5" />
+                          {t(locale, "runtime.verify")}
+                        </Button>
+                        <Button
+                          size="sm"
+                          onClick={() => void doDownload(pkg.framework)}
                           disabled={dl.framework !== null}
                         >
                           {dl.framework === pkg.framework ? (
@@ -317,36 +324,35 @@ export function FrameworkPanel() {
                             <Download className="mr-1 h-3.5 w-3.5" />
                           )}
                           {t(locale, "framework.download")}
-                          </Button>
-                        </>
-                      )}
-                      {/* 下载中才显示取消；取消/完成/失败后 store 清空 → 按钮自动消失 */}
-                      {dl.framework === pkg.framework && (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => void doCancel(pkg.framework)}
-                          disabled={cancelling === pkg.framework}
-                        >
-                          {cancelling === pkg.framework ? (
-                            <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <X className="mr-1 h-3.5 w-3.5" />
-                          )}
-                          {t(locale, "framework.cancel")}
                         </Button>
-                      )}
-                    </div>
+                      </>
+                    )}
+                    {/* 下载中才显示取消；取消/完成/失败后 store 清空 → 按钮自动消失 */}
+                    {dl.framework === pkg.framework && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => void doCancel(pkg.framework)}
+                        disabled={cancelling === pkg.framework}
+                      >
+                        {cancelling === pkg.framework ? (
+                          <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <X className="mr-1 h-3.5 w-3.5" />
+                        )}
+                        {t(locale, "framework.cancel")}
+                      </Button>
+                    )}
                   </div>
-                );
-              })}
-              <p className="pt-1 text-[11px] text-muted-foreground/70">
-                {t(locale, "framework.root", { path: root || "…" })}
-              </p>
-            </>
-          )}
-        </CardContent>
-      </Card>
+                </div>
+              </div>
+            );
+          })}
+          <p className="pt-1 text-[11px] text-muted-foreground/70">
+            {t(locale, "framework.root", { path: root || "…" })}
+          </p>
+        </>
+      )}
       {dl.error && (
         <p className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
           {t(locale, "framework.error")}: {dl.error}
