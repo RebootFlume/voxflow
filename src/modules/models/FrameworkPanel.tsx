@@ -155,10 +155,16 @@ export function FrameworkPanel() {
           <RefreshCw className="h-4 w-4" />
         </Button>
       </div>
-      <p className="text-xs text-muted-foreground">{t(locale, "framework.desc")}</p>
-      {/* 框架目录是"东西装到哪"的上下文，跟页头放一起；此前挂在列表末尾，像小结/脚注 */}
-      <p className="truncate font-mono text-[11px] text-muted-foreground/70" title={root || undefined}>
-        {t(locale, "framework.root", { path: root || "…" })}
+      {/* 说明与框架目录合成一行：两行说的是同一件事（libs 放哪），分开写就是重复。
+          标签用正文字体、路径用等宽小字，长路径 truncate + 悬停看全 */}
+      <p className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+        <span className="shrink-0">{t(locale, "framework.desc")}</span>
+        <span
+          className="min-w-0 truncate font-mono text-[11px] text-muted-foreground/70"
+          title={root || undefined}
+        >
+          {root || "…"}
+        </span>
       </p>
 
       {!packages ? (
