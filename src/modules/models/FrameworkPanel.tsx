@@ -20,7 +20,14 @@ interface RuntimePkg {
   dir: string;
 }
 
-/** 推理框架（运行时 libs）管理页：下载/校验/修复 llama、sherpa，PyTorch 占位 */
+/**
+ * 框架行里所有小标签的统一格式（变体 / 推理能力 CPU·CUDA 共用）。
+ * 之所以抽成常量：变体与能力此前一个是徽标、一个是纯文本且窄窗口会被隐藏，
+ * 同一行里两套写法 —— 这里是"格式统一"的唯一出处。
+ */
+const FRAMEWORK_CHIP = "shrink-0 font-mono text-[10px] uppercase";
+
+/** 推理框架（运行时 libs）管理页：下载/校验/修复 llama、sherpa、PyTorch */
 export function FrameworkPanel() {
   const locale = useAppStore((s) => s.locale);
   const [packages, setPackages] = useState<RuntimePkg[] | null>(null);
@@ -173,21 +180,24 @@ export function FrameworkPanel() {
                     <Download className="h-4 w-4 shrink-0 text-muted-foreground" />
                   )}
                   <div className="min-w-0 flex-1">
-                    {/* 单行主信息：名称 + 变体 + 版本 + 状态 + 能力 + 说明 + 目录（与模型行同构，
-                        说明与路径都内联，行高不再比模型行多出两行） */}
-                    <div className="flex min-w-0 items-center gap-2">
+                    {/* 主信息单行。标签一律走同一套 chip（outline + mono + 10px + 大写）：
+                        「变体」= 这一行是哪个包（cpu / cuda130），「能力」= CPU / CUDA 各一枚、按
+                        supports_* 显示 —— 两者同格式、同尺寸，能力标签不再因宽度被隐藏
+                        （此前能力是纯文本且 xl 才显示，等于没了）。
+                        宽度不足时由说明（flex-1，省略号）先压缩，overflow-hidden 兜底，
+                        避免内联长文本画到右侧按钮底下。 */}
+                    <div className="flex min-w-0 items-center gap-2 overflow-hidden">
                       <span className="shrink-0 text-sm font-medium">{pkg.name}</span>
                       {pkg.variant ? (
-                        <Badge
-                          variant="outline"
-                          className="shrink-0 font-mono text-[10px] uppercase"
-                          title={pkg.variant}
-                        >
+                        <Badge variant="outline" className={FRAMEWORK_CHIP} title={pkg.variant}>
                           {pkg.variant}
                         </Badge>
                       ) : null}
                       {pkg.version ? (
-                        <span className="shrink-0 font-mono text-[11px] text-muted-foreground" title={pkg.version}>
+                        <span
+                          className="hidden shrink-0 font-mono text-[11px] text-muted-foreground lg:inline"
+                          title={pkg.version}
+                        >
                           {pkg.version}
                         </span>
                       ) : null}
@@ -207,22 +217,31 @@ export function FrameworkPanel() {
                           {t(locale, "framework.notInstalled")}
                         </Badge>
                       )}
-                      {(pkg.supports_cpu || pkg.supports_cuda) && (
-                        <span className="shrink-0 text-[11px] text-muted-foreground">
-                          {pkg.supports_cpu ? "CPU" : ""}
-                          {pkg.supports_cpu && pkg.supports_cuda ? " · " : ""}
-                          {pkg.supports_cuda ? "CUDA" : ""}
-                        </span>
-                      )}
-                      <span className="truncate text-xs text-muted-foreground">
+                      {/* 推理能力标签移到目录行（见下）：这一行在窄窗口会挤掉它们，
+                          而"支持 CPU/CUDA"是必须看见的信息 */}
+                      <span className="hidden min-w-0 flex-1 truncate text-xs text-muted-foreground lg:inline">
                         {meta.descKey ? t(locale, meta.descKey) : ""}
                       </span>
-                      <span
-                        className="inline-block max-w-[260px] shrink-0 truncate align-bottom font-mono text-[11px] text-muted-foreground/70"
+                    </div>
+                    {/* 目录 + 推理能力：目录是完整路径，内联到上一行必被右侧按钮压住；
+                        能力标签放这里才有空间常显（与变体同一套 chip 格式） */}
+                    <div className="mt-0.5 flex min-w-0 items-center gap-2">
+                      <p
+                        className="min-w-0 truncate font-mono text-[11px] text-muted-foreground/70"
                         title={pkg.dir}
                       >
                         {pkg.dir}
-                      </span>
+                      </p>
+                      {pkg.supports_cpu && (
+                        <Badge variant="outline" className={FRAMEWORK_CHIP} title={t(locale, "framework.cap.cpu")}>
+                          CPU
+                        </Badge>
+                      )}
+                      {pkg.supports_cuda && (
+                        <Badge variant="outline" className={FRAMEWORK_CHIP} title={t(locale, "framework.cap.cuda")}>
+                          CUDA
+                        </Badge>
+                      )}
                     </div>
                     {verifyResult[pkg.framework] && (
                       <p
