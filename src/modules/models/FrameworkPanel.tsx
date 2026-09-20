@@ -156,6 +156,10 @@ export function FrameworkPanel() {
         </Button>
       </div>
       <p className="text-xs text-muted-foreground">{t(locale, "framework.desc")}</p>
+      {/* 框架目录是"东西装到哪"的上下文，跟页头放一起；此前挂在列表末尾，像小结/脚注 */}
+      <p className="truncate font-mono text-[11px] text-muted-foreground/70" title={root || undefined}>
+        {t(locale, "framework.root", { path: root || "…" })}
+      </p>
 
       {!packages ? (
         <div className="flex h-16 items-center justify-center text-sm text-muted-foreground">
@@ -367,9 +371,6 @@ export function FrameworkPanel() {
               </div>
             );
           })}
-          <p className="pt-1 text-[11px] text-muted-foreground/70">
-            {t(locale, "framework.root", { path: root || "…" })}
-          </p>
         </>
       )}
       {dl.error && (
