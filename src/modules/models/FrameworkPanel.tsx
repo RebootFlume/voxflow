@@ -166,6 +166,12 @@ export function FrameworkPanel() {
         <>
           {packages.map((pkg) => {
             const meta = frameworkMeta[pkg.framework] ?? { descKey: "" };
+            // 同名多包（PyTorch 的 cpu / cuda130）→ 变体写进名称，不再单独挂一枚变体标签：
+            // 此前 "PyTorch [CUDA130] [CPU] [CUDA] [未下载]" 四枚标签里，变体与状态、能力互相看起来
+            // 都像"同一个东西"，标签越多越难读。单包框架（llama / sherpa）名称保持原样。
+            const sameNameCount = packages.filter((p) => p.name === pkg.name).length;
+            const displayName =
+              sameNameCount > 1 && pkg.variant ? `${pkg.name} (${pkg.variant})` : pkg.name;
             return (
               <div key={pkg.framework} className="rounded-lg border">
                 {/* 主行：状态图标 + 名称/变体/版本/状态 + 右侧动作（与模型行同构） */}
@@ -187,51 +193,11 @@ export function FrameworkPanel() {
                         宽度不足时由说明（flex-1，省略号）先压缩，overflow-hidden 兜底，
                         避免内联长文本画到右侧按钮底下。 */}
                     <div className="flex min-w-0 items-center gap-2 overflow-hidden">
-                      <span className="shrink-0 text-sm font-medium">{pkg.name}</span>
-                      {pkg.variant ? (
-                        <Badge variant="outline" className={FRAMEWORK_CHIP} title={pkg.variant}>
-                          {pkg.variant}
-                        </Badge>
-                      ) : null}
-                      {pkg.version ? (
-                        <span
-                          className="hidden shrink-0 font-mono text-[11px] text-muted-foreground lg:inline"
-                          title={pkg.version}
-                        >
-                          {pkg.version}
-                        </span>
-                      ) : null}
-                      {pkg.state === "ready" ? (
-                        <Badge
-                          variant="outline"
-                          className="shrink-0 border-emerald-500/20 bg-emerald-500/10 text-[10px] text-emerald-600 dark:text-emerald-400"
-                        >
-                          {t(locale, "framework.installed")}
-                        </Badge>
-                      ) : pkg.state === "incomplete" ? (
-                        <Badge variant="outline" className="shrink-0 text-[10px] text-amber-600 dark:text-amber-400">
-                          {t(locale, "framework.incomplete")}
-                        </Badge>
-                      ) : (
-                        <Badge variant="outline" className="shrink-0 text-[10px] text-amber-600 dark:text-amber-400">
-                          {t(locale, "framework.notInstalled")}
-                        </Badge>
-                      )}
-                      {/* 推理能力标签移到目录行（见下）：这一行在窄窗口会挤掉它们，
-                          而"支持 CPU/CUDA"是必须看见的信息 */}
-                      <span className="hidden min-w-0 flex-1 truncate text-xs text-muted-foreground lg:inline">
-                        {meta.descKey ? t(locale, meta.descKey) : ""}
+                      <span className="shrink-0 text-sm font-medium" title={pkg.version || undefined}>
+                        {displayName}
                       </span>
-                    </div>
-                    {/* 目录 + 推理能力：目录是完整路径，内联到上一行必被右侧按钮压住；
-                        能力标签放这里才有空间常显（与变体同一套 chip 格式） */}
-                    <div className="mt-0.5 flex min-w-0 items-center gap-2">
-                      <p
-                        className="min-w-0 truncate font-mono text-[11px] text-muted-foreground/70"
-                        title={pkg.dir}
-                      >
-                        {pkg.dir}
-                      </p>
+                      {/* 标签一律紧跟名称（前面）：能力（CPU / CUDA）→ 状态。
+                          顺序与含义单一：能力 = 能在什么设备上跑，状态 = 装了没。 */}
                       {pkg.supports_cpu && (
                         <Badge variant="outline" className={FRAMEWORK_CHIP} title={t(locale, "framework.cap.cpu")}>
                           CPU
@@ -242,7 +208,41 @@ export function FrameworkPanel() {
                           CUDA
                         </Badge>
                       )}
+                      {/* 状态标签窄窗口隐藏：左侧状态图标（✓ / ↻ / ↓）已表达同一件事，
+                          而"下载 / 更新"按钮也随状态变化，不丢信息 */}
+                      {pkg.state === "ready" ? (
+                        <Badge
+                          variant="outline"
+                          className="hidden shrink-0 border-emerald-500/20 bg-emerald-500/10 text-[10px] text-emerald-600 dark:text-emerald-400 lg:inline-flex"
+                        >
+                          {t(locale, "framework.installed")}
+                        </Badge>
+                      ) : pkg.state === "incomplete" ? (
+                        <Badge
+                          variant="outline"
+                          className="hidden shrink-0 text-[10px] text-amber-600 dark:text-amber-400 lg:inline-flex"
+                        >
+                          {t(locale, "framework.incomplete")}
+                        </Badge>
+                      ) : (
+                        <Badge
+                          variant="outline"
+                          className="hidden shrink-0 text-[10px] text-amber-600 dark:text-amber-400 lg:inline-flex"
+                        >
+                          {t(locale, "framework.notInstalled")}
+                        </Badge>
+                      )}
+                      <span className="hidden min-w-0 flex-1 truncate text-xs text-muted-foreground xl:inline">
+                        {meta.descKey ? t(locale, meta.descKey) : ""}
+                      </span>
                     </div>
+                    {/* 目录单占一行：完整路径，内联到上一行必被右侧按钮压住 */}
+                    <p
+                      className="mt-0.5 min-w-0 truncate font-mono text-[11px] text-muted-foreground/70"
+                      title={pkg.dir}
+                    >
+                      {pkg.dir}
+                    </p>
                     {verifyResult[pkg.framework] && (
                       <p
                         className={`mt-1 text-[11px] ${
