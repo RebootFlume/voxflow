@@ -1,7 +1,7 @@
 import { useAppStore, type ModelItemState, type ModelFramework } from "@/stores";
 import { t } from "@/lib/i18n";
 import { Badge } from "@/components/ui/badge";
-import { computeIsLoaded, engineOf, runtimeKeyOf } from "@/lib/modelState";
+import { computeIsLoaded, engineOf, runtimeKeyOf, runtimeKeysOf } from "@/lib/modelState";
 
 const EMPTY_ITEMS: ModelItemState[] = [];
 
@@ -93,9 +93,12 @@ export function ModelSelector({ kind, selected, onSelect, formatFilter, download
                   : ""
             : "";
         // 该模型所需框架未就绪 → 标注（用户不必先点一次才知道）
-        const fwKey = runtimeKeyOf(m);
-        const fwPkg = fwKey ? runtimePackages?.find((p) => p.framework === fwKey) : undefined;
-        const fwBlocked = Boolean(fwPkg && fwPkg.state !== "ready");
+        // 同一框架可能有多个运行时包（PyTorch: cpu / cuda130），任一就绪即不算缺
+        const fwPkgs = runtimeKeysOf(m)
+          .map((k) => runtimePackages?.find((p) => p.framework === k))
+          .filter((p): p is NonNullable<typeof p> => Boolean(p));
+        const fwBlocked =
+          fwPkgs.length > 0 && fwPkgs.every((p) => p.state !== "ready");
 
         return (
           <div
@@ -127,7 +130,7 @@ export function ModelSelector({ kind, selected, onSelect, formatFilter, download
                 <span>{sizeLabel(m)}</span>
                 {fwBlocked && (
                   <span className="text-amber-600 dark:text-amber-400">
-                    {t(locale, "runtime.needsFramework", { name: fwPkg?.name ?? "" })}
+                    {t(locale, "runtime.needsFramework", { name: fwPkgs.map((p) => p.name).join(" / ") })}
                   </span>
                 )}
                 {statusLabel && (

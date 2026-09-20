@@ -21,17 +21,34 @@ pub enum SmokeProbe {
     HttpHealth { path: &'static str },
     /// 无服务端点：等进程退出且 stderr 命中任一关键词（= exe+DLL 链完好）
     StderrKeywords { exit_and_stderr_contains_any: &'static [&'static str] },
+    /// 启动 Python worker 的一次性 smoke test，stdout 必须返回成功 JSON。
+    PythonWorker,
 }
-
 /// libs 压缩包发布信息（GitHub release 资产名 + 版本）
 /// 更新引擎时改这里 + 发布新压缩包到 GitHub release。
 pub struct RuntimePkg {
-    /// 框架标识（与 registry 的 framework 一致）
+    /// 运行时包下载键（必须唯一；例如 pytorch-cpu / pytorch-cuda130）
     pub framework: &'static str,
+    /// 引擎注册键（PyTorch 的 CPU/CUDA 包都映射到 pytorch）
+    pub engine: &'static str,
     /// 展示名
     pub name: &'static str,
+    /// 运行时变体（PyTorch 使用；既有框架为空字符串）
+    pub variant: &'static str,
+    /// 是否支持 CPU 推理
+    pub supports_cpu: bool,
+    /// 是否支持 CUDA 推理
+    pub supports_cuda: bool,
     /// 版本（展示用；与 url / inner_dir 中的版本号人工保持一致，改动时三处同改）
     pub version: &'static str,
+    /// 运行时包 SHA-256；空字符串表示未固定校验值
+    pub sha256: &'static str,
+    /// 附加包 SHA-256（aux_url 为空或未固定校验值时为空字符串）
+    pub aux_sha256: &'static str,
+    /// 解压后占用字节数（磁盘预检用；None = 按归档大小估算）
+    pub unpacked_bytes: Option<u64>,
+    /// 下载包中必须存在且可解析的 manifest 相对路径
+    pub manifest: Option<&'static str>,
     /// GitHub release 资产 URL（下载地址）
     pub url: &'static str,
     /// 附加依赖包 URL（如 llama.cpp 官方把 CUDA 运行库拆成独立的 cudart-*.zip）
@@ -87,6 +104,47 @@ pub const SHERPA_CUDA_AUX_FILES: &[&str] = &[
     "bin/sherpa-onnx-offline-tts.exe",
 ];
 
+/// PyTorch CUDA 13.0 运行库辅包内容（29 个 DLL，解压到 pytorch-cuda130/Lib/site-packages/torch/lib/）。
+///
+/// 为什么整包成片而不是按功能再拆：torch 在 `torch/__init__.py::_load_dll_libraries()`
+/// 里会预加载 `torch/lib` 下全部 DLL，实测缺任何一组（cudnn / cublas / cusolver / cufft /
+/// nvrtc）都会让 `import torch` 直接抛 `WinError 126` —— 辅包必须与主包一起安装，
+/// 不能按需跳过；因此拆分的意义只是绕开 GitHub 单资产 2 GiB 上限与细化重试粒度。
+///
+/// 托管位置：本仓库 GitHub release 专用 tag `runtime-assets`。
+/// 更新资产时重跑 scripts/build-pytorch-runtime.ps1 -Variant cuda130。
+pub const CUDA130_AUX_FILES: &[&str] = &[
+    "Lib/site-packages/torch/lib/c10_cuda.dll",
+    "Lib/site-packages/torch/lib/caffe2_nvrtc.dll",
+    "Lib/site-packages/torch/lib/cublas64_13.dll",
+    "Lib/site-packages/torch/lib/cublasLt64_13.dll",
+    "Lib/site-packages/torch/lib/cudart64_13.dll",
+    "Lib/site-packages/torch/lib/cudnn64_9.dll",
+    "Lib/site-packages/torch/lib/cudnn_adv64_9.dll",
+    "Lib/site-packages/torch/lib/cudnn_cnn64_9.dll",
+    "Lib/site-packages/torch/lib/cudnn_engines_precompiled64_9.dll",
+    "Lib/site-packages/torch/lib/cudnn_engines_runtime_compiled64_9.dll",
+    "Lib/site-packages/torch/lib/cudnn_engines_tensor_ir64_9.dll",
+    "Lib/site-packages/torch/lib/cudnn_ext64_9.dll",
+    "Lib/site-packages/torch/lib/cudnn_graph64_9.dll",
+    "Lib/site-packages/torch/lib/cudnn_heuristic64_9.dll",
+    "Lib/site-packages/torch/lib/cudnn_ops64_9.dll",
+    "Lib/site-packages/torch/lib/cufft64_12.dll",
+    "Lib/site-packages/torch/lib/cufftw64_12.dll",
+    "Lib/site-packages/torch/lib/cupti64_2025.3.0.dll",
+    "Lib/site-packages/torch/lib/curand64_10.dll",
+    "Lib/site-packages/torch/lib/cusolver64_12.dll",
+    "Lib/site-packages/torch/lib/cusolverMg64_12.dll",
+    "Lib/site-packages/torch/lib/cusparse64_12.dll",
+    "Lib/site-packages/torch/lib/nvJitLink_130_0.dll",
+    "Lib/site-packages/torch/lib/nvToolsExt64_1.dll",
+    "Lib/site-packages/torch/lib/nvperf_host.dll",
+    "Lib/site-packages/torch/lib/nvrtc-builtins64_130.dll",
+    "Lib/site-packages/torch/lib/nvrtc64_130_0.alt.dll",
+    "Lib/site-packages/torch/lib/nvrtc64_130_0.dll",
+    "Lib/site-packages/torch/lib/torch_cuda.dll",
+];
+
 /// 当前发布包（官方版本，固定版本号）
 /// - llama.cpp: b10622（cuda-12.4，与 benchmarks/setup.ps1 一致）
 ///   注意：官方 cuda 版拆成两个 zip —— 主程序包 + cudart 运行库包（cudart64/cublas）。
@@ -96,11 +154,19 @@ pub const SHERPA_CUDA_AUX_FILES: &[&str] = &[
 pub const RUNTIME_PACKAGES: &[RuntimePkg] = &[
     RuntimePkg {
         framework: "gguf",
+        engine: "gguf",
+        variant: "",
+        supports_cpu: true,
+        supports_cuda: true,
         name: "llama-server",
         version: "b10622",
+        sha256: "",
+        aux_sha256: "",
+        unpacked_bytes: None,
+        manifest: None,
         url: "https://github.com/ggml-org/llama.cpp/releases/download/b10622/llama-b10622-bin-win-cuda-12.4-x64.zip",
         aux_url: Some("https://github.com/ggml-org/llama.cpp/releases/download/b10622/cudart-llama-bin-win-cuda-12.4-x64.zip"),
-        aux_dir: "", // 官方 cudart zip 平铺内容 → 直接放 llama-cpp 根（与主 exe 同目录）
+        aux_dir: "",
         aux_files: &["cudart64_12.dll", "cublas64_12.dll", "cublasLt64_12.dll"],
         inner_dir: "llama-b10622-bin-win-cuda-12.4-x64",
         target_dir: "llama-cpp",
@@ -111,30 +177,79 @@ pub const RUNTIME_PACKAGES: &[RuntimePkg] = &[
     },
     RuntimePkg {
         framework: "onnx",
+        engine: "onnx",
+        variant: "",
+        supports_cpu: true,
+        supports_cuda: true,
         name: "sherpa-onnx",
         version: "v1.13.6",
+        sha256: "",
+        aux_sha256: "",
+        unpacked_bytes: None,
+        manifest: None,
         url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.6/sherpa-onnx-v1.13.6-cuda-12.x-cudnn-9.x-onnxruntime1.27.1-win-x64-cuda.tar.bz2",
-        // NVIDIA 运行库随装（官方包不含）→ sherpa 自包含，不依赖 llama
         aux_url: Some(SHERPA_CUDA_AUX_URL),
-        aux_dir: "bin", // CUDA zip 内容 → sherpa-onnx/bin/（与官方 exe/dll 同目录）
+        aux_dir: "bin",
         aux_files: SHERPA_CUDA_AUX_FILES,
         inner_dir: "sherpa-onnx-v1.13.6-cuda-12.x-cudnn-9.x-onnxruntime1.27.1-win-x64-cuda",
         target_dir: "sherpa-onnx",
-        // 官方 sherpa 包根 = bin/include/lib，exe 在 bin/ 下（相对 marker，校验/启动按此解析）
         marker: "bin/sherpa-onnx-offline-websocket-server.exe",
         port_base: 50,
         smoke_args: &["--port", "$PORT"],
         smoke_probe: SmokeProbe::StderrKeywords {
-            // 逐字搬自原 sherpa 分支的判定清单（缺模型/参数配置类错误）
             exit_and_stderr_contains_any: &[
-                "does not exist",
-                "recognizer config",
-                "Invalid integer option",
-                "tokens:",
-                "ParseOptions",
-                "parse-options",
+                "does not exist", "recognizer config", "Invalid integer option",
+                "tokens:", "ParseOptions", "parse-options",
             ],
         },
+    },
+    RuntimePkg {
+        framework: "pytorch-cpu",
+        engine: "pytorch",
+        variant: "cpu",
+        supports_cpu: true,
+        supports_cuda: false,
+        name: "PyTorch",
+        version: "2.14.0-py311-cpu",
+        sha256: "07d82e345023e838ad3a052ac33ac6e7954ea892c982f31e16c1dae2bf2685e7",
+        aux_sha256: "",
+        unpacked_bytes: Some(808768572),
+        manifest: Some("runtime-manifest.json"),
+        url: "https://github.com/RebootFlume/voxflow/releases/download/runtime-assets/voxflow-pytorch-cpu-py311-torch2.14.0-win-x64.zip",
+        aux_url: None,
+        aux_dir: "",
+        aux_files: &["worker.py", "runtime-manifest.json", "Lib/site-packages/torch/__init__.py"],
+        inner_dir: "",
+        target_dir: "pytorch-cpu",
+        marker: "python.exe",
+        port_base: 0,
+        smoke_args: &["worker.py", "--smoke-test"],
+        smoke_probe: SmokeProbe::PythonWorker,
+    },
+    RuntimePkg {
+        framework: "pytorch-cuda130",
+        engine: "pytorch",
+        variant: "cuda130",
+        supports_cpu: true,
+        supports_cuda: true,
+        name: "PyTorch",
+        version: "2.14.0-py311-cuda130",
+        sha256: "d1c50052830fe2b596377b5644d6093a282b0ae910662ea30479a802d2dbf545",
+        aux_sha256: "42d42881e826b160e858899c2ce38d820f4db573524098088af29da9b2e71f91",
+        unpacked_bytes: Some(3352022021),
+        manifest: Some("runtime-manifest.json"),
+        url: "https://github.com/RebootFlume/voxflow/releases/download/runtime-assets/voxflow-pytorch-cuda130-py311-torch2.14.0-win-x64.zip",
+        // CUDA 运行库单独成包：torch 在 import 时会预加载 torch/lib 下全部 DLL，
+        // 缺任何一个被引用的都会让 import torch 失败 → 辅包必须与主包一起装、不能按需跳过。
+        aux_url: Some("https://github.com/RebootFlume/voxflow/releases/download/runtime-assets/voxflow-pytorch-cuda130-cuda13-libs.zip"),
+        aux_dir: "Lib/site-packages/torch/lib",
+        aux_files: CUDA130_AUX_FILES,
+        inner_dir: "",
+        target_dir: "pytorch-cuda130",
+        marker: "python.exe",
+        port_base: 0,
+        smoke_args: &["worker.py", "--smoke-test"],
+        smoke_probe: SmokeProbe::PythonWorker,
     },
 ];
 
@@ -152,36 +267,47 @@ fn pkg_dir(pkg: &RuntimePkg) -> PathBuf {
 /// 同时校验 aux_files（如 CUDA 运行库）完整 —— 主程序在但运行库缺失 = 未完成安装，
 /// 前端据此显示"需要修复/重新下载"（否则 CUDA 会静默回退 CPU）。
 pub fn is_runtime_installed(pkg: &RuntimePkg) -> bool {
-    // 框架未收录 → 与旧行为一致：视为未安装
-    let Some(dir) = dir_for_framework(pkg.framework) else {
-        return false;
-    };
+    let dir = runtime_dir_for(pkg);
     if !dir.join(pkg.marker).exists() {
         return false;
+    }
+    if let Some(manifest) = pkg.manifest {
+        if !runtime_manifest_matches(pkg, &dir.join(manifest)) {
+            return false;
+        }
     }
     pkg.aux_files.iter().all(|f| dir.join(f).exists())
 }
 
-/// 框架运行时诊断状态：ready=完整可用；incomplete=主程序在但运行库缺失（如缺 CUDA dll）；
+fn runtime_manifest_matches(pkg: &RuntimePkg, path: &Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(path) else { return false };
+    // 构建工具（Windows PowerShell 5.1）会写 UTF-8 BOM，serde_json 不接受 → 先剥掉
+    let raw = raw.trim_start_matches('\u{feff}');
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else { return false };
+    value.get("worker_protocol").and_then(|v| v.as_u64()) == Some(1)
+        && value.get("variant").and_then(|v| v.as_str()) == Some(pkg.variant)
+        && value.get("torch").and_then(|v| v.as_str()).is_some_and(|v| v.starts_with("2.14.0"))
+        && value.get("script").and_then(|v| v.as_str()) == Some("worker.py")
+}
 /// missing=主程序都未下载。
 pub fn runtime_diagnose(pkg: &RuntimePkg) -> (String, Vec<String>) {
     let d = runtime_dir_for(pkg);
     let marker = d.join(pkg.marker);
     if !marker.exists() {
-        // 未下载（可能目录为空或不存在）
         return ("missing".into(), vec![pkg.marker.to_string()]);
     }
-    let missing: Vec<String> = pkg
+    let mut missing: Vec<String> = pkg
         .aux_files
         .iter()
         .filter(|f| !d.join(f).exists())
         .map(|f| f.to_string())
         .collect();
-    if missing.is_empty() {
-        ("ready".into(), Vec::new())
-    } else {
-        ("incomplete".into(), missing)
+    if let Some(manifest) = pkg.manifest {
+        if !runtime_manifest_matches(pkg, &d.join(manifest)) {
+            missing.push(manifest.to_string());
+        }
     }
+    if missing.is_empty() { ("ready".into(), Vec::new()) } else { ("incomplete".into(), missing) }
 }
 
 /// 检测所有框架状态，返回 JSON（供前端展示）——三态：ready / incomplete / missing
@@ -192,7 +318,11 @@ pub fn runtime_status() -> serde_json::Value {
             let (state, missing) = runtime_diagnose(p);
             json!({
                 "framework": p.framework,
+                "engine": p.engine,
                 "name": p.name,
+                "variant": p.variant,
+                "supports_cpu": p.supports_cpu,
+                "supports_cuda": p.supports_cuda,
                 "version": p.version,
                 "installed": state == "ready",
                 "state": state,
@@ -205,6 +335,29 @@ pub fn runtime_status() -> serde_json::Value {
         "status": "runtime_status",
         "root": libs_root().display().to_string(),
         "packages": items,
+    })
+}
+
+/// 选择已安装且支持目标设备的运行时包。
+/// CPU 请求优先复用 CUDA 版 PyTorch；CUDA wheel 同时包含 CPU kernel。
+pub fn installed_runtime_for_device(engine: &str, device: &str) -> Option<&'static RuntimePkg> {
+    let wants_cuda = matches!(device.trim().to_ascii_lowercase().as_str(), "cuda" | "gpu");
+    RUNTIME_PACKAGES
+        .iter()
+        .filter(|p| p.engine == engine)
+        .filter(|p| if wants_cuda { p.supports_cuda } else { p.supports_cpu })
+        .filter(|p| is_runtime_installed(p))
+        .min_by_key(|p| if !wants_cuda && p.variant == "cuda130" { 0 } else { 1 })
+}
+
+/// 返回适合目标设备的默认下载包。已安装包优先，避免切换设备时重复下载。
+pub fn preferred_runtime_for_device(engine: &str, device: &str) -> Option<&'static RuntimePkg> {
+    installed_runtime_for_device(engine, device).or_else(|| {
+        let wants_cuda = matches!(device.trim().to_ascii_lowercase().as_str(), "cuda" | "gpu");
+        RUNTIME_PACKAGES.iter().find(|p| {
+            p.engine == engine
+                && if wants_cuda { p.supports_cuda } else { p.variant == "cpu" && p.supports_cpu }
+        })
     })
 }
 
@@ -383,6 +536,26 @@ fn download_to_file(
     Ok(())
 }
 
+fn verify_archive_sha256(path: &Path, expected: &str) -> Result<(), String> {
+    if expected.is_empty() { return Ok(()); }
+    let mut file = std::fs::File::open(path).map_err(|e| format!("open archive for hash: {e}"))?;
+    use std::io::Read;
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    let mut buf = [0u8; 1024 * 1024];
+    loop {
+        let n = file.read(&mut buf).map_err(|e| format!("read archive for hash: {e}"))?;
+        if n == 0 { break; }
+        digest.update(&buf[..n]);
+    }
+    let actual = format!("{:x}", digest.finalize());
+    if actual.eq_ignore_ascii_case(expected) {
+        Ok(())
+    } else {
+        Err(format!("SHA-256 校验失败：期望 {expected}，实际 {actual}"))
+    }
+}
+
 /// 下载 + 解压一个框架到 libs/（带进度事件，可取消）
 ///
 /// 逻辑（与主包/附件一视同仁，没有特殊处理）：
@@ -444,8 +617,10 @@ pub fn download_runtime(app: &tauri::AppHandle, framework: &str) -> Result<(), S
         100
     };
 
-    // 磁盘预检：归档与解压产物在解压期间并存 ≈ 2× 下载量（大小探测失败的包不参与）
-    let need = (main_size.unwrap_or(0) + aux_size.unwrap_or(0)) * 2;
+    // 磁盘预检：归档与解压产物在解压期间并存 = 下载量 + 解压量
+    // （解压量从数据表读取；未声明时按"与归档同量级"估算）
+    let downloaded = main_size.unwrap_or(0) + aux_size.unwrap_or(0);
+    let need = downloaded + pkg.unpacked_bytes.unwrap_or(downloaded);
     if need > 0 {
         if let Some(free) = crate::model_manager::free_bytes_for_dir(&root) {
             if free < need {
@@ -458,12 +633,12 @@ pub fn download_runtime(app: &tauri::AppHandle, framework: &str) -> Result<(), S
             }
         }
     }
-
-    download_to_file(&client, app, pkg.url, pkg.framework, "主程序", &main_arch, 0, main_end, &cancel)?;
+    download_to_file(&client, app, pkg.url, pkg.framework, "主包", &main_arch, 0, main_end, &cancel)?;
+    verify_archive_sha256(&main_arch, pkg.sha256)?;
     if let Some(path) = &aux_arch {
-        // 大小未知时附件区间退化为 [100,100]（只报字节，不回退进度条）
         let (s, e) = if merged { (main_end, 100) } else { (100, 100) };
         download_to_file(&client, app, pkg.aux_url.unwrap(), pkg.framework, "附加运行库", path, s, e, &cancel)?;
+        verify_archive_sha256(path, pkg.aux_sha256)?;
     }
 
     // 3. 解压（主包/附件独立目录；解压无进度，发"解压中"状态防 UI 假卡死）
@@ -573,6 +748,20 @@ fn smoke_test_runtime(pkg: &RuntimePkg) -> Result<(), String> {
     if !exe.exists() {
         return Err(format!("{} 不存在", exe.display()));
     }
+    if matches!(pkg.smoke_probe, SmokeProbe::PythonWorker) {
+        let output = std::process::Command::new(&exe)
+            .args(pkg.smoke_args)
+            .current_dir(&dir)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|e| format!("Python worker 试启动失败: {e}"))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if output.status.success() && stdout.contains("\"ok\": true") {
+            return Ok(());
+        }
+        return Err(format!("Python worker smoke test 失败：退出={}，stdout={}，stderr={}", output.status, stdout.trim(), stderr.trim()));
+    }
     // 随机端口（避开默认 8931/9002 与已运行实例冲突；基线来自数据表的 port_base）
     let port = 20000 + (std::process::id() as u16 % 1000) + pkg.port_base;
     let mut cmd = std::process::Command::new(&exe);
@@ -607,6 +796,7 @@ fn smoke_test_runtime(pkg: &RuntimePkg) -> Result<(), String> {
         SmokeProbe::StderrKeywords { exit_and_stderr_contains_any } => {
             (None, Some(*exit_and_stderr_contains_any))
         }
+        SmokeProbe::PythonWorker => unreachable!(),
     };
 
     // 轮询最多 6 秒：等就绪（HTTP 健康端点）或进程退出（无服务端点框架）
@@ -777,6 +967,10 @@ mod tests {
     fn test_dev_script_versions_match_packages() {
         let script = include_str!("../../../benchmarks/setup.ps1");
         for p in RUNTIME_PACKAGES {
+            // PyTorch assets use the separate runtime-assets pipeline.
+            if p.framework.starts_with("pytorch-") {
+                continue;
+            }
             let needle = p.version.trim_start_matches('v');
             assert!(
                 script.contains(needle),
@@ -805,10 +999,48 @@ mod tests {
             let ver = p["version"].as_str().unwrap_or("");
             assert!(!ver.is_empty(), "每个框架包必须带版本字段: {p}");
         }
-        // 调试：打印实际目录与安装状态
-        eprintln!("DEBUG libs_root: {}", libs_root().display());
-        for p in RUNTIME_PACKAGES {
-            eprintln!("DEBUG {} installed={} dir={}", p.framework, is_runtime_installed(p), pkg_dir(p).display());
-        }
+    }
+
+    #[test]
+    fn test_manifest_parsing_tolerates_bom_and_rejects_mismatch() {
+        let pkg = RUNTIME_PACKAGES.iter().find(|p| p.framework == "pytorch-cuda130").unwrap();
+        let dir = std::env::temp_dir().join(format!("voxflow-manifest-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("good.json");
+        std::fs::write(
+            &good,
+            "\u{feff}{\"worker_protocol\":1,\"variant\":\"cuda130\",\"torch\":\"2.14.0+cu130\",\"script\":\"worker.py\"}",
+        )
+        .unwrap();
+        assert!(runtime_manifest_matches(pkg, &good), "BOM 前缀不应导致 manifest 校验失败");
+
+        let wrong = dir.join("wrong.json");
+        std::fs::write(&wrong, "{\"worker_protocol\":1,\"variant\":\"cpu\",\"torch\":\"2.14.0+cu130\",\"script\":\"worker.py\"}").unwrap();
+        assert!(!runtime_manifest_matches(pkg, &wrong), "variant 不一致必须判定失败");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_pytorch_variants_share_engine_and_cpu_capability() {
+        let cpu = RUNTIME_PACKAGES.iter().find(|p| p.framework == "pytorch-cpu").unwrap();
+        let cuda = RUNTIME_PACKAGES.iter().find(|p| p.framework == "pytorch-cuda130").unwrap();
+        assert_eq!(cpu.engine, "pytorch");
+        assert_eq!(cuda.engine, "pytorch");
+        assert!(cpu.supports_cpu && !cpu.supports_cuda);
+        assert!(cuda.supports_cpu && cuda.supports_cuda);
+        assert!(cpu.unpacked_bytes.is_some() && cuda.unpacked_bytes.is_some());
+        assert!(cpu.sha256.len() == 64 && cuda.sha256.len() == 64);
+        // CPU 单包；CUDA 主包 + 运行库辅包（辅包必须与主包同装，缺任一行都不完整）
+        assert!(cpu.aux_url.is_none() && cpu.aux_sha256.is_empty());
+        assert_eq!(cuda.aux_dir, "Lib/site-packages/torch/lib");
+        assert_eq!(cuda.aux_sha256.len(), 64);
+        assert_eq!(cuda.aux_files, CUDA130_AUX_FILES);
+        assert!(cuda.aux_files.iter().all(|f| f.starts_with("Lib/site-packages/torch/lib/")));
+        assert!(
+            cuda.aux_files.iter().any(|f| f.ends_with("torch_cuda.dll")),
+            "辅包必须含 torch_cuda.dll，否则 import torch 必失败"
+        );
+        assert_eq!(preferred_runtime_for_device("pytorch", "cpu").unwrap().framework, "pytorch-cpu");
+        assert_eq!(preferred_runtime_for_device("pytorch", "cuda").unwrap().framework, "pytorch-cuda130");
     }
 }

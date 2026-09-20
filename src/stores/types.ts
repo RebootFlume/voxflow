@@ -82,6 +82,8 @@ export interface ModelItemState {
   engine?: string;
   /** 运行时包 key（gguf / onnx …，Rust 下发；用于运行门禁与包查询；缺省回退 format） */
   runtime_key?: string;
+  /** 该框架全部可用运行时包 key（Rust 下发；PyTorch 有 cpu / cuda130 两包，任一就绪即可） */
+  runtime_keys?: string[];
   /** 来源标签（如 github.com/k2-fsa/sherpa-onnx、huggingface.co/…，Rust 推导；前端只展示） */
   source: string;
   sizeGb: number;

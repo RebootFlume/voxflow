@@ -983,6 +983,26 @@ async fn cancel_runtime_download(framework: String) -> serde_json::Value {
     serde_json::json!({ "ok": ok })
 }
 
+/// 探测 PyTorch 运行时真实可用性：起 worker 子进程问 `runtime_info` 后关闭。
+///
+/// 「装了 CUDA 包」不等于「GPU 能用」（驱动过旧 / 无设备时 `cuda_available=false`），
+/// 这是唯一可信的判据。`device`: "cpu" / "cuda"。
+/// async + 阻塞池：首次 `import torch` 含冷启动，同步执行会冻结 UI。
+#[tauri::command]
+async fn rust_pytorch_device_info(device: String) -> serde_json::Value {
+    let dev = device.clone();
+    match tauri::async_runtime::spawn_blocking(move || inference::pytorch::probe_device(&dev)).await
+    {
+        Ok(Ok(info)) => serde_json::json!({ "ok": true, "device": device, "info": info }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "device": device, "error": e }),
+        Err(e) => serde_json::json!({
+            "ok": false,
+            "device": device,
+            "error": format!("设备探测线程失败: {e}"),
+        }),
+    }
+}
+
 /// 下载 + 解压推理框架运行时（libs）到 exe 旁 libs/
 /// 复用统一下载器（net）+ 代理 env + 解压，带进度事件
 #[tauri::command]
@@ -1105,6 +1125,7 @@ pub fn run() {
             get_data_root_info,
             download_runtime,
             cancel_runtime_download,
+            rust_pytorch_device_info,
             crate::data_root::rust_storage_model_root,
             tts::commands::rust_load_tts_model,
             tts::commands::rust_synthesize,

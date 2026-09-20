@@ -2,7 +2,7 @@ import { AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAppStore } from "@/stores";
 import { t } from "@/lib/i18n";
-import { runtimeKeyOf } from "@/lib/modelState";
+import { runtimeKeysOf } from "@/lib/modelState";
 
 /**
  * 缺少推理框架的全局横幅（可操作出口）。
@@ -22,12 +22,15 @@ export function RuntimeAlert() {
 
   if (!packages) return null;
 
-  // 已下载模型所依赖的框架里，哪些没就绪
+  // 已下载模型所依赖的框架里，哪些没就绪（同一框架有多个包时，任一就绪即不算缺）
   const needed = new Set<string>();
   for (const m of items) {
     if (m.state !== "downloaded") continue;
-    const key = runtimeKeyOf(m);
-    if (key) needed.add(key);
+    const keys = runtimeKeysOf(m);
+    if (keys.length === 0) continue;
+    const pkgs = keys.map((k) => packages.find((p) => p.framework === k)).filter(Boolean);
+    if (pkgs.some((p) => p!.state === "ready")) continue;
+    for (const k of keys) needed.add(k);
   }
   const broken = packages.filter((p) => needed.has(p.framework) && p.state !== "ready");
   if (broken.length === 0) return null;

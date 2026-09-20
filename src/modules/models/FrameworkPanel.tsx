@@ -1,16 +1,19 @@
 import { useEffect, useRef, useState } from "react";
-import { CheckCircle2, Download, Loader2, Lock, RefreshCw, X } from "lucide-react";
+import { CheckCircle2, Cpu, Download, Loader2, RefreshCw, X } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useAppStore } from "@/stores";
 import { t } from "@/lib/i18n";
-import { rustCancelRuntimeDownload, rustCheckRuntime, rustDownloadRuntime, rustVerifyRuntime } from "@/lib/tauri";
+import { rustCancelRuntimeDownload, rustCheckRuntime, rustDownloadRuntime, rustPyTorchDeviceInfo, rustVerifyRuntime } from "@/lib/tauri";
 
 interface RuntimePkg {
   framework: string;
+  engine?: string;
   name: string;
-  /** 运行时版本标签（Rust 下发，如 b10622 / v1.13.6） */
+  variant?: string;
+  supports_cpu?: boolean;
+  supports_cuda?: boolean;
   version: string;
   installed: boolean;
   state: "ready" | "incomplete" | "missing";
@@ -30,6 +33,8 @@ export function FrameworkPanel() {
   const setRuntimeDownload = useAppStore((s) => s.setRuntimeDownload);
   // 正在请求取消的框架（仅用于按钮 loading/防连点；终态清理由 store 事件驱动）
   const [cancelling, setCancelling] = useState<string | null>(null);
+  // PyTorch 设备探测结果（装了 CUDA 包 ≠ GPU 能用，必须问 worker 才算数）
+  const [deviceInfo, setDeviceInfo] = useState<Record<string, { ok: boolean; msg: string } | null>>({});
 
   const refresh = () => {
     rustCheckRuntime()
@@ -99,33 +104,37 @@ export function FrameworkPanel() {
     }
   };
 
-  // 框架描述文案查表（纯 i18n，未登记的框架不显示描述、不影响功能；
-  // 描述字段 Rust 未下发，故只能按运行时包 id 映射到 i18n key）
-  const frameworkMeta: Record<string, { descKey: string; future?: boolean }> = {
-    gguf: { descKey: "framework.desc.llama" },
-    onnx: { descKey: "framework.desc.sherpa" },
-    pytorch: { descKey: "framework.desc.pytorch", future: true },
+  // PyTorch 设备探测：起 worker 问 runtime_info（真实判据，不是看包在不在）
+  const doProbeDevice = async (fw: string) => {
+    const device: "cpu" | "cuda" = fw === "pytorch-cuda130" ? "cuda" : "cpu";
+    setDeviceInfo((v) => ({ ...v, [fw]: null }));
+    try {
+      const r = await rustPyTorchDeviceInfo(device);
+      if (!r.ok || !r.info) {
+        setDeviceInfo((v) => ({ ...v, [fw]: { ok: false, msg: r.error || t(locale, "framework.probeFail") } }));
+        return;
+      }
+      const i = r.info;
+      const msg =
+        device === "cuda"
+          ? i.cuda_available
+            ? `${i.torch} · CUDA ${i.cuda_version ?? "?"} · ${i.device_count} device(s)`
+            : `${i.torch} · ${t(locale, "framework.cudaUnavailable")}`
+          : `${i.torch} · Python ${i.python}`;
+      setDeviceInfo((v) => ({ ...v, [fw]: { ok: device !== "cuda" || i.cuda_available, msg } }));
+    } catch (e) {
+      setDeviceInfo((v) => ({ ...v, [fw]: { ok: false, msg: String(e) } }));
+    }
   };
 
-  // PyTorch 占位卡片（未注册到 Rust，纯展示）
-  const pytorchCard = (
-    <Card key="pytorch" className="opacity-70">
-      <CardContent className="flex items-center gap-3 py-4">
-        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-muted">
-          <Lock className="h-4 w-4 text-muted-foreground" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-medium">PyTorch</span>
-            <Badge variant="outline" className="text-[10px]">
-              {t(locale, "framework.comingSoon")}
-            </Badge>
-          </div>
-          <p className="text-xs text-muted-foreground">{t(locale, "framework.desc.pytorch")}</p>
-        </div>
-      </CardContent>
-    </Card>
-  );
+  // 框架描述文案查表；CPU/CUDA 变体由 Rust RuntimePkg 下发
+  const frameworkMeta: Record<string, { descKey: string }> = {
+    gguf: { descKey: "framework.desc.llama" },
+    onnx: { descKey: "framework.desc.sherpa" },
+    "pytorch-cpu": { descKey: "framework.desc.pytorch" },
+    "pytorch-cuda130": { descKey: "framework.desc.pytorch" },
+  };
+
 
   return (
     <div className="space-y-4">
@@ -169,6 +178,11 @@ export function FrameworkPanel() {
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <span className="text-sm font-medium">{pkg.name}</span>
+                        {pkg.variant ? (
+                          <span className="font-mono text-[11px] text-muted-foreground" title={pkg.variant}>
+                            {pkg.variant}
+                          </span>
+                        ) : null}
                         {pkg.version ? (
                           <span className="font-mono text-[11px] text-muted-foreground" title={pkg.version}>
                             {pkg.version}
@@ -189,8 +203,19 @@ export function FrameworkPanel() {
                         )}
                       </div>
                       <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                        {meta.descKey ? t(locale, meta.descKey) : ""}
+                        {pkg.framework === "pytorch-cpu"
+                          ? "PyTorch CPU runtime"
+                          : pkg.framework === "pytorch-cuda130"
+                            ? "PyTorch CUDA 13.0 runtime; CPU fallback supported"
+                            : meta.descKey
+                              ? t(locale, meta.descKey)
+                              : ""}
                       </p>
+                      {(pkg.supports_cpu || pkg.supports_cuda) && (
+                        <p className="text-[10px] text-muted-foreground">
+                          {pkg.supports_cpu ? "CPU" : ""}{pkg.supports_cpu && pkg.supports_cuda ? " · " : ""}{pkg.supports_cuda ? "CUDA" : ""}
+                        </p>
+                      )}
                       <p className="truncate font-mono text-[10px] text-muted-foreground/60">{pkg.dir}</p>
                       {verifyResult[pkg.framework] && (
                         <p
@@ -201,6 +226,17 @@ export function FrameworkPanel() {
                           }`}
                         >
                           {verifyResult[pkg.framework]!.msg}
+                        </p>
+                      )}
+                      {deviceInfo[pkg.framework] && (
+                        <p
+                          className={`mt-1 text-[11px] ${
+                            deviceInfo[pkg.framework]!.ok
+                              ? "text-emerald-600 dark:text-emerald-400"
+                              : "text-destructive"
+                          }`}
+                        >
+                          {deviceInfo[pkg.framework]!.msg}
                         </p>
                       )}
                       {dl.framework === pkg.framework && (
@@ -226,6 +262,17 @@ export function FrameworkPanel() {
                             <RefreshCw className="mr-1 h-3.5 w-3.5" />
                             {t(locale, "framework.verify")}
                           </Button>
+                          {pkg.engine === "pytorch" && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => void doProbeDevice(pkg.framework)}
+                              disabled={deviceInfo[pkg.framework] === null}
+                            >
+                              <Cpu className="mr-1 h-3.5 w-3.5" />
+                              {t(locale, "framework.probeDevice")}
+                            </Button>
+                          )}
                           <Button
                             size="sm"
                             variant="outline"
@@ -293,7 +340,6 @@ export function FrameworkPanel() {
                   </div>
                 );
               })}
-              {pytorchCard}
               <p className="pt-1 text-[11px] text-muted-foreground/70">
                 {t(locale, "framework.root", { path: root || "…" })}
               </p>

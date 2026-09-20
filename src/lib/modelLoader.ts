@@ -11,7 +11,7 @@
  */
 import { useAppStore } from "@/stores";
 import { rustLoadAsr, rustUnloadAsr, rustLoadTtsModel, rustUnloadTtsModel } from "@/lib/tauri";
-import { engineOf, runtimeKeyOf } from "@/lib/modelState";
+import { engineOf, runtimeKeyOf, runtimeKeysOf } from "@/lib/modelState";
 import { t } from "@/lib/i18n";
 
 /**
@@ -23,13 +23,16 @@ function runtimeGate(kind: "asr" | "tts", name: string): boolean {
   const item = s.models.items.find((i) => i.name === name);
   // 模型清单可能尚未到达（list_models 事件晚于启动加载）→ ASR 回退到持久化的运行时 key 偏好。
   // 两者都没有时不拦（交给 Rust 报错），不再按 kind 硬编码格式。
-  const key = runtimeKeyOf(item) ?? (kind === "asr" ? s.asr.framework : null);
+  const keys = runtimeKeysOf(item);
+  if (keys.length === 0 && kind === "asr" && s.asr.framework) keys.push(s.asr.framework);
   const pkgs = s.runtime.packages;
-  if (!pkgs || !key) return true; // 未检测到 / 无可判定的 key → 不拦（交给 Rust 报错）
-  const pkg = pkgs.find((p) => p.framework === key);
-  if (!pkg || pkg.state === "ready") return true;
+  if (!pkgs || keys.length === 0) return true; // 未检测到 / 无可判定的 key → 不拦（交给 Rust 报错）
+  // 任一包就绪即放行：PyTorch 的 cpu / cuda130 两个包共用同一个引擎
+  const candidates = keys.map((k) => pkgs.find((p) => p.framework === k)).filter(Boolean);
+  if (candidates.length === 0 || candidates.some((p) => p!.state === "ready")) return true;
+  const blocked = candidates.find((p) => p!.state !== "ready")!;
 
-  const msg = t(s.locale, "runtime.gate.blocked", { name: pkg.name });
+  const msg = t(s.locale, "runtime.gate.blocked", { name: blocked.name });
   s.setEngineStatus(kind, { model: name, status: "error", error: msg });
   if (kind === "asr") s.updateAsr({ modelStatus: "error" });
   else s.setTtsModelStatus("error");

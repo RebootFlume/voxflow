@@ -260,3 +260,19 @@ export function rustDownloadRuntime(framework: string): Promise<{ ok: boolean; f
 export function rustCancelRuntimeDownload(framework: string): Promise<{ ok: boolean }> {
   return invoke("cancel_runtime_download", { framework });
 }
+
+/** PyTorch 运行时设备探测（起 worker 问 runtime_info；装了 CUDA 包 ≠ GPU 能用） */
+export function rustPyTorchDeviceInfo(device: "cpu" | "cuda"): Promise<{
+  ok: boolean;
+  device: string;
+  info?: {
+    python: string;
+    torch: string;
+    cuda_available: boolean;
+    cuda_version: string | null;
+    device_count: number;
+  };
+  error?: string;
+}> {
+  return invoke("rust_pytorch_device_info", { device });
+}

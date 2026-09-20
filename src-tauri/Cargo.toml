@@ -40,4 +40,5 @@ llama-cpp-2 = "0.1"         # llama.cpp GGUF 推理
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "multipart", "json", "rustls-tls", "socks"] }
 tungstenite = "0.24"
 log = { version = "0.4", features = ["std"] }
+sha2 = "0.10"                                              # runtime asset SHA-256 verification
 tiny_http = "0.12"

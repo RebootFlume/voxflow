@@ -85,6 +85,17 @@ pub static FRAMEWORKS: &[FrameworkSpec] = &[
         // TTS 合成是一次性子进程：无常驻进程可探
         process_name: None,
     },
+    FrameworkSpec {
+        id: "pytorch",
+        engine: "torch",
+        // 名义上的运行时包 key（展示/过滤用）；实际按设备选用 pytorch-cpu 或 pytorch-cuda130，
+        // 前端门禁读 models JSON 的 runtime_keys（全部可用包），不靠这一个字段判定。
+        runtime_key: "pytorch-cpu",
+        main_exts: &[".safetensors", ".pth"],
+        file_policy: FilePolicy::Largest,
+        uses_mmproj: false,
+        process_name: Some("python"),
+    },
 ];
 
 /// 按引擎注册键查框架描述符
@@ -1445,6 +1456,14 @@ pub fn list_models_payload(kind: Option<&str>) -> Value {
         }
         // 能力字段（描述符驱动，前端语言/克隆 UI 据此渲染；见方案 4.4 决策 A）
         obj["languages"] = json!(spec.languages);
+        // 该框架的全部可用运行时包 key（PyTorch 有 cpu / cuda130 两个包）：
+        // 前端门禁按"任一就绪即可加载"判定，不再依赖单一 runtime_key
+        let keys: Vec<&'static str> = crate::inference::runtime_download::RUNTIME_PACKAGES
+            .iter()
+            .filter(|p| p.engine == spec.framework)
+            .map(|p| p.framework)
+            .collect();
+        obj["runtime_keys"] = json!(keys);
         obj["language_mode"] = json!(language_mode_str(spec.language_mode));
         obj["voice_mode"] = json!(voice_mode_json(spec.voice_mode));
         obj["supports_clone"] = json!(matches!(

@@ -40,10 +40,17 @@ impl Default for TtsRegistry {
 impl TtsRegistry {
     pub fn new() -> Self {
         Self {
-            slot: EngineSlot::new(vec![(
-                "sherpa",
-                Arc::new(SherpaTtsEngine::new()) as Arc<dyn TtsEngine>,
-            )]),
+            slot: EngineSlot::new(vec![
+                (
+                    "sherpa",
+                    Arc::new(SherpaTtsEngine::new()) as Arc<dyn TtsEngine>,
+                ),
+                (
+                    // PyTorch Python worker（Kokoro 等）；按需下载运行时
+                    "pytorch",
+                    crate::tts::engine::pytorch::shared(),
+                ),
+            ]),
         }
     }
 

@@ -16,6 +16,11 @@ pub mod commands;
 pub mod transcribe_chunks;
 pub mod runtime_paths;
 pub mod runtime_download;
+pub mod pytorch;
+pub mod pytorch_asr;
+
+#[cfg(test)]
+mod pytorch_e2e;
 
 #[cfg(test)]
 mod tests;

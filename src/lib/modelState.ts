@@ -51,6 +51,21 @@ export function runtimeKeyOf(
   return item.runtime_key || item.format || null;
 }
 
+/**
+ * 该模型可用的全部运行时包 key（Rust 下发 runtime_keys）。
+ *
+ * PyTorch 有 cpu / cuda130 两个包，任一就绪即可加载 —— 单靠 runtime_key 会误判为缺框架。
+ * 未下发时回退单 key，保持既有行为。
+ */
+export function runtimeKeysOf(
+  item: Pick<ModelItemState, "runtime_keys" | "runtime_key" | "format"> | undefined | null,
+): string[] {
+  if (!item) return [];
+  if (item.runtime_keys && item.runtime_keys.length > 0) return item.runtime_keys;
+  const key = runtimeKeyOf(item);
+  return key ? [key] : [];
+}
+
 /** 引擎展示名：Rust 下发的 engine 优先，缺失回退 runtime_key/format 原值（不做格式→引擎推导） */
 export function engineOf(
   item: Pick<ModelItemState, "engine" | "runtime_key" | "format"> | undefined | null,

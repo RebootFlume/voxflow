@@ -73,6 +73,8 @@ impl AsrRegistry {
                 ("gguf", Arc::new(llama_server::LlamaAsrAdapter::new()) as Arc<dyn AsrEngine>),
                 // onnx → sherpa-onnx websocket server（低端设备引擎）
                 ("onnx", Arc::new(sherpa_asr::SherpaAsrAdapter::new()) as Arc<dyn AsrEngine>),
+                // pytorch → 独立 Python worker（按需下载运行时；模型适配器在运行时白名单里）
+                ("pytorch", super::pytorch_asr::shared()),
             ]),
         }
     }

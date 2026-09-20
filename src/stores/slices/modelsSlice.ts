@@ -103,6 +103,9 @@ export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: Mod
             format: typeof m.format === "string" ? m.format : "",
             engine: typeof m.engine === "string" ? m.engine : undefined,
             runtime_key: typeof m.runtime_key === "string" ? m.runtime_key : undefined,
+            runtime_keys: Array.isArray(m.runtime_keys)
+              ? (m.runtime_keys.filter((k) => typeof k === "string") as string[])
+              : undefined,
             source: String(m.source ?? ""),
             sizeGb: Number(m.size_gb ?? 0),
             vramEstimateMb: typeof m.vram_estimate_mb === "number" ? m.vram_estimate_mb : undefined,

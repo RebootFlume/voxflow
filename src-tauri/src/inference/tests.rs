@@ -83,14 +83,15 @@ fn test_tts_inference_pipeline() {
 fn test_registry_engine_frameworks() {
     let r = crate::inference::registry::registry();
 
-    // 两个框架都注册了
+    // 三个框架都注册了
     assert!(r.engine("gguf").is_some());
     assert!(r.engine("onnx").is_some());
-    assert!(r.engine("pytorch").is_none(), "PyTorch 尚未注册");
+    assert!(r.engine("pytorch").is_some(), "PyTorch 应已注册");
 
     // adapter 的 framework 标识正确
     assert_eq!(r.engine("gguf").unwrap().framework(), "gguf");
     assert_eq!(r.engine("onnx").unwrap().framework(), "onnx");
+    assert_eq!(r.engine("pytorch").unwrap().framework(), "pytorch");
 }
 
 #[test]
@@ -101,8 +102,9 @@ fn test_registry_load_model_not_downloaded() {
     assert!(result.is_err(), "未知模型应报错，实际: {result:?}");
     let result = r.load_model("onnx", "Nonexistent-Model");
     assert!(result.is_err(), "未知模型应报错，实际: {result:?}");
+    // PyTorch 已注册但模型名不是 pytorch 模型 → 仍应报错（路由到 adapter 后由描述符校验拦下）
     let result = r.load_model("pytorch", "Qwen3-TTS");
-    assert!(result.is_err(), "未注册框架应报错");
+    assert!(result.is_err(), "未知模型应报错");
 }
 
 

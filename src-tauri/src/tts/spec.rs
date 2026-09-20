@@ -133,12 +133,27 @@ pub enum AsrBackendSpec {
     },
 }
 
+/// PyTorch Python worker 后端参数。
+///
+/// 模型目录只放权重与配置；**适配器 id 必须来自运行时内置白名单**（`scripts/build-pytorch-runtime.ps1`
+/// 写入 runtime-manifest.json 的 `adapters`，worker 只认这几个 id），模型包不得携带可执行代码。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PyTorchSpec {
+    /// worker 内置适配器 id（"whisper" = ASR，"kokoro" = TTS）
+    pub adapter: &'static str,
+    /// 语言提示（ASR 的转写语言 / TTS 的 G2P 语言），空 = 引擎默认
+    pub language: &'static str,
+    /// TTS 默认音色（对应模型目录 voices/<voice>.pt）；ASR 置空
+    pub voice: &'static str,
+}
+
 /// 引擎参数（按 kind 解释）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendSpec {
     Llama(AsrBackendSpec),
     SherpaWs(AsrBackendSpec),
     SherpaTts(SherpaTtsSpec),
+    PyTorch(PyTorchSpec),
 }
 
 /// 条目内文件的角色（加载端据此取值，不再"猜哪个文件是主模型"）
@@ -148,6 +163,8 @@ pub enum FileRole {
     Main,
     /// 多模态投影（GGUF 的音频编码器 mmproj）
     Mmproj,
+    /// 运行所需但不承担角色的附带文件（PyTorch 模型的 config.json / tokenizer / voices 等）
+    Extra,
 }
 
 /// 条目里的一个文件（相对仓库根 / 模型目录的文件名，可含子目录）
@@ -788,6 +805,88 @@ pub static SPECS: &[ModelSpec] = &[
             required_files: &["model.onnx", "tokens.txt"],
         }),
     },
+    // ══════════════ ASR：PyTorch Python worker（whisper）══════════════
+    ModelSpec {
+        id: "whisper-tiny-pt",
+        name: "Whisper-tiny-PT",
+        kind: ModelKind::Asr,
+        framework: "pytorch",
+        // revision 钉到 commit：模型文件可复现（revision "main" 会随上游更新漂移）
+        source: DownloadSource::HuggingFace {
+            repo: "openai/whisper-tiny",
+            revision: "169d4a4341b33bc18d8881c4b69c2e104e1cc0af",
+        },
+        entries: &[DownloadEntry {
+            id: "fp32",
+            label_zh: "FP32（多语，含中文）",
+            label_en: "FP32 (multilingual)",
+            default: true,
+            files: &[
+                EntryFile { role: FileRole::Main, name: "model.safetensors", size_mb: 145 },
+                EntryFile { role: FileRole::Extra, name: "config.json", size_mb: 1 },
+                EntryFile { role: FileRole::Extra, name: "generation_config.json", size_mb: 1 },
+                EntryFile { role: FileRole::Extra, name: "preprocessor_config.json", size_mb: 1 },
+                EntryFile { role: FileRole::Extra, name: "tokenizer.json", size_mb: 3 },
+                EntryFile { role: FileRole::Extra, name: "tokenizer_config.json", size_mb: 1 },
+                EntryFile { role: FileRole::Extra, name: "special_tokens_map.json", size_mb: 1 },
+                EntryFile { role: FileRole::Extra, name: "normalizer.json", size_mb: 1 },
+            ],
+        }],
+        size_gb: 0.15,
+        description_zh: "Whisper tiny · 多语 ASR · PyTorch 运行时 · 首个 PyTorch 适配模型（效果弱于 Qwen3-ASR）",
+        description_en: "Whisper tiny · multilingual ASR · PyTorch runtime · first PyTorch adapter model",
+        available: true,
+        cpu: "good",
+        extra_files: &[],
+        quant: None,
+        // ASR 条目的 languages 保持空（语言由 backend 的 PyTorchSpec.language 控制，见下）
+        languages: &[],
+        language_mode: LanguageMode::Fixed,
+        voice_mode: VoiceMode::Fixed,
+        backend: BackendSpec::PyTorch(PyTorchSpec {
+            adapter: "whisper",
+            language: "zh",
+            voice: "",
+        }),
+    },
+    // ══════════════ TTS：PyTorch Python worker（kokoro）══════════════
+    ModelSpec {
+        id: "kokoro-82m-pt",
+        name: "Kokoro-82M-PT",
+        kind: ModelKind::Tts,
+        framework: "pytorch",
+        source: DownloadSource::HuggingFace {
+            repo: "hexgrad/Kokoro-82M",
+            revision: "f3ff3571791e39611d31c381e3a41a3af07b4987",
+        },
+        entries: &[DownloadEntry {
+            id: "v1_0-zh",
+            label_zh: "v1.0 + 中文音色（女/男各一）",
+            label_en: "v1.0 + zh voices (female/male)",
+            default: true,
+            files: &[
+                EntryFile { role: FileRole::Main, name: "kokoro-v1_0.pth", size_mb: 313 },
+                EntryFile { role: FileRole::Extra, name: "config.json", size_mb: 1 },
+                EntryFile { role: FileRole::Extra, name: "voices/zf_xiaobei.pt", size_mb: 1 },
+                EntryFile { role: FileRole::Extra, name: "voices/zm_yunxi.pt", size_mb: 1 },
+            ],
+        }],
+        size_gb: 0.32,
+        description_zh: "Kokoro-82M · 中文 TTS · PyTorch 运行时（vendor 推理代码 + misaki 中文 G2P）",
+        description_en: "Kokoro-82M · Chinese TTS · PyTorch runtime (vendored inference + misaki zh G2P)",
+        available: true,
+        cpu: "good",
+        extra_files: &[],
+        quant: None,
+        languages: &["zh"],
+        language_mode: LanguageMode::Fixed,
+        voice_mode: VoiceMode::Fixed,
+        backend: BackendSpec::PyTorch(PyTorchSpec {
+            adapter: "kokoro",
+            language: "zh",
+            voice: "zf_xiaobei",
+        }),
+    },
 ];
 
 #[cfg(test)]
@@ -900,7 +999,9 @@ mod tests {
                         _ => None,
                     })
                     .collect(),
-                BackendSpec::Llama(_) | BackendSpec::SherpaWs(_) => Vec::new(),
+                BackendSpec::Llama(_) | BackendSpec::SherpaWs(_) | BackendSpec::PyTorch(_) => {
+                    Vec::new()
+                }
             };
             let dests: Vec<&str> = m.extra_files.iter().map(|f| f.dest_rel).collect();
             assert_eq!(rels.len(), dests.len(), "{}: ModelsRootFile 数 != extra_files 数", m.id);
@@ -952,16 +1053,19 @@ mod tests {
         for m in SPECS.iter().filter(|m| m.kind == ModelKind::Tts) {
             assert!(!m.languages.is_empty(), "{} 必须声明 languages", m.name);
             assert!(
-                matches!(m.backend, BackendSpec::SherpaTts(_)),
-                "{} 必须为 SherpaTts 后端",
+                matches!(m.backend, BackendSpec::SherpaTts(_) | BackendSpec::PyTorch(_)),
+                "{} 必须为 SherpaTts 或 PyTorch 后端",
                 m.name
             );
         }
         for m in SPECS.iter().filter(|m| m.kind == ModelKind::Asr) {
             assert!(m.languages.is_empty(), "{} 不应声明 languages", m.name);
             assert!(
-                matches!(m.backend, BackendSpec::Llama(_) | BackendSpec::SherpaWs(_)),
-                "{} 后端必须为 Llama/SherpaWs",
+                matches!(
+                    m.backend,
+                    BackendSpec::Llama(_) | BackendSpec::SherpaWs(_) | BackendSpec::PyTorch(_)
+                ),
+                "{} 后端必须为 Llama/SherpaWs/PyTorch",
                 m.name
             );
         }
@@ -1016,6 +1120,8 @@ mod tests {
                 (ModelKind::Asr, BackendSpec::Llama(_))
                     | (ModelKind::Asr, BackendSpec::SherpaWs(_))
                     | (ModelKind::Tts, BackendSpec::SherpaTts(_))
+                    | (ModelKind::Asr, BackendSpec::PyTorch(_))
+                    | (ModelKind::Tts, BackendSpec::PyTorch(_))
             );
             assert!(
                 ok,
@@ -1033,6 +1139,7 @@ mod tests {
                 BackendSpec::Llama(_) => spec.framework == "gguf",
                 BackendSpec::SherpaWs(_) => spec.framework == "onnx",
                 BackendSpec::SherpaTts(_) => spec.framework == "sherpa",
+                BackendSpec::PyTorch(_) => spec.framework == "pytorch",
             };
             assert!(
                 fw_ok,
