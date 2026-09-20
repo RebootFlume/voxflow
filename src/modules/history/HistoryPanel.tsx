@@ -39,7 +39,8 @@ export function HistoryPanel() {
               {t(locale, "history.empty")}
             </div>
           ) : (
-            [...filtered].reverse().map((r) => (
+            // records 已是「最新在前」，不再 reverse（此前 reverse + loadAllHistory 倒序装载互相抵消，导致重启后最旧的在最上）
+            filtered.map((r) => (
               <div key={r.id} className="group flex items-start justify-between gap-3 px-4 py-3">
                 <div className="min-w-0 space-y-1">
                   <p className="truncate text-sm">{r.text}</p>

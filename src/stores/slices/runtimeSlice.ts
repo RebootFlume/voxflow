@@ -44,7 +44,8 @@ export const createRuntimeSlice = (set: (partial: Partial<RuntimeSlice> | ((s: R
     set((s) => ({
       history: {
         ...s.history,
-        records: [...s.history.records, { id: Date.now(), text, time: new Date().toLocaleString() }].slice(-500),
+        // 顺序不变式：records[0] 恒为最新（loadAllHistory 亦按 id 倒序装载）—— 列表正序渲染即为「新的在上」
+        records: [{ id: Date.now(), text, time: new Date().toLocaleString() }, ...s.history.records].slice(0, 500),
       },
     })),
   removeHistoryRecord: (id) =>

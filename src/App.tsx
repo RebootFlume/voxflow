@@ -39,7 +39,6 @@ export default function App() {
   const activeModule = useAppStore((s) => s.activeModule);
   const activeSubMenu = useAppStore((s) => s.activeSubMenu);
   const locale = useAppStore((s) => s.locale);
-  const isRuntimeLogs = activeModule === "history" && activeSubMenu === "runtime";
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-background">
@@ -49,8 +48,8 @@ export default function App() {
         <ActivityBar />
         <Sidebar />
         <main className="min-w-0 flex-1 overflow-hidden">
-          <div className={isRuntimeLogs ? "flex h-full flex-col p-4" : "flex h-full w-full flex-col"}>
-            {/* 紧凑页面头部（对齐 llm-gateway PageHeader 风格） */}
+          <div className="flex h-full w-full flex-col">
+            {/* 紧凑页面头部（对齐 llm-gateway PageHeader 风格）：所有二级菜单同一套表头 */}
             <div className="flex h-14 shrink-0 items-center gap-2 border-b border-border px-4">
               <ModuleIcon />
               <h2 className="truncate text-sm font-medium text-foreground">

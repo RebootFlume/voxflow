@@ -44,6 +44,11 @@ export const TTS_SUB_HEADING: Record<string, string> = {
   synthesize: "submenu.synthesize",
 };
 
+export const HISTORY_SUB_HEADING: Record<string, string> = {
+  records: "submenu.records",
+  runtime: "submenu.runtime",
+};
+
 // ---- Sub-menu label keys (for Sidebar) ----
 
 export const SUB_MENU_LABEL_KEYS: Record<string, string> = {
@@ -94,6 +99,9 @@ export function resolveHeading(
   }
   if (activeModule === "tts" && TTS_SUB_HEADING[activeSubMenu]) {
     return t(locale, TTS_SUB_HEADING[activeSubMenu]);
+  }
+  if (activeModule === "history" && HISTORY_SUB_HEADING[activeSubMenu]) {
+    return t(locale, HISTORY_SUB_HEADING[activeSubMenu]);
   }
   return t(locale, HEADING_KEYS[activeModule]);
 }
