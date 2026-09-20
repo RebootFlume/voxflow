@@ -40,9 +40,30 @@ function runtimeGate(kind: "asr" | "tts", name: string): boolean {
   return false;
 }
 
+/**
+ * 全局加载门禁：任一引擎加载中禁止再发起加载。
+ *
+ * 为什么要有：Rust 侧 ASR registry 与 TtsRegistry 各自互斥，并发加载本身不会互相改状态，
+ * 但 ASR 的显存预检（`rust_check_vram`）是**加载前读一次**全卡占用 —— 读完之后另一个引擎才开始
+ * 加载的话，那个"可用显存"就是过期数字，两个模型加起来可能超显存。所以串行化加载。
+ *
+ * 这里只做竞态兜底：界面在加载中已禁用入口（`selectLoadingKind`）。真命中时写日志而不是
+ * 静默 return —— 点了没反应会让用户以为程序卡了，且排查时毫无线索。
+ */
+function blockedByLoading(target: "asr" | "tts"): boolean {
+  const s = useAppStore.getState();
+  const busy = s.engines.asr.status === "loading" ? "asr" : s.engines.tts.status === "loading" ? "tts" : null;
+  if (!busy) return false;
+  const msg = t(s.locale, "model.gate.busy", { busy: busy.toUpperCase(), target: target.toUpperCase() });
+  s.addLog(`[model] ${msg}`, "warn");
+  return true;
+}
+
 /** 加载 ASR 引擎（统一入口：路由在 Rust，前端只传模型名+设备） */
 export function loadAsrModel(name: string, device: string): Promise<void> {
   const s = useAppStore.getState();
+  // 全局门禁：与 TTS 共用一处实现，两个方向都拦
+  if (blockedByLoading("asr")) return Promise.resolve();
   // 前置门禁：缺框架直接给结论
   if (!runtimeGate("asr", name)) return Promise.resolve();
   // 乐观 loading（立即反馈）；框架标识全部来自 Rust 下发的清单字段，不做格式→引擎推导
@@ -92,10 +113,8 @@ export function loadTtsModel(name: string, device: string): Promise<void> {
     s.updateTts({ device });
     return Promise.resolve();
   }
-  // 全局门禁：任一引擎加载中禁止再发起加载
-  if (s.engines.asr.status === "loading" || s.engines.tts.status === "loading") {
-    return Promise.resolve();
-  }
+  // 全局门禁：与 ASR 共用一处实现，两个方向都拦（命中写日志，不静默丢弃）
+  if (blockedByLoading("tts")) return Promise.resolve();
   // 前置门禁：缺框架直接给结论（不进 loading、不起进程）
   if (!runtimeGate("tts", name)) return Promise.resolve();
   // 乐观阶段先把框架偏好切到这个模型的框架：否则过滤后的列表会把刚点中的模型自己藏起来

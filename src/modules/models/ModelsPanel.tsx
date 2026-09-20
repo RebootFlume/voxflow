@@ -23,7 +23,7 @@ import { useAppStore, type ModelItemState } from "@/stores";
 import { t } from "@/lib/i18n";
 import { openPath, pickFolder, sendToSidecar } from "@/lib/tauri";
 import { loadAsrModel, loadTtsModel, unloadAsrModel, unloadTtsModel } from "@/lib/modelLoader";
-import { computeIsLoaded, engineOf, runtimeKeyOf } from "@/lib/modelState";
+import { computeIsLoaded, engineOf, runtimeKeyOf, selectLoadingKind } from "@/lib/modelState";
 import { FrameworkPanel } from "./FrameworkPanel";
 
 function refreshModels() {
@@ -204,8 +204,8 @@ function ModelRow({ name }: { name: string }) {
 
   if (!item) return null;
   const it = item;
-  // 任一引擎加载中 → 禁止加载/卸载/删除（防止快速切换并发）
-  const anyLoading = useAppStore((s) => s.engines.asr.status === "loading" || s.engines.tts.status === "loading");
+  // 任一引擎加载中 → 禁止加载/卸载/删除（防止快速切换并发）；判定与门禁、卡片禁用同一处
+  const anyLoading = useAppStore(selectLoadingKind) !== null;
 
   const isLoaded = computeIsLoaded(it.kind, it.name);
   const isDownloaded = it.state === "downloaded" || isLoaded;

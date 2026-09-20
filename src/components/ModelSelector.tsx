@@ -1,7 +1,7 @@
 import { useAppStore, type ModelItemState, type ModelFramework } from "@/stores";
 import { t } from "@/lib/i18n";
 import { Badge } from "@/components/ui/badge";
-import { belongsToFramework, computeIsLoaded, engineOf, runtimeKeyOf, runtimeKeysOf } from "@/lib/modelState";
+import { belongsToFramework, computeIsLoaded, engineOf, runtimeKeyOf, runtimeKeysOf, selectLoadingKind } from "@/lib/modelState";
 
 const EMPTY_ITEMS: ModelItemState[] = [];
 
@@ -62,6 +62,8 @@ export function ModelSelector({ kind, selected, onSelect, formatFilter, download
   const engineStatus = useAppStore((s) => s.engines?.[kind]?.status ?? "idle");
   const engineError = useAppStore((s) => s.engines?.[kind]?.error ?? null);
   const runtimePackages = useAppStore((s) => s.runtime.packages);
+  // 任一引擎加载中 → 卡片不可点：门禁会拦下这次加载，但那是点完之后的事（表现为点了没反应）
+  const loading = useAppStore(selectLoadingKind) !== null;
 
   const locale = useAppStore((s) => s.locale);
 
@@ -117,11 +119,16 @@ export function ModelSelector({ kind, selected, onSelect, formatFilter, download
         return (
           <div
             key={m.name}
-            onClick={() => onSelect(m.name)}
-            className={`flex items-center justify-between rounded-lg border p-3 cursor-pointer transition-all ${
-              isSelected
-                ? "border-primary bg-primary/5 ring-1 ring-primary/20"
-                : "border-border hover:border-primary/40 hover:bg-muted/50"
+            onClick={() => {
+              if (!loading) onSelect(m.name);
+            }}
+            title={loading ? t(locale, "model.gate.cardDisabled") : undefined}
+            className={`flex items-center justify-between rounded-lg border p-3 transition-all ${
+              loading
+                ? "cursor-not-allowed opacity-60"
+                : isSelected
+                  ? "cursor-pointer border-primary bg-primary/5 ring-1 ring-primary/20"
+                  : "cursor-pointer border-border hover:border-primary/40 hover:bg-muted/50"
             }`}
           >
             <div className="min-w-0">

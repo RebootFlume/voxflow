@@ -7,7 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ModelSelector } from "@/components/ModelSelector";
 import { ModelStatusBadge } from "@/components/ModelStatusBadge";
 import { useAppStore } from "@/stores";
-import { computeIsLoaded, runtimeKeyOf } from "@/lib/modelState";
+import { computeIsLoaded, runtimeKeyOf, selectLoadingKind } from "@/lib/modelState";
 import { VolumeWave } from "@/components/VolumeWave";
 import { t } from "@/lib/i18n";
 import { rustCheckVram, sendToSidecar } from "@/lib/tauri";
@@ -221,6 +221,8 @@ export function AsrPanel() {
   const runtimePackages = useAppStore((s) => s.runtime.packages);
   // 用户主动加载的显存预检（启动自动加载不走这里）
   const vramGuard = useVramGuard();
+  // 加载中禁用"会发起加载"的入口（重载按钮）：门禁会拦下请求，但那是点完之后的事
+  const loading = useAppStore(selectLoadingKind) !== null;
 
   // 框架下拉项：ASR 模型清单里的运行时包 key 去重（顺序 = 清单顺序，确定性）；
   // label 优先取运行时包名，无包则直接用 key —— 新增框架无需改前端
@@ -309,6 +311,7 @@ export function AsrPanel() {
                 </div>
                 <Button
                   size="sm"
+                  disabled={loading}
                   onClick={() => void vramGuard.ask(asr.model, asr.device)}
                 >
                   <RotateCw className="mr-1.5 h-3.5 w-3.5" />

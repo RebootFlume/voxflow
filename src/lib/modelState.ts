@@ -196,3 +196,18 @@ export function belongsToFramework(
 ): boolean {
   return Boolean(framework) && runtimeKeysOf(item).includes(framework);
 }
+
+/**
+ * 任一引擎加载中 → 返回是哪一类（React selector）。
+ *
+ * 加载中必须禁用所有"会发起加载"的入口（模型卡片、框架/设备下拉）：`modelLoader` 里的
+ * 全局门禁会拦下这些请求，但拦下来时用户已经点完了 —— 表现为"点了没反应"。
+ * 门禁与禁用必须成对，且共用这一个判定。
+ */
+export function selectLoadingKind(s: {
+  engines: { asr?: { status?: string } | null; tts?: { status?: string } | null };
+}): "asr" | "tts" | null {
+  if (s.engines?.asr?.status === "loading") return "asr";
+  if (s.engines?.tts?.status === "loading") return "tts";
+  return null;
+}

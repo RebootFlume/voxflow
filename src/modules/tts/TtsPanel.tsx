@@ -28,7 +28,7 @@ import {
   rustTtsVoiceUse,
   type TtsVoiceItem,
 } from "@/lib/tauri";
-import { runtimeKeyOf, supportsClone, ttsModelInfoOf } from "@/lib/modelState";
+import { runtimeKeyOf, selectLoadingKind, supportsClone, ttsModelInfoOf } from "@/lib/modelState";
 import { useAudioPreview } from "@/lib/useAudioPreview";
 import { loadTtsModel, switchTtsFramework } from "@/lib/modelLoader";
 import { useExportDir } from "@/lib/useExportDir";
@@ -44,6 +44,8 @@ function ModelDevicePage() {
   const locale = useAppStore((s) => s.locale);
   const modelItems = useAppStore((s) => s.models.items);
   const runtimePackages = useAppStore((s) => s.runtime.packages);
+  // 加载中禁用"会发起加载"的两个下拉：门禁会拦下请求，但那是点完之后的事（下拉会静默弹回原位）
+  const loading = useAppStore(selectLoadingKind) !== null;
 
   // 框架下拉项：TTS 模型清单里的运行时包 key 去重（顺序 = 清单顺序，确定性）；
   // label 优先取运行时包名，无包则直接用 key —— 目前只有 sherpa 一项也照常显示，接入新框架无需改前端
@@ -71,6 +73,7 @@ function ModelDevicePage() {
         <CardContent>
           <Select
             value={tts.device}
+            disabled={loading}
             onValueChange={(device) => {
               void loadTtsModel(tts.model, device);
             }}
@@ -96,7 +99,7 @@ function ModelDevicePage() {
           {/* 推理框架（运行时包）：模型与框架成对切换 —— 选这里的框架会自动加载该框架下的模型 */}
           <div className="flex items-center gap-3">
             <label className="shrink-0 text-sm font-medium">{t(locale, "tts.framework.label")}</label>
-            <Select value={tts.framework} onValueChange={(framework) => switchTtsFramework(framework)}>
+            <Select value={tts.framework} disabled={loading} onValueChange={(framework) => switchTtsFramework(framework)}>
               <SelectTrigger className="w-56">
                 <SelectValue />
               </SelectTrigger>
