@@ -16,8 +16,8 @@ let stopCurrent: (() => void) | null = null;
 /**
  * 应用内试听：读取音频字节（`rust_read_audio`）→ Blob → `<audio>` 播放。
  *
- * 不用 `openPath` 的原因见 Rust 侧注释：那条路依赖系统默认播放器 + `opener:allow-open-path` 权限，
- * 本项目没有该权限 ⇒ 点了没反应。这里在应用内放音，既能响也能给出"在播/停止"的反馈。
+ * 不走"交给系统默认播放器"那条路（见 Rust 侧 `rust_read_audio` 注释）：它依赖 `.wav` 的文件关联，
+ * 没关联时点了没反应。这里在应用内放音，既能响也能给出"在播/停止"的反馈。
  */
 export function useAudioPreview() {
   /** 正在播放的文件路径；空串 = 没在播 */

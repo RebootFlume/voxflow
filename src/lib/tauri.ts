@@ -32,10 +32,9 @@ export async function pickFolder(title: string, defaultPath?: string): Promise<s
   return typeof result === "string" ? result : null;
 }
 
-/** 用系统文件管理器打开目录 */
 /**
  * 读取音频文件字节（Rust 侧 `rust_read_audio` 返回裸字节 ⇒ 前端拿到 ArrayBuffer）。
- * 供应用内试听；比 `openPath` 可靠（不依赖系统默认播放器与 opener 权限）。
+ * 供应用内试听；比走系统默认播放器可靠（不依赖文件关联，也不依赖 opener 权限）。
  */
 export async function rustReadAudio(path: string): Promise<ArrayBuffer> {
   const r = await invoke<ArrayBuffer | number[]>("rust_read_audio", { path });
@@ -43,8 +42,15 @@ export async function rustReadAudio(path: string): Promise<ArrayBuffer> {
   return new Uint8Array(r).buffer;
 }
 
-export function openPath(path: string): Promise<void> {
-  return import("@tauri-apps/plugin-opener").then((m) => m.openPath(path));
+/**
+ * 用系统文件管理器打开目录（Rust 侧调 explorer / open / xdg-open）。
+ *
+ * 此前用 `@tauri-apps/plugin-opener` 的 `openPath`：该插件既没在 builder 注册，
+ * 权限也只有 `opener:default`（不含 `opener:allow-open-path`）—— 点了没有任何反应。
+ * 改由 Rust 命令执行，失败时返回可读原因。
+ */
+export function rustOpenInExplorer(path: string): Promise<void> {
+  return invoke<void>("rust_open_in_explorer", { path });
 }
 
 // ============================================================

@@ -578,6 +578,35 @@ async fn decode_audio_file(path: String) -> Result<serde_json::Value, String> {
 // Rust 原生推理引擎命令
 // ============================================================
 
+/// 在系统文件管理器里打开目录（Windows 资源管理器 / macOS Finder / Linux 文件管理器）。
+///
+/// 为什么不沿用前端 `@tauri-apps/plugin-opener` 的 `openPath`：
+///   ① 该项目只申请了 `opener:default`，其中**不含** `opener:allow-open-path`，运行时一律被拒；
+///   ② 插件也从未在 builder 里注册（`tauri_plugin_opener::init()` 缺失）。
+///   两条叠加 ⇒「打开目录」点了没有任何反应（用户在下载设置里看到的正是这个）。
+/// 这里由 Rust 直接调系统命令，不扩大前端权限面，失败时能返回可读原因。
+///
+/// 只做护栏：路径必须存在（避免把任意字符串丢给 shell）。Explorer 对不存在的路径会静默失败，
+/// 所以这个检查是必要的。
+#[tauri::command]
+fn rust_open_in_explorer(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Err(format!("路径不存在: {path}"));
+    }
+    #[cfg(target_os = "windows")]
+    let mut cmd = std::process::Command::new("explorer");
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = std::process::Command::new("xdg-open");
+    cmd.arg(p);
+    // Windows 的 explorer.exe 即使成功也返回非零退出码，因此只看能否启动进程
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| format!("打开目录失败: {e}"))
+}
+
 /// 加载 ASR 模型
 /// Rust 原生音频设备枚举（替代 Python list_audio_devices）
 #[tauri::command]
@@ -1121,6 +1150,7 @@ pub fn run() {
             rust_unload_asr,
             rust_transcribe_llama,
             check_runtime,
+            rust_open_in_explorer,
             rust_verify_runtime,
             get_data_root_info,
             download_runtime,
@@ -1181,5 +1211,18 @@ mod wmi_parse_tests {
     #[test]
     fn empty_input_yields_no_rows() {
         assert!(parse_wmi_rows("").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod open_in_explorer_tests {
+    use super::rust_open_in_explorer;
+
+    /// 路径不存在必须报错，而不是把任意字符串交给文件管理器。
+    /// （Explorer 对不存在的路径静默失败，没有这道检查用户只会看到"点了没反应"。）
+    #[test]
+    fn rejects_missing_path() {
+        let err = rust_open_in_explorer("D:/__voxflow_no_such_dir__".to_string()).unwrap_err();
+        assert!(err.contains("路径不存在"), "错误信息应说明原因: {err}");
     }
 }

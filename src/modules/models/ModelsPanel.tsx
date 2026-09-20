@@ -21,7 +21,7 @@ import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useAppStore, type ModelItemState } from "@/stores";
 import { t } from "@/lib/i18n";
-import { openPath, pickFolder, sendToSidecar } from "@/lib/tauri";
+import { pickFolder, rustOpenInExplorer, sendToSidecar } from "@/lib/tauri";
 import { loadAsrModel, loadTtsModel, unloadAsrModel, unloadTtsModel } from "@/lib/modelLoader";
 import { belongsToFramework, computeIsLoaded, engineOf, frameworkOptionsOf, runtimeKeyOf, selectLoadingKind } from "@/lib/modelState";
 import { FrameworkPanel } from "./FrameworkPanel";
@@ -62,6 +62,8 @@ function SettingsPage() {
   const downloading = useAppStore((s) => (s.models.items ?? []).some((i) => i.state === "downloading"));
   const [changing, setChanging] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  // 打开目录失败原因（就地在卡片里显示，比只写运行日志更容易被看到）
+  const [openErr, setOpenErr] = useState("");
 
   const [proxyDraft, setProxyDraft] = useState(proxy ?? "");
   useEffect(() => setProxyDraft(proxy ?? ""), [proxy]);
@@ -98,6 +100,19 @@ function SettingsPage() {
     }
   }, [locale, modelRoot, downloading, changing]);
 
+  /** 打开模型目录：失败（路径不存在 / 无法调起文件管理器）时给出可读原因，不再静默 */
+  const doOpenFolder = useCallback(async () => {
+    if (!modelRoot) return;
+    try {
+      await rustOpenInExplorer(modelRoot);
+      setOpenErr("");
+    } catch (e) {
+      const msg = String(e);
+      setOpenErr(msg);
+      useAppStore.getState().addLog(`[models] 打开目录失败: ${msg}`, "error");
+    }
+  }, [modelRoot]);
+
   return (
     <Card>
       <CardHeader>
@@ -116,11 +131,12 @@ function SettingsPage() {
             {changing ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
             {t(locale, "models.storage.change")}
           </Button>
+          {/* 与「变更…」同 variant/size：此前一个是 outline、一个是 ghost，同一行里两套样式 */}
           <Button
-            variant="ghost"
+            variant="outline"
             size="sm"
             disabled={!modelRoot}
-            onClick={() => modelRoot && void openPath(modelRoot)}
+            onClick={() => void doOpenFolder()}
           >
             <FolderOpen className="h-4 w-4" />
             {t(locale, "models.storage.open")}
@@ -155,6 +171,7 @@ function SettingsPage() {
           )}
         </div>
 
+        {openErr && <p className="text-xs text-destructive">{openErr}</p>}
         {notice && <p className="text-xs text-emerald-600 dark:text-emerald-400">{notice}</p>}
       </CardContent>
     </Card>
