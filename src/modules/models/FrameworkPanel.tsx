@@ -176,12 +176,6 @@ export function FrameworkPanel() {
         <>
           {packages.map((pkg) => {
             const meta = frameworkMeta[pkg.framework] ?? { descKey: "" };
-            // 同名多包（PyTorch 的 cpu / cuda130）→ 变体写进名称，不再单独挂一枚变体标签：
-            // 此前 "PyTorch [CUDA130] [CPU] [CUDA] [未下载]" 四枚标签里，变体与状态、能力互相看起来
-            // 都像"同一个东西"，标签越多越难读。单包框架（llama / sherpa）名称保持原样。
-            const sameNameCount = packages.filter((p) => p.name === pkg.name).length;
-            const displayName =
-              sameNameCount > 1 && pkg.variant ? `${pkg.name} (${pkg.variant})` : pkg.name;
             return (
               <div key={pkg.framework} className="rounded-lg border">
                 {/* 主行：状态图标 + 名称/变体/版本/状态 + 右侧动作（与模型行同构） */}
@@ -203,11 +197,18 @@ export function FrameworkPanel() {
                         宽度不足时由说明（flex-1，省略号）先压缩，overflow-hidden 兜底，
                         避免内联长文本画到右侧按钮底下。 */}
                     <div className="flex min-w-0 items-center gap-2 overflow-hidden">
-                      <span className="shrink-0 text-sm font-medium" title={pkg.version || undefined}>
-                        {displayName}
-                      </span>
-                      {/* 标签一律紧跟名称（前面）：能力（CPU / CUDA）→ 状态。
-                          顺序与含义单一：能力 = 能在什么设备上跑，状态 = 装了没。 */}
+                      <span className="shrink-0 text-sm font-medium">{pkg.name}</span>
+                      {/* 版本号：PyTorch 的版本串自带变体（2.14.0-py311-cpu / -cuda130），
+                          所以不再另挂变体标签、名称也不带后缀 —— 同一信息只出现一次； */}
+                      {pkg.version ? (
+                        <span
+                          className="shrink-0 font-mono text-[11px] text-muted-foreground"
+                          title={pkg.version}
+                        >
+                          {pkg.version}
+                        </span>
+                      ) : null}
+                      {/* 标签一律紧跟名称：能力（CPU / CUDA）→ 状态 */}
                       {pkg.supports_cpu && (
                         <Badge variant="outline" className={FRAMEWORK_CHIP} title={t(locale, "framework.cap.cpu")}>
                           CPU
