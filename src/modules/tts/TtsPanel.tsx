@@ -28,7 +28,7 @@ import {
   rustTtsVoiceUse,
   type TtsVoiceItem,
 } from "@/lib/tauri";
-import { runtimeKeyOf, selectLoadingKind, supportsClone, ttsModelInfoOf } from "@/lib/modelState";
+import { frameworkOptionsOf, selectLoadingKind, supportsClone, ttsModelInfoOf } from "@/lib/modelState";
 import { useAudioPreview } from "@/lib/useAudioPreview";
 import { loadTtsModel, switchTtsFramework } from "@/lib/modelLoader";
 import { useExportDir } from "@/lib/useExportDir";
@@ -47,22 +47,9 @@ function ModelDevicePage() {
   // 加载中禁用"会发起加载"的两个下拉：门禁会拦下请求，但那是点完之后的事（下拉会静默弹回原位）
   const loading = useAppStore(selectLoadingKind) !== null;
 
-  // 框架下拉项：TTS 模型清单里的运行时包 key 去重（顺序 = 清单顺序，确定性）；
-  // label 优先取运行时包名，无包则直接用 key —— 目前只有 sherpa 一项也照常显示，接入新框架无需改前端
-  const frameworkOptions: { key: string; label: string }[] = [];
-  const seenKeys = new Set<string>();
-  for (const m of modelItems) {
-    if (m.kind !== "tts") continue;
-    const key = runtimeKeyOf(m);
-    if (!key || seenKeys.has(key)) continue;
-    seenKeys.add(key);
-    frameworkOptions.push({ key, label: runtimePackages?.find((p) => p.framework === key)?.name ?? key });
-  }
-  // 当前选中值不在清单里（清单未到/模型已下架）→ 补一项，避免选择框空白
-  if (tts.framework && !seenKeys.has(tts.framework)) {
-    const pkg = runtimePackages?.find((p) => p.framework === tts.framework);
-    frameworkOptions.unshift({ key: tts.framework, label: pkg?.name ?? tts.framework });
-  }
+  // 框架下拉项：TTS 模型清单里的运行时包 key（去重，onnx 垫底）—— 共用 frameworkOptionsOf，
+  // 与 ASR 面板同一处实现，顺序规则不会两边漂移
+  const frameworkOptions = frameworkOptionsOf(modelItems, "tts", runtimePackages, tts.framework);
 
   return (
     <div className="space-y-4">

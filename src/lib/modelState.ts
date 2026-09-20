@@ -189,6 +189,45 @@ export function syncTtsFrameworkFromLoaded(): void {
   applyTtsFrameworkFromRust(key, item.engine, name);
 }
 
+/**
+ * 框架下拉选项：按模型清单推导（去重，顺序 = 清单顺序），并**把 `onnx` 固定排到最后**。
+ *
+ * 为什么 onnx 垫底：它是历史默认运行时，此前只有它一个；接入 PyTorch 后下拉顶部若仍是
+ * onnx，看起来像"新框架没进来"。固定垫底后，新框架自然浮到前面，且与清单顺序无关。
+ * 其余框架保持清单顺序（清单顺序 = 优先级，由 Rust 的 SPECS 决定）。
+ *
+ * `current`（当前选中值）不在清单里时（清单未到 / 模型已下架）补到最前面，避免选择框空白。
+ */
+const LAST_FRAMEWORK_KEYS = ["onnx"];
+
+export function frameworkOptionsOf(
+  items: Pick<ModelItemState, "kind" | "runtime_key" | "runtime_keys" | "format">[],
+  kind: "asr" | "tts",
+  packages: { framework: string; name: string }[] | null | undefined,
+  current: string,
+): { key: string; label: string }[] {
+  const seen = new Set<string>();
+  const derived: { key: string; label: string }[] = [];
+  for (const m of items) {
+    if (m.kind !== kind) continue;
+    const key = runtimeKeyOf(m);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    derived.push({ key, label: packages?.find((p) => p.framework === key)?.name ?? key });
+  }
+  // 垫底项从 derived 里摘出来接到末尾（不是 sort：其余项的相对顺序必须保持清单顺序）
+  const head = derived.filter((o) => !LAST_FRAMEWORK_KEYS.includes(o.key));
+  const tail = LAST_FRAMEWORK_KEYS.map((k) => derived.find((o) => o.key === k)).filter(
+    (o): o is { key: string; label: string } => Boolean(o),
+  );
+  const out = [...head, ...tail];
+  if (current && !seen.has(current)) {
+    const pkg = packages?.find((p) => p.framework === current);
+    out.unshift({ key: current, label: pkg?.name ?? current });
+  }
+  return out;
+}
+
 /** 某模型是否属于该运行时包（cuda 变体共用同一引擎：按 runtime_keys 成员判定） */
 export function belongsToFramework(
   item: Pick<ModelItemState, "runtime_keys" | "runtime_key" | "format"> | undefined | null,

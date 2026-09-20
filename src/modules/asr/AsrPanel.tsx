@@ -7,7 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ModelSelector } from "@/components/ModelSelector";
 import { ModelStatusBadge } from "@/components/ModelStatusBadge";
 import { useAppStore } from "@/stores";
-import { computeIsLoaded, runtimeKeyOf, selectLoadingKind } from "@/lib/modelState";
+import { computeIsLoaded, frameworkOptionsOf, selectLoadingKind } from "@/lib/modelState";
 import { VolumeWave } from "@/components/VolumeWave";
 import { t } from "@/lib/i18n";
 import { rustCheckVram, sendToSidecar } from "@/lib/tauri";
@@ -224,22 +224,8 @@ export function AsrPanel() {
   // 加载中禁用"会发起加载"的入口（重载按钮）：门禁会拦下请求，但那是点完之后的事
   const loading = useAppStore(selectLoadingKind) !== null;
 
-  // 框架下拉项：ASR 模型清单里的运行时包 key 去重（顺序 = 清单顺序，确定性）；
-  // label 优先取运行时包名，无包则直接用 key —— 新增框架无需改前端
-  const frameworkOptions: { key: string; label: string }[] = [];
-  const seenKeys = new Set<string>();
-  for (const m of modelItems) {
-    if (m.kind !== "asr") continue;
-    const key = runtimeKeyOf(m);
-    if (!key || seenKeys.has(key)) continue;
-    seenKeys.add(key);
-    frameworkOptions.push({ key, label: runtimePackages?.find((p) => p.framework === key)?.name ?? key });
-  }
-  // 当前选中值不在清单里（清单未到/模型已下架）→ 补一项，避免选择框空白
-  if (asr.framework && !seenKeys.has(asr.framework)) {
-    const pkg = runtimePackages?.find((p) => p.framework === asr.framework);
-    frameworkOptions.unshift({ key: asr.framework, label: pkg?.name ?? asr.framework });
-  }
+  // 框架下拉项：ASR 模型清单里的运行时包 key（去重，onnx 垫底）—— 与 TTS 面板共用一处实现
+  const frameworkOptions = frameworkOptionsOf(modelItems, "asr", runtimePackages, asr.framework);
 
   if (sub === "hotkey") {
     return (
