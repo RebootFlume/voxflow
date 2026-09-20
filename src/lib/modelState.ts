@@ -147,3 +147,52 @@ export function syncAsrFrameworkFromLoaded(): void {
   if (!key) return;
   applyAsrFrameworkFromRust(key, item.engine, name);
 }
+
+/**
+ * TTS 版框架对齐（与 ASR 同源，字段域不同）：
+ * - 运行时包 key → `tts.framework`（模型页过滤 / 持久化域）
+ * - 引擎展示名 → `engines.tts.framework`（展示域）
+ *
+ * 事件的 framework 是 Rust 注册表的框架 id（`sherpa` / `pytorch`），而归一化目标是
+ * 模型清单里的**主运行时包 key**（`onnx` / `pytorch-cpu`）——这正是下拉框选项的来源，
+ * 两边必须同一套取值，否则选中值对不上选项、下拉框会显示空白或凭空多一项。
+ * cuda 设备实际用的是 `pytorch-cuda130` 包，但过滤按 runtime_keys 成员判定（见 ModelSelector），
+ * 所以框架标签仍归一到主 key，不随设备抖动。
+ */
+export function applyTtsFrameworkFromRust(
+  fw: string,
+  engine?: string | null,
+  modelName?: string | null,
+): void {
+  if (!fw) return;
+  const s = useAppStore.getState();
+  const item =
+    (modelName ? s.models.items.find((i) => i.name === modelName) : undefined) ??
+    s.models.items.find((i) => i.kind === "tts" && (i.engine === fw || runtimeKeyOf(i) === fw));
+  const key =
+    (item ? runtimeKeyOf(item) : null) ??
+    (s.runtime.packages?.some((p) => p.framework === fw) ? fw : null);
+  const eng = engine || item?.engine || (fw !== key ? fw : null);
+  if (key && s.tts.framework !== key) s.updateTts({ framework: key });
+  if (eng && s.engines.tts.framework !== eng) s.setEngineStatus("tts", { framework: eng });
+}
+
+/** 依据「已加载/正在加载」的 TTS 模型 + 清单元数据对齐框架标签（清单晚到时的兜底） */
+export function syncTtsFrameworkFromLoaded(): void {
+  const s = useAppStore.getState();
+  const name = s.engines.tts.model || s.tts.model;
+  if (!name) return;
+  const item = s.models.items.find((i) => i.name === name);
+  if (!item) return;
+  const key = runtimeKeyOf(item);
+  if (!key) return;
+  applyTtsFrameworkFromRust(key, item.engine, name);
+}
+
+/** 某模型是否属于该运行时包（cuda 变体共用同一引擎：按 runtime_keys 成员判定） */
+export function belongsToFramework(
+  item: Pick<ModelItemState, "runtime_keys" | "runtime_key" | "format"> | undefined | null,
+  framework: string,
+): boolean {
+  return Boolean(framework) && runtimeKeysOf(item).includes(framework);
+}

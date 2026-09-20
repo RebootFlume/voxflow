@@ -11,7 +11,7 @@
  */
 import { useAppStore } from "@/stores";
 import { rustLoadAsr, rustUnloadAsr, rustLoadTtsModel, rustUnloadTtsModel } from "@/lib/tauri";
-import { engineOf, runtimeKeyOf, runtimeKeysOf } from "@/lib/modelState";
+import { belongsToFramework, engineOf, runtimeKeyOf, runtimeKeysOf } from "@/lib/modelState";
 import { t } from "@/lib/i18n";
 
 /**
@@ -86,15 +86,24 @@ export function unloadAsrModel(): Promise<void> {
 /** 加载 TTS 模型（model + device 一并写入，统一置 loading） */
 export function loadTtsModel(name: string, device: string): Promise<void> {
   const s = useAppStore.getState();
+  if (!name) {
+    // 未选中模型：只记设备偏好。带空模型名进后端只会换来一个无意义的"找不到模型"错误
+    // （框架下没有已下载模型时 `tts.model` 就是空，此时点设备下拉会走到这里）
+    s.updateTts({ device });
+    return Promise.resolve();
+  }
   // 全局门禁：任一引擎加载中禁止再发起加载
   if (s.engines.asr.status === "loading" || s.engines.tts.status === "loading") {
     return Promise.resolve();
   }
   // 前置门禁：缺框架直接给结论（不进 loading、不起进程）
   if (!runtimeGate("tts", name)) return Promise.resolve();
-  // 框架不由前端推断：乐观阶段不写 framework，等 model_ready 事件的权威值
+  // 乐观阶段先把框架偏好切到这个模型的框架：否则过滤后的列表会把刚点中的模型自己藏起来
+  // （框架≠模型所属框架），点完瞬间卡片消失、加载完成又冒出来。最终以 model_ready 事件为准
+  // （cuda 设备会纠正到 pytorch-cuda130 所在的那个框架标签）。
+  const item = s.models.items.find((i) => i.name === name);
   s.setEngineStatus("tts", { model: name, status: "loading", error: null });
-  s.updateTts({ model: name, device });
+  s.updateTts({ model: name, device, ...(runtimeKeyOf(item) ? { framework: runtimeKeyOf(item)! } : {}) });
   s.setTtsModelStatus("loading"); // 兼容旧 UI，语义改为「UI 选中」
 
   const op = rustLoadTtsModel(name, device);
@@ -123,4 +132,35 @@ export function unloadTtsModel(): Promise<void> {
     () => useAppStore.getState().addLog(`[model] ⏹ TTS 模型已卸载（${name ?? ""}）`, "info"),
     () => {},
   );
+}
+
+/**
+ * 切换 TTS 推理框架 —— 框架与模型必须成对变化。
+ *
+ * 只改框架偏好会让界面自相矛盾：列表按新框架过滤后看不到任何模型，而"当前"
+ * 仍是旧框架的模型（用户看到的就是"框架换了、模型没跟着换"）。所以这里：
+ *   1. 该框架下有已下载模型 → 直接加载清单里的第一个（顺序即优先级），模型跟着框架走；
+ *   2. 该框架下没有已下载模型 → 卸载当前引擎并清空选中，让界面如实显示"该框架下没有模型"。
+ * 同模型已就绪时只改偏好，不重启引擎（幂等）。
+ */
+export function switchTtsFramework(framework: string): void {
+  const s = useAppStore.getState();
+  if (!framework || framework === s.tts.framework) return;
+  const target = s.models.items.find(
+    (i) => i.kind === "tts" && i.state === "downloaded" && belongsToFramework(i, framework),
+  );
+  if (!target) {
+    s.updateTts({ framework, model: "" });
+    s.setTtsModelStatus("idle");
+    if (s.engines.tts.status !== "idle") {
+      s.addLog(`[model] 框架 ${framework} 下没有已下载模型，已卸载当前 TTS 模型`, "warn");
+      void unloadTtsModel();
+    }
+    return;
+  }
+  if (target.name === s.tts.model && s.engines.tts.status === "ready") {
+    s.updateTts({ framework });
+    return;
+  }
+  void loadTtsModel(target.name, s.tts.device);
 }

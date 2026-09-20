@@ -1,16 +1,30 @@
 import { useAppStore, type ModelItemState, type ModelFramework } from "@/stores";
 import { t } from "@/lib/i18n";
 import { Badge } from "@/components/ui/badge";
-import { computeIsLoaded, engineOf, runtimeKeyOf, runtimeKeysOf } from "@/lib/modelState";
+import { belongsToFramework, computeIsLoaded, engineOf, runtimeKeyOf, runtimeKeysOf } from "@/lib/modelState";
 
 const EMPTY_ITEMS: ModelItemState[] = [];
 
-/** 引擎徽章配色（仅视觉查表；未登记引擎走默认样式 —— 新增框架无需改前端） */
+/**
+ * 引擎徽章配色（仅视觉查表；未登记引擎走默认样式 —— 新增框架无需改前端）
+ */
 const ENGINE_BADGE_CLASSES: Record<string, string> = {
   llama: "border-sky-500/40 text-sky-600 dark:text-sky-400",
   sherpa: "border-emerald-500/40 text-emerald-600 dark:text-emerald-400",
   torch: "border-orange-500/40 text-orange-600 dark:text-orange-400",
 };
+
+/**
+ * 徽章文案：运行时包 key 去掉设备变体后缀（`pytorch-cpu` / `pytorch-cuda130` → `PYTORCH`）。
+ *
+ * 理由：徽章回答的是"这个模型跑在哪个框架上"，而 cpu / cuda 是同一引擎的两个包 —— 具体用哪个包
+ * 由上方的框架下拉与设备选择决定。键名原样显示还会撑爆 200px 的卡片列，把模型名挤成 "Kokoro-…"。
+ * 既有 `gguf` / `onnx` 无后缀，显示不变。
+ */
+function frameworkLabelOf(item: ModelItemState): string {
+  const key = runtimeKeyOf(item) ?? engineOf(item) ?? "unknown";
+  return key.replace(/-(?:cpu|cuda\d*)$/i, "");
+}
 
 /** 模型大小显示：已下载用真实磁盘占用，未下载用清单预估值 */
 function sizeLabel(m: ModelItemState): string {
@@ -30,7 +44,7 @@ interface ModelSelectorProps {
 
 function FormatBadge({ item }: { item: ModelItemState }) {
   const engine = engineOf(item);
-  const label = runtimeKeyOf(item) ?? engine ?? "unknown";
+  const label = frameworkLabelOf(item);
   return (
     <Badge
       variant="outline"
@@ -54,8 +68,8 @@ export function ModelSelector({ kind, selected, onSelect, formatFilter, download
   // 过滤逻辑：kind + 可选 formatFilter + 状态
   const models = items.filter((i) => {
     if (i.kind !== kind) return false;
-    // 运行时包 key 过滤（仅 ASR 且指定 formatFilter 时生效）
-    if (formatFilter && runtimeKeyOf(i) !== formatFilter) return false;
+    // 运行时包过滤：按该模型可用的**全部**运行时包判定，cpu/cuda 变体共用同一引擎时不会被漏掉
+    if (formatFilter && !belongsToFramework(i, formatFilter)) return false;
     // 只展示已下载的模型（可加载的）
     if (downloadedOnly) return i.state === "downloaded";
     // 默认：已下载 或 当前选中（但选中但未下载的不显示，避免误导）
@@ -66,7 +80,7 @@ export function ModelSelector({ kind, selected, onSelect, formatFilter, download
     return (
       <p className="text-sm text-muted-foreground">
         {formatFilter
-          ? t(locale, "asr.framework.noModels")
+          ? t(locale, "common.noModelsFramework")
           : t(locale, "common.noModels", { kind: kind === "asr" ? "ASR" : "TTS" })}
       </p>
     );

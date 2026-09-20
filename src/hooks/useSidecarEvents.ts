@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { onSidecarEvent, rustListTtsSpeakers, rustTtsVoicesList, rustTtsVoiceUse, sendToSidecar } from "@/lib/tauri";
-import { applyEngineStatus, applyAsrFrameworkFromRust, syncAsrFrameworkFromLoaded, resolveModelKind, runtimeKeyOf, ttsSupportsClone } from "@/lib/modelState";
+import { applyEngineStatus, applyAsrFrameworkFromRust, applyTtsFrameworkFromRust, syncAsrFrameworkFromLoaded, syncTtsFrameworkFromLoaded, resolveModelKind, runtimeKeyOf, ttsSupportsClone } from "@/lib/modelState";
 import { useAppStore, type EngineState } from "@/stores";
 import { t } from "@/lib/i18n";
 
@@ -161,12 +161,18 @@ export function useSidecarEvents() {
                 st.setTtsModelStatus("idle");
               }
             }
-            // 清单晚到时，用已加载模型对齐 ASR 框架标签（启动自动加载早于清单的场景）
+            // 清单晚到时，用已加载模型对齐框架标签（启动自动加载早于清单的场景）
             if (
               st.engines.asr.model &&
               (st.engines.asr.status === "ready" || st.engines.asr.status === "loading")
             ) {
               syncAsrFrameworkFromLoaded();
+            }
+            if (
+              st.engines.tts.model &&
+              (st.engines.tts.status === "ready" || st.engines.tts.status === "loading")
+            ) {
+              syncTtsFrameworkFromLoaded();
             }
           }
           break;
@@ -228,10 +234,14 @@ export function useSidecarEvents() {
             }
             if (kind === "tts") {
               store.setTtsModelStatus("ready");
-              // 框架标签：事件权威 framework（Rust 注册表决定），前端不猜
-              if (typeof payload.framework === "string") {
-                store.setEngineStatus("tts", { framework: payload.framework });
-              }
+              // 框架标签：事件权威 framework（Rust 注册表决定），前端不猜。
+              // 两个域都要对齐：engines.tts.framework（展示）+ tts.framework（模型页过滤/持久化），
+              // 否则加载了 PyTorch 模型、下拉框却还停在 sherpa —— 用户看到的"显示不对"。
+              applyTtsFrameworkFromRust(
+                typeof payload.framework === "string" ? payload.framework : "",
+                typeof payload.engine === "string" ? payload.engine : null,
+                model,
+              );
               // 音色对齐：换了模型后把上一个模型遗留的 sid 纠正掉。
               // 单音色 / 克隆模型的说话人列表为空 ⇒ 清空（= 用模型默认音色），否则界面会一直显示
               // 上一个模型的 "sid 47"（用户实际看到的现象）；预设模型则对齐到该模型自己的列表。

@@ -30,7 +30,7 @@ import {
 } from "@/lib/tauri";
 import { runtimeKeyOf, supportsClone, ttsModelInfoOf } from "@/lib/modelState";
 import { useAudioPreview } from "@/lib/useAudioPreview";
-import { loadTtsModel } from "@/lib/modelLoader";
+import { loadTtsModel, switchTtsFramework } from "@/lib/modelLoader";
 import { useExportDir } from "@/lib/useExportDir";
 
 // ============================================================
@@ -42,7 +42,6 @@ function ModelDevicePage() {
   const gpu = useAppStore((s) => s.gpu);
   const ttsModelStatus = useAppStore((s) => s.ttsModelStatus);
   const locale = useAppStore((s) => s.locale);
-  const updateTts = useAppStore((s) => s.updateTts);
   const modelItems = useAppStore((s) => s.models.items);
   const runtimePackages = useAppStore((s) => s.runtime.packages);
 
@@ -94,10 +93,10 @@ function ModelDevicePage() {
           <CardTitle className="text-base">{t(locale, "tts.model")}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
-          {/* 推理框架（运行时包 key）：TTS 模型统一由它加载，切换即改变后续加载路由 */}
+          {/* 推理框架（运行时包）：模型与框架成对切换 —— 选这里的框架会自动加载该框架下的模型 */}
           <div className="flex items-center gap-3">
             <label className="shrink-0 text-sm font-medium">{t(locale, "tts.framework.label")}</label>
-            <Select value={tts.framework} onValueChange={(framework) => updateTts({ framework })}>
+            <Select value={tts.framework} onValueChange={(framework) => switchTtsFramework(framework)}>
               <SelectTrigger className="w-56">
                 <SelectValue />
               </SelectTrigger>
@@ -111,9 +110,11 @@ function ModelDevicePage() {
           <p className="text-xs text-muted-foreground">
             {t(locale, "tts.framework.hint", { framework: tts.framework })}
           </p>
+          {/* 模型选择器：只展示已下载 + 属于当前框架的模型 */}
           <ModelSelector
             kind="tts"
             selected={tts.model}
+            formatFilter={tts.framework}
             onSelect={(name) => {
               void loadTtsModel(name, tts.device);
             }}
