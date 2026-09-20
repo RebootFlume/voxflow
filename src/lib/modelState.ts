@@ -228,6 +228,23 @@ export function frameworkOptionsOf(
   return out;
 }
 
+/**
+ * 运行时包的展示名（多处共用：全局横幅 / 模型卡片 / 门禁提示）。
+ *
+ * 同一个引擎可能有多个包（PyTorch 的 cpu / cuda130），它们的 `name` **都是 "PyTorch"** ——
+ * 直接 `map(p => p.name).join(" / ")` 会渲染成 "PyTorch / PyTorch"，用户看到的就是
+ * "为什么 PyTorch 变成两个包"。所以重名时才补变体：`PyTorch (cpu)` / `PyTorch (cuda130)`；
+ * 不重名则保持原名（llama-server、sherpa-onnx 不受影响）。
+ */
+export function runtimePackageLabels(
+  pkgs: { name: string; variant?: string | null }[],
+): string[] {
+  const dup = new Set(
+    pkgs.map((p) => p.name).filter((n, i, all) => all.indexOf(n) !== i),
+  );
+  return pkgs.map((p) => (dup.has(p.name) && p.variant ? `${p.name} (${p.variant})` : p.name));
+}
+
 /** 某模型是否属于该运行时包（cuda 变体共用同一引擎：按 runtime_keys 成员判定） */
 export function belongsToFramework(
   item: Pick<ModelItemState, "runtime_keys" | "runtime_key" | "format"> | undefined | null,

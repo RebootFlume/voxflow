@@ -2,7 +2,7 @@ import { AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAppStore } from "@/stores";
 import { t } from "@/lib/i18n";
-import { runtimeKeysOf } from "@/lib/modelState";
+import { runtimeKeysOf, runtimePackageLabels } from "@/lib/modelState";
 
 /**
  * 缺少推理框架的全局横幅（可操作出口）。
@@ -35,7 +35,7 @@ export function RuntimeAlert() {
   const broken = packages.filter((p) => needed.has(p.framework) && p.state !== "ready");
   if (broken.length === 0) return null;
 
-  const names = broken.map((p) => p.name).join(" / ");
+  const names = runtimePackageLabels(broken).join(" / ");
   const hasIncomplete = broken.some((p) => p.state === "incomplete");
 
   return (

@@ -1,7 +1,7 @@
 import { useAppStore, type ModelItemState, type ModelFramework } from "@/stores";
 import { t } from "@/lib/i18n";
 import { Badge } from "@/components/ui/badge";
-import { belongsToFramework, computeIsLoaded, engineOf, runtimeKeyOf, runtimeKeysOf, selectLoadingKind } from "@/lib/modelState";
+import { belongsToFramework, computeIsLoaded, engineOf, runtimeKeyOf, runtimeKeysOf, runtimePackageLabels, selectLoadingKind } from "@/lib/modelState";
 
 const EMPTY_ITEMS: ModelItemState[] = [];
 
@@ -151,7 +151,7 @@ export function ModelSelector({ kind, selected, onSelect, formatFilter, download
                 <span>{sizeLabel(m)}</span>
                 {fwBlocked && (
                   <span className="text-amber-600 dark:text-amber-400">
-                    {t(locale, "runtime.needsFramework", { name: fwPkgs.map((p) => p.name).join(" / ") })}
+                    {t(locale, "runtime.needsFramework", { name: runtimePackageLabels(fwPkgs).join(" / ") })}
                   </span>
                 )}
                 {statusLabel && (
