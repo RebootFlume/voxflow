@@ -242,6 +242,9 @@ export function useSidecarEvents() {
                 typeof payload.engine === "string" ? payload.engine : null,
                 model,
               );
+              // 设备回写：加载可能来自模型管理页等其它入口，面板显示的必须是实际生效的设备
+              // （事件权威；此前只有 ASR 回写，TTS 面板可能显示 CUDA 而引擎跑在 CPU 上）
+              store.updateTts({ device: device as "cpu" | "cuda" });
               // 音色对齐：换了模型后把上一个模型遗留的 sid 纠正掉。
               // 单音色 / 克隆模型的说话人列表为空 ⇒ 清空（= 用模型默认音色），否则界面会一直显示
               // 上一个模型的 "sid 47"（用户实际看到的现象）；预设模型则对齐到该模型自己的列表。

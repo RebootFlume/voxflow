@@ -188,7 +188,10 @@ function FrameworkBadge({ name }: { name: string }) {
 function ModelRow({ name }: { name: string }) {
   const locale = useAppStore((s) => s.locale);
   const item = useAppStore((s) => (s.models.items ?? []).find((i) => i.name === name));
+  // 推理设备按 kind 取各自偏好：ASR 与 TTS 互不影响（早期这里 TTS 被硬编码成 cpu，
+  // 于是"设备选 CUDA、从模型管理页加载却跑在 CPU 上"，且界面还显示 CUDA）
   const asrDevice = useAppStore((s) => s.asr.device);
+  const ttsDevice = useAppStore((s) => s.tts.device);
   const [expanded, setExpanded] = useState(false);
   // 精选条目选择：初值 = 已装条目 ?? 默认条目 ?? 首个条目；下载/切换完成（activeEntry 变化）后同步
   const entries = item?.entries ?? EMPTY_ENTRIES;
@@ -278,7 +281,8 @@ function ModelRow({ name }: { name: string }) {
   }
   async function doLoad() {
     if (anyLoading) return; // 加载中禁止再切换（全局门禁）
-    const device = it.kind === "tts" ? "cpu" : asrDevice;
+    // 设备取该 kind 自己的偏好：TTS 支持 CUDA（sherpa provider / pytorch-cuda130 包）
+    const device = it.kind === "tts" ? ttsDevice : asrDevice;
     if (it.kind === "tts") {
       await loadTtsModel(it.name, device);
     } else {
