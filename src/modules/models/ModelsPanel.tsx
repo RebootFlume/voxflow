@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -23,7 +23,7 @@ import { useAppStore, type ModelItemState } from "@/stores";
 import { t } from "@/lib/i18n";
 import { openPath, pickFolder, sendToSidecar } from "@/lib/tauri";
 import { loadAsrModel, loadTtsModel, unloadAsrModel, unloadTtsModel } from "@/lib/modelLoader";
-import { computeIsLoaded, engineOf, runtimeKeyOf, selectLoadingKind } from "@/lib/modelState";
+import { belongsToFramework, computeIsLoaded, engineOf, frameworkOptionsOf, runtimeKeyOf, selectLoadingKind } from "@/lib/modelState";
 import { FrameworkPanel } from "./FrameworkPanel";
 
 function refreshModels() {
@@ -298,9 +298,10 @@ function ModelRow({ name }: { name: string }) {
 
   return (
     <div className="rounded-lg border">
-      {/* 主行 */}
+      {/* 主行：只留"扫一眼能比较"的信息（名称 / 量化 / 框架 / 兼容性 / 状态 / 大小）。
+          描述与来源移入展开区 —— 9 个模型的行高从 51px 收到 ~40px，一屏放得下 */}
       <div
-        className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-muted/50 transition-colors"
+        className="flex items-center gap-3 px-4 py-2 cursor-pointer hover:bg-muted/50 transition-colors"
         onClick={() => setExpanded(!expanded)}
       >
         <StatusIcon />
@@ -321,15 +322,6 @@ function ModelRow({ name }: { name: string }) {
             <Badge variant="outline" className="ml-1 text-[10px] bg-destructive/10 text-destructive border-destructive/20">
               {t(locale, "models.cpuUnsupported")}
             </Badge>
-          )}
-          <span className="ml-2 text-xs text-muted-foreground">{desc}</span>
-          {it.source && (
-            <span
-              className="ml-2 inline-block max-w-[320px] truncate align-bottom font-mono text-[11px] text-muted-foreground/70"
-              title={it.source}
-            >
-              {t(locale, "models.source.label")}: {it.source}
-            </span>
           )}
         </div>
         {hasEntryChoice && (
@@ -384,10 +376,18 @@ function ModelRow({ name }: { name: string }) {
         </div>
       )}
 
-      {/* 展开详情 */}
+      {/* 展开详情：主行不再展示的描述与来源都在这（信息不丢，只是收进展开区） */}
       {expanded && (
         <div className="border-t px-4 py-3 space-y-3 bg-muted/20">
           <p className="text-xs text-muted-foreground">{desc}</p>
+          {it.source && (
+            <p
+              className="truncate font-mono text-[11px] text-muted-foreground/70"
+              title={it.source}
+            >
+              {t(locale, "models.source.label")}: {it.source}
+            </p>
+          )}
           <p className="font-mono text-[11px] text-muted-foreground/70 truncate">{it.path}</p>
 
           {locked ? null : (
@@ -474,8 +474,27 @@ function ModelRow({ name }: { name: string }) {
 function ModelListPage({ kind, title, icon: Icon }: { kind: "asr" | "tts"; title: string; icon: typeof Mic }) {
   const locale = useAppStore((s) => s.locale);
   const items = useAppStore((s) => s.models?.items ?? EMPTY_ITEMS);
+  const runtimePackages = useAppStore((s) => s.runtime.packages);
   const names = items.filter((i) => i.kind === kind).map((i) => i.name);
   const [everLoaded, setEverLoaded] = useState(items.length > 0);
+  // 框架筛选（页面本地状态，默认"全部"）：只做收窄，不隐藏任何东西。
+  // 刻意不写 asr.framework / tts.framework —— 那两个字段同时决定加载路由与面板里的模型列表。
+  const [fwFilter, setFwFilter] = useState("");
+  // 某框架在本 kind 下的模型数（按 runtime_keys 成员判定，cpu/cuda 变体共用同一引擎时不会漏）
+  const countOf = (key: string) =>
+    items.filter((i) => i.kind === kind && belongsToFramework(i, key)).length;
+  const fwOptions = useMemo(
+    () => frameworkOptionsOf(items, kind, runtimePackages, "").map((o) => ({ ...o, count: countOf(o.key) })),
+    // items / runtimePackages 变化时重算；countOf 是纯函数，无额外依赖
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [items, kind, runtimePackages],
+  );
+  const shown = fwFilter
+    ? names.filter((n) => {
+        const it = items.find((i) => i.name === n);
+        return it ? belongsToFramework(it, fwFilter) : false;
+      })
+    : names;
 
   useEffect(() => {
     refreshModels();
@@ -499,6 +518,35 @@ function ModelListPage({ kind, title, icon: Icon }: { kind: "asr" | "tts"; title
         </Button>
       </div>
 
+      {/* 框架筛选：一排 chips（只在有多个框架时出现）。默认"全部"，点一下收窄 ——
+          模型多了不必翻到底，也不用先想"它在哪个框架下"。 */}
+      {fwOptions.length > 1 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <button type="button" onClick={() => setFwFilter("")}>
+            <Badge
+              variant="outline"
+              className={`cursor-pointer text-[10px] ${
+                fwFilter === "" ? "border-primary bg-primary/10 text-primary" : "hover:border-primary/40"
+              }`}
+            >
+              {t(locale, "models.filter.all")} {names.length}
+            </Badge>
+          </button>
+          {fwOptions.map((o) => (
+            <button key={o.key} type="button" onClick={() => setFwFilter(o.key)}>
+              <Badge
+                variant="outline"
+                className={`cursor-pointer text-[10px] ${
+                  fwFilter === o.key ? "border-primary bg-primary/10 text-primary" : "hover:border-primary/40"
+                }`}
+              >
+                {o.label} {o.count}
+              </Badge>
+            </button>
+          ))}
+        </div>
+      )}
+
       {names.length === 0 && everLoaded && (
         <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
           {t(locale, "models.sidecarLost")}
@@ -509,11 +557,16 @@ function ModelListPage({ kind, title, icon: Icon }: { kind: "asr" | "tts"; title
         <div className="flex h-16 items-center justify-center text-sm text-muted-foreground">…</div>
       )}
 
+      {/* 筛选后该框架下没有模型（只能发生在这类框架的模型都没下载时） */}
+      {names.length > 0 && shown.length === 0 && (
+        <p className="text-sm text-muted-foreground">{t(locale, "common.noModelsFramework")}</p>
+      )}
+
       {/* 按引擎分组展示：分组与顺序全部来自 Rust 清单（engine 首次出现顺序，确定性） */}
       {(() => {
         const grouped: Record<string, string[]> = {};
         const order: string[] = [];
-        for (const n of names) {
+        for (const n of shown) {
           const item = items.find((i) => i.name === n);
           const eng = engineOf(item) || "unknown"; // 无 engine/data 时的兜底标签
           if (!grouped[eng]) {
