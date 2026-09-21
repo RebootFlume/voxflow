@@ -8,7 +8,7 @@ import { Switch } from "@/components/ui/switch";
 import { ModelSelector } from "@/components/ModelSelector";
 import { ModelStatusBadge } from "@/components/ModelStatusBadge";
 import { useAppStore } from "@/stores";
-import { computeIsLoaded, frameworkOptionsOf, selectLoadingKind } from "@/lib/modelState";
+import { computeIsLoaded, frameworkOptionsOf, loadedFrameworkLabel, selectLoadingKind } from "@/lib/modelState";
 import { selectAsrFramework } from "@/lib/modelLoader";
 import { VolumeWave } from "@/components/VolumeWave";
 import { t } from "@/lib/i18n";
@@ -222,6 +222,8 @@ export function AsrPanel() {
   // —— 用户看到的就是"这条提示一直出现，点了应用还在"。
   const asrEngine = useAppStore((s) => s.engines.asr);
   const asrEngineReady = asrEngine.status === "ready";
+  // 「当前」行的框架展示名
+  const loadedFw = loadedFrameworkLabel("asr");
   const loadedDevice = useAppStore((s) => s.engines.asr.device);
   const modelItems = useAppStore((s) => s.models.items);
   const runtimePackages = useAppStore((s) => s.runtime.packages);
@@ -367,8 +369,11 @@ export function AsrPanel() {
             />
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <span>{t(locale, "common.current")}: </span>
-              {/* 同 TTS：显示引擎里正在起作用的模型，不随选中/框架变化 */}
+              {/* 同 TTS：显示引擎里正在起作用的模型（带框架名，避免跨框架重名时说不清） */}
               <ModelStatusBadge status={asrEngine.status} modelName={asrEngine.model ?? ""} />
+              {asrEngine.status === "ready" && loadedFw && (
+                <span className="text-muted-foreground">({loadedFw})</span>
+              )}
             </div>
 
             {/* 启动时自动加载上次的模型（默认开：热键要求模型常驻，按下即用） */}

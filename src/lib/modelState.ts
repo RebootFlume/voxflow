@@ -245,6 +245,21 @@ export function runtimePackageLabels(
   return pkgs.map((p) => (dup.has(p.name) && p.variant ? `${p.name} (${p.variant})` : p.name));
 }
 
+/**
+ * 「当前」行里框架的展示名：取运行时包名（与框架下拉、框架页一致），取不到再回退引擎注册键。
+ *
+ * 为什么这行要带框架：模型名不保证全局唯一 —— 同一个名字在 llama 与 pytorch 下都可能有，
+ * 而两个引擎互斥、只会有一个在跑，不带框架就看不出"现在起作用的是哪一个"。
+ */
+export function loadedFrameworkLabel(kind: ModelKind): string {
+  const s = useAppStore.getState();
+  const e = s.engines[kind];
+  if (!e.model) return "";
+  const item = s.models.items.find((i) => i.name === e.model);
+  const key = runtimeKeyOf(item) ?? e.framework;
+  return s.runtime.packages?.find((p) => p.framework === key)?.name ?? e.framework ?? "";
+}
+
 /** 某模型是否属于该运行时包（cuda 变体共用同一引擎：按 runtime_keys 成员判定） */
 export function belongsToFramework(
   item: Pick<ModelItemState, "runtime_keys" | "runtime_key" | "format"> | undefined | null,
