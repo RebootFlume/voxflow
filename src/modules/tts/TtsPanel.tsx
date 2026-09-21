@@ -29,7 +29,7 @@ import {
   rustTtsVoiceUse,
   type TtsVoiceItem,
 } from "@/lib/tauri";
-import { belongsToFramework, engineModelStatus, frameworkOptionsOf, selectLoadingKind, supportsClone, ttsModelInfoOf } from "@/lib/modelState";
+import { belongsToFramework, frameworkOptionsOf, selectLoadingKind, supportsClone, ttsModelInfoOf } from "@/lib/modelState";
 import { useAudioPreview } from "@/lib/useAudioPreview";
 import { loadTtsModel, selectTtsFramework } from "@/lib/modelLoader";
 import { useExportDir } from "@/lib/useExportDir";
@@ -152,11 +152,8 @@ function ModelDevicePage() {
           />
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <span>{t(locale, "tts.current")}: </span>
-            <ModelStatusBadge
-              status={engineModelStatus("tts", tts.model)}
-              modelName={tts.model}
-              selected={!!tts.model}
-            />
+            {/* 读引擎状态而不是选中项：切框架/换选中都不该让这行"忘记"正在起作用的模型 */}
+            <ModelStatusBadge status={engine.status} modelName={engine.model ?? ""} />
           </div>
 
           {/* 启动时是否自动加载上次的模型（默认关：TTS 是按需服务） */}

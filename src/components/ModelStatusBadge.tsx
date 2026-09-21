@@ -4,16 +4,11 @@ import { useAppStore } from "@/stores";
 export type ModelStatus = "idle" | "loading" | "ready" | "error";
 
 /** 统一的模型加载状态徽标（loading / ready / error / idle），ASR 与 TTS 共用 */
-export function ModelStatusBadge({
-  status,
-  modelName,
-  selected = false,
-}: {
-  status: ModelStatus;
-  modelName?: string;
-  /** 有选中模型但引擎没加载它 → idle 时显示「未加载」而不是 "—" */
-  selected?: boolean;
-}) {
+/**
+ * 「当前在起作用的模型」徽标：读**引擎实际状态**，与"选中了哪个模型"无关。
+ * idle = 没有模型在跑（显示 "—"）；ready = 引擎里的模型名；loading/error 同理。
+ */
+export function ModelStatusBadge({ status, modelName }: { status: ModelStatus; modelName?: string }) {
   const locale = useAppStore((s) => s.locale);
   return (
     <>
@@ -22,12 +17,7 @@ export function ModelStatusBadge({
       )}
       {status === "ready" && <span className="text-emerald-600 dark:text-emerald-400">{modelName ?? "—"}</span>}
       {status === "error" && <span className="text-destructive">{t(locale, "models.status.error")}</span>}
-      {status === "idle" &&
-        (selected ? (
-          <span className="text-muted-foreground">{t(locale, "common.modelNotLoaded")}</span>
-        ) : (
-          <span className="text-muted-foreground">—</span>
-        ))}
+      {status === "idle" && <span className="text-muted-foreground">—</span>}
     </>
   );
 }

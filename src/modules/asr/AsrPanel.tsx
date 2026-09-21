@@ -8,7 +8,7 @@ import { Switch } from "@/components/ui/switch";
 import { ModelSelector } from "@/components/ModelSelector";
 import { ModelStatusBadge } from "@/components/ModelStatusBadge";
 import { useAppStore } from "@/stores";
-import { computeIsLoaded, engineModelStatus, frameworkOptionsOf, selectLoadingKind } from "@/lib/modelState";
+import { computeIsLoaded, frameworkOptionsOf, selectLoadingKind } from "@/lib/modelState";
 import { selectAsrFramework } from "@/lib/modelLoader";
 import { VolumeWave } from "@/components/VolumeWave";
 import { t } from "@/lib/i18n";
@@ -220,7 +220,8 @@ export function AsrPanel() {
   // 必须读 engines.asr.device：models.loadedDevice 是 ASR/TTS 共用的单值，
   // TTS 在 cuda 上加载一次就会把它改成 "cuda"，于是 ASR 这边明明是 cpu 也被判成"设备待应用"
   // —— 用户看到的就是"这条提示一直出现，点了应用还在"。
-  const asrEngineReady = useAppStore((s) => s.engines.asr.status === "ready");
+  const asrEngine = useAppStore((s) => s.engines.asr);
+  const asrEngineReady = asrEngine.status === "ready";
   const loadedDevice = useAppStore((s) => s.engines.asr.device);
   const modelItems = useAppStore((s) => s.models.items);
   const runtimePackages = useAppStore((s) => s.runtime.packages);
@@ -366,11 +367,8 @@ export function AsrPanel() {
             />
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <span>{t(locale, "common.current")}: </span>
-              <ModelStatusBadge
-                status={engineModelStatus("asr", asr.model)}
-                modelName={asr.model}
-                selected={!!asr.model}
-              />
+              {/* 同 TTS：显示引擎里正在起作用的模型，不随选中/框架变化 */}
+              <ModelStatusBadge status={asrEngine.status} modelName={asrEngine.model ?? ""} />
             </div>
 
             {/* 启动时自动加载上次的模型（默认开：热键要求模型常驻，按下即用） */}
