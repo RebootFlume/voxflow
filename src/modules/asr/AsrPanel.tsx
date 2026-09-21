@@ -4,10 +4,12 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { ModelSelector } from "@/components/ModelSelector";
 import { ModelStatusBadge } from "@/components/ModelStatusBadge";
 import { useAppStore } from "@/stores";
-import { computeIsLoaded, frameworkOptionsOf, selectLoadingKind } from "@/lib/modelState";
+import { computeIsLoaded, engineModelStatus, frameworkOptionsOf, selectLoadingKind } from "@/lib/modelState";
+import { selectAsrFramework } from "@/lib/modelLoader";
 import { VolumeWave } from "@/components/VolumeWave";
 import { t } from "@/lib/i18n";
 import { rustCheckVram, sendToSidecar } from "@/lib/tauri";
@@ -320,8 +322,8 @@ export function AsrPanel() {
               <Select
                 value={asr.framework}
                 onValueChange={(v) => {
-                  updateAsr({ framework: v });
-                  // 切换框架时，如果当前模型不匹配新框架，不自动卸载，只提示用户
+                  // 只改选中（+ 把框架告知 sidecar）：**不加载、不卸载、不替用户挑模型**
+                  selectAsrFramework(v);
                   void sendToSidecar({ action: "set_asr_framework", framework: v });
                 }}
               >
@@ -361,7 +363,20 @@ export function AsrPanel() {
             />
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <span>{t(locale, "common.current")}: </span>
-              <ModelStatusBadge status={asr.modelStatus} modelName={asr.model} />
+              <ModelStatusBadge
+                status={engineModelStatus("asr", asr.model)}
+                modelName={asr.model}
+                selected={!!asr.model}
+              />
+            </div>
+
+            {/* 启动时自动加载上次的模型（默认开：热键要求模型常驻，按下即用） */}
+            <div className="flex items-center justify-between gap-3 pt-1">
+              <div className="min-w-0">
+                <div className="text-sm font-medium">{t(locale, "models.autoLoad")}</div>
+                <div className="text-xs text-muted-foreground">{t(locale, "models.autoLoad.asrDesc")}</div>
+              </div>
+              <Switch checked={asr.autoLoad} onCheckedChange={(autoLoad) => updateAsr({ autoLoad })} />
             </div>
           </CardContent>
         </Card>

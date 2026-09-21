@@ -74,7 +74,15 @@ export async function saveConfig() {
         )
       : "models";
     const config = {
-      asr: { hotkey: state.asr.hotkey, model: state.asr.model, device: state.asr.device, framework: state.asr.framework },
+      asr: {
+        hotkey: state.asr.hotkey,
+        model: state.asr.model,
+        device: state.asr.device,
+        framework: state.asr.framework,
+        // 启动自动加载开关 + 每个框架上次选中的模型（切换框架时恢复它，不替用户挑）
+        autoLoad: state.asr.autoLoad,
+        lastModelByFramework: state.asr.lastModelByFramework,
+      },
       tts: state.tts,
       // 克隆音色不落 config（纯运行态）；权威与选中项都在 tts-voices/voices.json
       api: { host: state.api.host, port: state.api.port, apiKey: state.api.apiKey },

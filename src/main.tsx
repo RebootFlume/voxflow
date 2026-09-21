@@ -25,22 +25,14 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     s0.addLog("[init] auto-enable Rust engine", "info");
   }
 
-  // ③ 加载 ASR 模型
-  // 加载入口自带「运行时前置门禁」：缺框架时直接给可读错误 + 全局横幅，
-  // 不进入 loading（此前这里重复实现了一遍框架检查，失败又只写日志，用户看不到）。
-  const asr0 = s0.asr;
-  if (asr0.model) {
-    void Promise.all([
-      import("@/hooks/useRuntimeStatus"),
-      import("./lib/modelLoader"),
-    ]).then(async ([{ refreshRuntime }, { loadAsrModel }]) => {
-      // 先让门禁拿到框架状态，再决定是否发起加载
-      await refreshRuntime();
-      void loadAsrModel(asr0.model, asr0.device).catch(() => {});
-    });
-  }
+  // ③ 启动自动加载：不在这一步直接加载 —— 先让 Rust 把清单发过来（④），
+  //   清单落地时由 useSidecarEvents 调 autoLoadFromManifest() 做「模型还在不在」校验后再加载。
+  //   为什么：持久化的模型可能已被删除/换机，无脑加载只会让启动遮罩弹一个错误。
+  //   运行时门禁的状态要先备好（缺框架时门禁直接给可读错误 + 全局横幅）。
+  void import("@/hooks/useRuntimeStatus").then(({ refreshRuntime }) => refreshRuntime().catch(() => {}));
 
-  // ④ 数据根：Rust 判定便携/安装 → 设置模型目录展示值（下载/列表全走 Rust 数据根）
+  // ④ 数据根：Rust 判定便携/安装 → 设置模型目录展示值（下载/列表全走 Rust 数据根），
+  //   并固定请求一次清单（启动自动加载的校验依赖它，不再只在"数据根变化"时才请求）
   import("@/lib/tauri")
     .then(({ rustGetDataRootInfo }) => rustGetDataRootInfo())
     .then((info) => {
@@ -51,14 +43,12 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
           `[init] 数据根 ${info.portable ? "便携(exe旁)" : "AppData"}: ${info.model_root}`,
           "info",
         );
-        import("@/lib/tauri")
-          .then(({ sendToSidecar }) =>
-            sendToSidecar({ action: "list_models" }).catch(() => {}),
-          )
-          .catch(() => {});
       }
     })
-    .catch(() => {});
+    .catch(() => {})
+    .finally(() => {
+      void sendToSidecar({ action: "list_models" }).catch(() => {});
+    });
 
   // ⑤ 下发 sidecar 配置（下载代理 / HF token；两者皆空即直连，无需下发）
   const { models } = useAppStore.getState();

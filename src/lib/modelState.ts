@@ -245,6 +245,19 @@ export function runtimePackageLabels(
   return pkgs.map((p) => (dup.has(p.name) && p.variant ? `${p.name} (${p.variant})` : p.name));
 }
 
+/**
+ * 「当前」一行的状态：由**引擎实际状态**推导，而不是历史遗留的 ttsModelStatus/asr.modelStatus。
+ * 选中 ≠ 已在跑：选中的模型不是引擎里那个（或引擎 idle）→ idle，由调用方显示「未加载」。
+ */
+export function engineModelStatus(
+  kind: ModelKind,
+  selected: string,
+): "idle" | "loading" | "ready" | "error" {
+  const e = useAppStore.getState().engines[kind];
+  if (!selected || e.model !== selected) return "idle";
+  return e.status;
+}
+
 /** 某模型是否属于该运行时包（cuda 变体共用同一引擎：按 runtime_keys 成员判定） */
 export function belongsToFramework(
   item: Pick<ModelItemState, "runtime_keys" | "runtime_key" | "format"> | undefined | null,

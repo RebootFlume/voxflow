@@ -149,6 +149,8 @@ export function useSidecarEvents() {
         }
         case "models_state":
           store.applyModelsState(payload);
+          // 启动阶段：清单落地后按开关自动加载（含"模型还在不在"校验）。只在此处触发一次。
+          void import("@/lib/modelLoader").then(({ autoLoadFromManifest }) => autoLoadFromManifest());
           // 清理无效的 tts.model：不在已下载列表（或未下载）时重置为空，避免显示「未下载的选中模型」
           {
             const st = useAppStore.getState();
@@ -245,6 +247,7 @@ export function useSidecarEvents() {
               // 设备回写：加载可能来自模型管理页等其它入口，面板显示的必须是实际生效的设备
               // （事件权威；此前只有 ASR 回写，TTS 面板可能显示 CUDA 而引擎跑在 CPU 上）
               store.updateTts({ device: device as "cpu" | "cuda" });
+              store.setEngineStatus("tts", { device: device as "cpu" | "cuda" });
               // 音色对齐：换了模型后把上一个模型遗留的 sid 纠正掉。
               // 单音色 / 克隆模型的说话人列表为空 ⇒ 清空（= 用模型默认音色），否则界面会一直显示
               // 上一个模型的 "sid 47"（用户实际看到的现象）；预设模型则对齐到该模型自己的列表。
@@ -321,6 +324,8 @@ export function useSidecarEvents() {
               }
             } else if (kind === "asr") {
               store.updateAsr({ modelStatus: "ready", device: device as "cpu" | "cuda" });
+              // 每个引擎各自记"实际生效的设备"：设备待应用判定用得到（共用 models.loadedDevice 会串）
+              store.setEngineStatus("asr", { device: device as "cpu" | "cuda" });
               // 框架标签对齐：事件权威 framework 优先，清单兜底
               if (typeof payload.framework === "string") {
                 applyAsrFrameworkFromRust(payload.framework, evtEngine, model);

@@ -11,7 +11,7 @@
  */
 import { useAppStore } from "@/stores";
 import { rustLoadAsr, rustUnloadAsr, rustLoadTtsModel, rustUnloadTtsModel } from "@/lib/tauri";
-import { belongsToFramework, engineOf, runtimeKeyOf, runtimeKeysOf } from "@/lib/modelState";
+import { engineOf, runtimeKeyOf, runtimeKeysOf } from "@/lib/modelState";
 import { t } from "@/lib/i18n";
 
 /**
@@ -69,10 +69,13 @@ export function loadAsrModel(name: string, device: string): Promise<void> {
   // 乐观 loading（立即反馈）；框架标识全部来自 Rust 下发的清单字段，不做格式→引擎推导
   const item = s.models.items.find((i) => i.name === name);
   s.setEngineStatus("asr", { framework: engineOf(item), model: name, status: "loading", error: null });
+  const fwKey = runtimeKeyOf(item) ?? s.asr.framework;
   s.updateAsr({
     model: name,
     device: device || "cuda",
-    framework: runtimeKeyOf(item) ?? s.asr.framework,
+    framework: fwKey,
+    // 记住"这个框架下上次用的模型"：切走再切回来时恢复它（见 selectAsrFramework）
+    ...(fwKey ? { lastModelByFramework: { ...s.asr.lastModelByFramework, [fwKey]: name } } : {}),
     modelStatus: "loading",
   });
   // rust_load_asr：立即返回 reqId（fire-and-forget，终态必达），
@@ -121,8 +124,13 @@ export function loadTtsModel(name: string, device: string): Promise<void> {
   // （框架≠模型所属框架），点完瞬间卡片消失、加载完成又冒出来。最终以 model_ready 事件为准
   // （cuda 设备会纠正到 pytorch-cuda130 所在的那个框架标签）。
   const item = s.models.items.find((i) => i.name === name);
+  const fwKey = runtimeKeyOf(item);
   s.setEngineStatus("tts", { model: name, status: "loading", error: null });
-  s.updateTts({ model: name, device, ...(runtimeKeyOf(item) ? { framework: runtimeKeyOf(item)! } : {}) });
+  s.updateTts({
+    model: name,
+    device,
+    ...(fwKey ? { framework: fwKey, lastModelByFramework: { ...s.tts.lastModelByFramework, [fwKey]: name } } : {}),
+  });
   s.setTtsModelStatus("loading"); // 兼容旧 UI，语义改为「UI 选中」
 
   const op = rustLoadTtsModel(name, device);
@@ -154,32 +162,69 @@ export function unloadTtsModel(): Promise<void> {
 }
 
 /**
- * 切换 TTS 推理框架 —— 框架与模型必须成对变化。
+ * 切换 TTS 推理框架 —— **只改选中，绝不碰引擎**。
  *
- * 只改框架偏好会让界面自相矛盾：列表按新框架过滤后看不到任何模型，而"当前"
- * 仍是旧框架的模型（用户看到的就是"框架换了、模型没跟着换"）。所以这里：
- *   1. 该框架下有已下载模型 → 直接加载清单里的第一个（顺序即优先级），模型跟着框架走；
- *   2. 该框架下没有已下载模型 → 卸载当前引擎并清空选中，让界面如实显示"该框架下没有模型"。
- * 同模型已就绪时只改偏好，不重启引擎（幂等）。
+ * 加载/卸载只由"点模型卡片""点激活""点应用并重载"触发（见方案：统一加载策略）。
+ * 之前这里会直接加载新框架下"第一个已下载"的模型：用户只是想看看 PyTorch 下有什么模型，
+ * 就会被起一个 worker（PyTorch 首次 3–8s、吃内存/显存）。
+ *
+ * 选中项 = 该框架下**你上次选过的那个**（`lastModelByFramework`）；从没选过则谁都不选，
+ * 也不替用户挑第一个。
  */
-export function switchTtsFramework(framework: string): void {
+export function selectTtsFramework(framework: string): void {
   const s = useAppStore.getState();
   if (!framework || framework === s.tts.framework) return;
-  const target = s.models.items.find(
-    (i) => i.kind === "tts" && i.state === "downloaded" && belongsToFramework(i, framework),
-  );
-  if (!target) {
-    s.updateTts({ framework, model: "" });
-    s.setTtsModelStatus("idle");
-    if (s.engines.tts.status !== "idle") {
-      s.addLog(`[model] 框架 ${framework} 下没有已下载模型，已卸载当前 TTS 模型`, "warn");
-      void unloadTtsModel();
+  s.updateTts({ framework, model: s.tts.lastModelByFramework[framework] ?? "" });
+}
+
+/** ASR 版：同样只改选中（切框架不加载、不卸载，也不替用户挑模型） */
+export function selectAsrFramework(framework: string): void {
+  const s = useAppStore.getState();
+  if (!framework || framework === s.asr.framework) return;
+  s.updateAsr({ framework, model: s.asr.lastModelByFramework[framework] ?? "" });
+}
+
+/** 启动自动加载只允许发生一次（清单可能在启动期到多次，重复加载无意义） */
+let autoLoaded = false;
+
+/**
+ * 启动时按开关自动加载"上次用过的模型" —— 由 `models_state`（清单落地）驱动调用。
+ *
+ * 为什么挂在清单事件上：持久化的模型可能已被删除/换机，无脑加载会让启动遮罩弹错误；
+ * 拿到清单才能确认"它还在且已下载"。校验不过就清空选中 + 记一行日志，不加载。
+ *
+ * 只在启动阶段（`startupPhase === "booting"`）生效：之后的清单刷新（切页、3s 轮询、
+ * 窗口聚焦）不该再次触发加载。ASR 默认自动加载（热键要求常驻），TTS 默认不加载。
+ */
+export function autoLoadFromManifest(): void {
+  if (autoLoaded) return;
+  const s = useAppStore.getState();
+  // 只认"启动后第一份清单"：任一引擎已经不在 idle，说明用户已经动手（或上一份清单已处理过），
+  // 此时再自动加载就是替用户做决定。`autoLoaded` 保证整次运行只尝试一次。
+  if (s.engines.asr.status !== "idle" || s.engines.tts.status !== "idle") return;
+  autoLoaded = true;
+
+  const targets: { kind: "asr" | "tts"; model: string; device: string }[] = [];
+  if (s.asr.autoLoad && s.asr.model) targets.push({ kind: "asr", model: s.asr.model, device: s.asr.device });
+  if (s.tts.autoLoad && s.tts.model) targets.push({ kind: "tts", model: s.tts.model, device: s.tts.device });
+  if (targets.length === 0) return;
+
+  for (const t of targets) {
+    const st = useAppStore.getState();
+    const item = st.models.items.find((i) => i.name === t.model);
+    if (!item || item.state !== "downloaded") {
+      st.addLog(`[model] 启动自动加载已跳过：${t.model} 不在已下载模型中（已清空选中）`, "warn");
+      if (t.kind === "asr") {
+        st.updateAsr({ model: "" });
+        st.setEngineStatus("asr", { model: null, status: "idle", error: null });
+      } else {
+        st.updateTts({ model: "" });
+        st.setEngineStatus("tts", { model: null, status: "idle", error: null });
+        st.setTtsModelStatus("idle");
+      }
+      continue;
     }
-    return;
+    if (t.kind === "asr") void loadAsrModel(t.model, t.device).catch(() => {});
+    else void loadTtsModel(t.model, t.device).catch(() => {});
   }
-  if (target.name === s.tts.model && s.engines.tts.status === "ready") {
-    s.updateTts({ framework });
-    return;
-  }
-  void loadTtsModel(target.name, s.tts.device);
 }

@@ -58,6 +58,9 @@ export interface EngineState {
   /** 加载阶段（loading 时的细分进度）：unload（卸载旧模型）→ loading（启动/等待）→ ready */
   stage: "unload" | "loading" | "ready" | null;
   error: string | null;
+  /** 该引擎实际跑在哪个设备上（model_ready 事件回写）。
+   *  不用 models.loadedDevice：那是 ASR/TTS 共用的单值，两个引擎同时就绪时会串。 */
+  device: "cpu" | "cuda" | null;
 }
 
 /** 精选条目（Rust models_state 下发的「调试定死的文件组合」；同一模型可有多组） */

@@ -7,7 +7,7 @@ export interface EngineRegistry {
 }
 
 function idleEngine(): EngineState {
-  return { framework: null, model: null, status: "idle", stage: null, error: null };
+  return { framework: null, model: null, status: "idle", stage: null, error: null, device: null };
 }
 
 // ── 能力字段归一化（models_state 事件 → ModelItemState）──
@@ -59,6 +59,9 @@ export interface ModelsSlice {
     items: ModelItemState[];
     loadedModel: string | null;
     loadedDevice: string | null;
+    /** 清单（models_state）到达的时间戳；null = 还没到。
+     *  用途：启动自动加载要等它才能校验模型是否存在；启动页的"空启动"判定也要它。 */
+    manifestAt: number | null;
   };
   /** 引擎加载状态（集中管理） */
   engines: EngineRegistry;
@@ -79,7 +82,7 @@ export interface ModelsSlice {
 
 export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: ModelsSlice) => Partial<ModelsSlice>)) => void): ModelsSlice => ({
   startupPhase: "booting",
-  models: { modelRoot: "", proxy: "", huggingfaceToken: "", hasHfToken: false, diskFreeGb: null, items: [], loadedModel: null, loadedDevice: null },
+  models: { modelRoot: "", proxy: "", huggingfaceToken: "", hasHfToken: false, diskFreeGb: null, items: [], loadedModel: null, loadedDevice: null, manifestAt: null },
   engines: { asr: idleEngine(), tts: idleEngine() },
   setModelRootLocal: (modelRoot) => set((s) => ({ models: { ...s.models, modelRoot } })),
   setProxyLocal: (proxy) => set((s) => ({ models: { ...s.models, proxy } })),
@@ -91,6 +94,7 @@ export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: Mod
     set((s) => ({
       models: {
         ...s.models,
+        manifestAt: Date.now(),
         modelRoot: typeof payload.model_root === "string" ? payload.model_root : s.models.modelRoot,
         diskFreeGb: typeof payload.disk_free_gb === "number" ? payload.disk_free_gb : s.models.diskFreeGb,
         proxy: typeof payload.proxy === "string" ? payload.proxy : s.models.proxy,

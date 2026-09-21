@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FileAudio, Info, Loader2, Mic, Pencil, Play, Sparkles, Trash2, Volume2, X, type LucideIcon } from "lucide-react";
+import { FileAudio, Info, Loader2, Mic, Pencil, Play, RotateCw, Sparkles, Trash2, Volume2, X, type LucideIcon } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Progress } from "@/components/ui/progress";
 import { ModelSelector } from "@/components/ModelSelector";
@@ -28,9 +29,9 @@ import {
   rustTtsVoiceUse,
   type TtsVoiceItem,
 } from "@/lib/tauri";
-import { frameworkOptionsOf, selectLoadingKind, supportsClone, ttsModelInfoOf } from "@/lib/modelState";
+import { belongsToFramework, engineModelStatus, frameworkOptionsOf, selectLoadingKind, supportsClone, ttsModelInfoOf } from "@/lib/modelState";
 import { useAudioPreview } from "@/lib/useAudioPreview";
-import { loadTtsModel, switchTtsFramework } from "@/lib/modelLoader";
+import { loadTtsModel, selectTtsFramework } from "@/lib/modelLoader";
 import { useExportDir } from "@/lib/useExportDir";
 
 // ============================================================
@@ -40,16 +41,25 @@ import { useExportDir } from "@/lib/useExportDir";
 function ModelDevicePage() {
   const tts = useAppStore((s) => s.tts);
   const gpu = useAppStore((s) => s.gpu);
-  const ttsModelStatus = useAppStore((s) => s.ttsModelStatus);
   const locale = useAppStore((s) => s.locale);
+  const updateTts = useAppStore((s) => s.updateTts);
   const modelItems = useAppStore((s) => s.models.items);
   const runtimePackages = useAppStore((s) => s.runtime.packages);
-  // 加载中禁用"会发起加载"的两个下拉：门禁会拦下请求，但那是点完之后的事（下拉会静默弹回原位）
+  // 引擎实际状态（含实际生效的设备）：判断"已加载的模型是否属于当前框架""设备是否待应用"
+  const engine = useAppStore((s) => s.engines.tts);
+  // 加载中禁用"会发起加载"的入口：门禁会拦下请求，但那是点完之后的事
   const loading = useAppStore(selectLoadingKind) !== null;
 
   // 框架下拉项：TTS 模型清单里的运行时包 key（去重，onnx 垫底）—— 共用 frameworkOptionsOf，
   // 与 ASR 面板同一处实现，顺序规则不会两边漂移
   const frameworkOptions = frameworkOptionsOf(modelItems, "tts", runtimePackages, tts.framework);
+
+  // 已加载的模型不属于当前框架 → 说明"现在跑的是别的框架的模型"（切框架不会替你卸载）
+  const loadedItem = modelItems.find((i) => i.name === (engine.model ?? ""));
+  const loadedOtherFramework =
+    engine.status === "ready" && !!engine.model && !belongsToFramework(loadedItem, tts.framework);
+  // 设备待应用：引擎已就绪，且当前设备偏好 ≠ 引擎实际生效的设备
+  const devicePending = engine.status === "ready" && !!engine.device && tts.device !== engine.device;
 
   return (
     <div className="space-y-4">
@@ -57,14 +67,9 @@ function ModelDevicePage() {
         <CardHeader>
           <CardTitle className="text-base">{t(locale, "tts.device")}</CardTitle>
         </CardHeader>
-        <CardContent>
-          <Select
-            value={tts.device}
-            disabled={loading}
-            onValueChange={(device) => {
-              void loadTtsModel(tts.model, device);
-            }}
-          >
+        <CardContent className="space-y-3">
+          {/* 切设备只存偏好：真正重载由「应用并重载」触发（与 ASR 面板同一套约定） */}
+          <Select value={tts.device} disabled={loading} onValueChange={(device) => updateTts({ device })}>
             <SelectTrigger className="w-64">
               <SelectValue />
             </SelectTrigger>
@@ -75,6 +80,26 @@ function ModelDevicePage() {
               </SelectItem>
             </SelectContent>
           </Select>
+          {devicePending && (
+            <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2">
+              <div className="min-w-0 flex-1">
+                <p className="text-xs text-amber-600 dark:text-amber-400">
+                  {t(locale, "tts.device.pending", { device: tts.device.toUpperCase() })}
+                </p>
+                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                  {t(locale, "tts.device.pendingHint")}
+                </p>
+              </div>
+              <Button
+                size="sm"
+                disabled={loading || !tts.model}
+                onClick={() => void loadTtsModel(tts.model, tts.device)}
+              >
+                <RotateCw className="mr-1.5 h-3.5 w-3.5" />
+                {t(locale, "tts.device.apply")}
+              </Button>
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -83,10 +108,14 @@ function ModelDevicePage() {
           <CardTitle className="text-base">{t(locale, "tts.model")}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
-          {/* 推理框架（运行时包）：模型与框架成对切换 —— 选这里的框架会自动加载该框架下的模型 */}
+          {/* 推理框架：**只改选中，不加载也不卸载** —— 加载只发生在点模型卡片的时候 */}
           <div className="flex items-center gap-3">
             <label className="shrink-0 text-sm font-medium">{t(locale, "tts.framework.label")}</label>
-            <Select value={tts.framework} disabled={loading} onValueChange={(framework) => switchTtsFramework(framework)}>
+            <Select
+              value={tts.framework}
+              disabled={loading}
+              onValueChange={(framework) => selectTtsFramework(framework)}
+            >
               <SelectTrigger className="w-56">
                 <SelectValue />
               </SelectTrigger>
@@ -100,7 +129,19 @@ function ModelDevicePage() {
           <p className="text-xs text-muted-foreground">
             {t(locale, "tts.framework.hint", { framework: tts.framework })}
           </p>
-          {/* 模型选择器：只展示已下载 + 属于当前框架的模型 */}
+
+          {/* 已加载的模型属于别的框架：切框架不会替你卸载，这里如实说明 */}
+          {loadedOtherFramework && (
+            <div className="rounded-md border border-sky-500/30 bg-sky-500/5 px-3 py-2 text-xs text-sky-700 dark:text-sky-400">
+              {t(locale, "tts.framework.loaded", {
+                model: engine.model ?? "",
+                framework: engine.framework ?? "",
+              })}
+              <span className="ml-2 text-muted-foreground">{t(locale, "tts.framework.loadedHint")}</span>
+            </div>
+          )}
+
+          {/* 模型选择器：只展示已下载 + 属于当前框架的模型；点卡片 = 加载它（唯一的加载入口） */}
           <ModelSelector
             kind="tts"
             selected={tts.model}
@@ -111,7 +152,20 @@ function ModelDevicePage() {
           />
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <span>{t(locale, "tts.current")}: </span>
-            <ModelStatusBadge status={ttsModelStatus} modelName={tts.model} />
+            <ModelStatusBadge
+              status={engineModelStatus("tts", tts.model)}
+              modelName={tts.model}
+              selected={!!tts.model}
+            />
+          </div>
+
+          {/* 启动时是否自动加载上次的模型（默认关：TTS 是按需服务） */}
+          <div className="flex items-center justify-between gap-3 pt-1">
+            <div className="min-w-0">
+              <div className="text-sm font-medium">{t(locale, "models.autoLoad")}</div>
+              <div className="text-xs text-muted-foreground">{t(locale, "models.autoLoad.ttsDesc")}</div>
+            </div>
+            <Switch checked={tts.autoLoad} onCheckedChange={(autoLoad) => updateTts({ autoLoad })} />
           </div>
         </CardContent>
       </Card>
@@ -1517,7 +1571,19 @@ function SynthesizePage() {
               </span>
             </div>
             {!canSynth && (
-              <span className="text-[11px] text-muted-foreground">{t(locale, "tts.voice.needModel")}</span>
+              // 未加载时不只是灰掉按钮：给出口（去模型与设备页）—— 空跑一次只会拿到
+              // 后端那句"TTS 模型未加载"，用户还得自己找在哪加载
+              <span className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                {t(locale, "tts.voice.needModel")}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7"
+                  onClick={() => useAppStore.getState().setActiveSubMenu("model-device")}
+                >
+                  {t(locale, "tts.gotoModelDevice")}
+                </Button>
+              </span>
             )}
             <Button
               size="sm"

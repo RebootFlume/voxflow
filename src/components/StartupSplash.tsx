@@ -34,7 +34,6 @@ export function StartupSplash() {
   const [emptyBoot, setEmptyBoot] = useState(false);
   const skipTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fadeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const emptyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 10s 后显示「跳过」按钮
   useEffect(() => {
@@ -44,16 +43,26 @@ export function StartupSplash() {
     };
   }, []);
 
-  // 空启动检测：2s 后若 ASR 仍未进入 loading（没有模型被触发加载）→ 视为空启动
+  // 空启动检测：2s 后若 ASR 仍未进入 loading，且**清单已到**（确认真的没得加载）→ 视为空启动。
+  // 为什么要等清单：自动加载现在挂在清单事件上（要先校验模型还在不在），
+  // 不等它就会出现"启动页说没模型 → 界面出来后模型才开始加载"的错位。
+  // 兜底：清单始终没到（sidecar 异常）时也不能把启动页挂死 —— 6s 后无条件按空启动处理。
   useEffect(() => {
-    emptyTimer.current = setTimeout(() => {
+    const softCheck = setTimeout(() => {
+      const st = useAppStore.getState();
+      if (st.engines.asr.status === "idle" && st.models.manifestAt !== null) {
+        setEmptyBoot(true);
+      }
+    }, 2_000);
+    const hardCheck = setTimeout(() => {
       const st = useAppStore.getState();
       if (st.engines.asr.status === "idle") {
         setEmptyBoot(true);
       }
-    }, 2_000);
+    }, 6_000);
     return () => {
-      if (emptyTimer.current) clearTimeout(emptyTimer.current);
+      clearTimeout(softCheck);
+      clearTimeout(hardCheck);
     };
   }, []);
 

@@ -96,7 +96,8 @@ export function ModelSelector({ kind, selected, onSelect, formatFilter, download
         const isSelected = m.name === selected;
         // 失败原因只在该模型是当前选中时展示（否则会串台到别的模型）
         const isFailedHere = isSelected && status === "error";
-        // 状态文案：不再要求 isLoaded —— 失败时 isLoaded=false，旧逻辑会让原因整段不渲染
+        // 状态文案：选中 ≠ 已在跑。选中但引擎 idle 时明确写「未加载」——
+        // 此前这里返回空串，卡片是"高亮着、什么都不写"，看起来像已经加载好了（用户反馈过）。
         const statusLabel = isLoaded
           ? t(locale, "common.modelReady")
           : isSelected
@@ -106,7 +107,7 @@ export function ModelSelector({ kind, selected, onSelect, formatFilter, download
                 ? t(locale, "common.modelReady")
                 : status === "error"
                   ? t(locale, "common.modelFailed")
-                  : ""
+                  : t(locale, "common.modelNotLoaded")
             : "";
         // 该模型所需框架未就绪 → 标注（用户不必先点一次才知道）
         // 同一框架可能有多个运行时包（PyTorch: cpu / cuda130），任一就绪即不算缺
