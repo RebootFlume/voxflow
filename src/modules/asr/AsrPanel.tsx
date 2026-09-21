@@ -164,7 +164,7 @@ function useVramGuard() {
     const s = useAppStore.getState();
     const skipCheck =
       device === "cpu" ||
-      (computeIsLoaded("asr", model) && s.models.loadedDevice === device) ||
+      (computeIsLoaded("asr", model) && s.engines.asr.device === device) ||
       alreadyConfirmedRemembered(model, device);
 
     if (!skipCheck) {
@@ -216,9 +216,12 @@ export function AsrPanel() {
   const updateAsr = useAppStore((s) => s.updateAsr);
   const locale = useAppStore((s) => s.locale);
   const gpu = useAppStore((s) => s.gpu);
-  // 引擎加载状态 + 实际加载设备（判断「设备待应用」）
+  // 引擎加载状态 + 实际加载设备（判断「设备待应用」）。
+  // 必须读 engines.asr.device：models.loadedDevice 是 ASR/TTS 共用的单值，
+  // TTS 在 cuda 上加载一次就会把它改成 "cuda"，于是 ASR 这边明明是 cpu 也被判成"设备待应用"
+  // —— 用户看到的就是"这条提示一直出现，点了应用还在"。
   const asrEngineReady = useAppStore((s) => s.engines.asr.status === "ready");
-  const loadedDevice = useAppStore((s) => s.models.loadedDevice);
+  const loadedDevice = useAppStore((s) => s.engines.asr.device);
   const modelItems = useAppStore((s) => s.models.items);
   const runtimePackages = useAppStore((s) => s.runtime.packages);
   // 用户主动加载的显存预检（启动自动加载不走这里）

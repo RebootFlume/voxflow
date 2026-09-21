@@ -229,7 +229,6 @@ export function useSidecarEvents() {
             "success",
           );
           if (device) {
-            store.setLoadedModel(model || store.models.loadedModel || "", device);
             const kind = kindOf(model);
             if (kind) {
               applyEngineStatus(kind, "ready");

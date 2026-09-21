@@ -57,8 +57,6 @@ export interface ModelsSlice {
     hasHfToken: boolean;
     diskFreeGb: number | null;
     items: ModelItemState[];
-    loadedModel: string | null;
-    loadedDevice: string | null;
     /** 清单（models_state）到达的时间戳；null = 还没到。
      *  用途：启动自动加载要等它才能校验模型是否存在；启动页的"空启动"判定也要它。 */
     manifestAt: number | null;
@@ -72,7 +70,6 @@ export interface ModelsSlice {
   applyDownloadProgress: (payload: Record<string, unknown>) => void;
   applyDownloadExtracting: (name: string) => void;
   applyDownloadDone: (status: string, model: string) => void;
-  setLoadedModel: (model: string, device: string) => void;
   /** 引擎操作 */
   setEngineStatus: (kind: "asr" | "tts", patch: Partial<EngineState>) => void;
   resetEngine: (kind: "asr" | "tts") => void;
@@ -82,7 +79,7 @@ export interface ModelsSlice {
 
 export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: ModelsSlice) => Partial<ModelsSlice>)) => void): ModelsSlice => ({
   startupPhase: "booting",
-  models: { modelRoot: "", proxy: "", huggingfaceToken: "", hasHfToken: false, diskFreeGb: null, items: [], loadedModel: null, loadedDevice: null, manifestAt: null },
+  models: { modelRoot: "", proxy: "", huggingfaceToken: "", hasHfToken: false, diskFreeGb: null, items: [], manifestAt: null },
   engines: { asr: idleEngine(), tts: idleEngine() },
   setModelRootLocal: (modelRoot) => set((s) => ({ models: { ...s.models, modelRoot } })),
   setProxyLocal: (proxy) => set((s) => ({ models: { ...s.models, proxy } })),
@@ -203,8 +200,6 @@ export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: Mod
     }));
   },
 
-  setLoadedModel: (loadedModel, loadedDevice) =>
-    set((s) => ({ models: { ...s.models, loadedModel, loadedDevice } })),
 
   setEngineStatus: (kind, patch) =>
     set((s) => ({ engines: { ...s.engines, [kind]: { ...s.engines[kind], ...patch } } })),
