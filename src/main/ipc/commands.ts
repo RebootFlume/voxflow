@@ -35,6 +35,7 @@ import {
   startDownload
 } from '../models/model-manager'
 import { runtimeStatus, verifyRuntime } from '../models/runtime'
+import * as tts from '../tts/commands'
 import { setHotkey } from '../system/hotkey'
 import { openInExplorer } from '../system/explorer'
 import { listAudioDevices } from '../system/audio-devices'
@@ -244,10 +245,21 @@ async function dispatchSidecarAction(payload: Record<string, unknown>): Promise<
           emitStatus('model_error', { kind: found.kind, model: name, msg })
         }
       } else {
-        // TTS 引擎在阶段二移植；此��明确报错而不是静默失败
-        const msg = 'TTS 引擎尚未移植到 Electron 版（阶段二）'
-        emitError(msg)
-        emitStatus('model_error', { kind: 'tts', model: name, msg })
+        // TTS → TtsRegistry（按描述符路由）
+        try {
+          const { framework, model: loadedName } = await tts.loadTtsModel(name, device)
+          emitSidecar({
+            status: 'model_ready',
+            kind: 'tts',
+            model: loadedName,
+            framework,
+            device
+          })
+        } catch (e) {
+          const msg = `TTS load failed: ${e instanceof Error ? e.message : String(e)}`
+          emitError(msg)
+          emitSidecar({ status: 'model_error', kind: 'tts', model: name, msg })
+        }
       }
       return { ok: true }
     }
@@ -490,13 +502,6 @@ export const commands: Record<string, CommandHandler> = {
     return new Uint8Array(data)
   },
 
-  rust_record_tts_reference: async (args) => {
-    // TTS 克隆参考录音：阶段二移植（渲染进程采集链路已就绪，落盘路径待接）
-    const seconds = typeof args.seconds === 'number' ? args.seconds : 6
-    const clamped = Math.max(3, Math.min(30, seconds))
-    throw new Error(`TTS 克隆参考录音尚未移植到 Electron 版（阶段二），请求时长 ${clamped}s`)
-  },
-
   rust_open_in_explorer: async (args) => {
     await openInExplorer(str(args, 'path'))
     return null
@@ -515,25 +520,41 @@ export const commands: Record<string, CommandHandler> = {
     throw new Error(`PyTorch 设备探测尚未移植到 Electron 版（阶段三）：${str(args, 'device')}`)
   },
 
-  // ── TTS（阶段二移植）─────────────────────────────────────────────────────
-  rust_load_tts_model: notYet('TTS 模型加载'),
-  rust_unload_tts_model: notYet('TTS 模型卸载'),
-  rust_set_tts_clone_voice: notYet('TTS 克隆参数设置'),
-  rust_clear_tts_clone_voice: notYet('TTS 克隆参数清除'),
-  rust_tts_voices_list: notYet('TTS 音色库列表'),
-  rust_tts_voice_add: notYet('TTS 音色入库'),
-  rust_tts_voice_update: notYet('TTS 音色更新'),
-  rust_tts_voice_remove: notYet('TTS 音色删除'),
-  rust_tts_voice_use: notYet('TTS 音色使用'),
-  rust_list_tts_speakers: notYet('TTS 说话人列表'),
-  rust_set_tts_language: notYet('TTS 语言切换'),
-  rust_synthesize: notYet('TTS 合成'),
-  rust_cancel_tts: notYet('TTS 合成取消')
-}
-
-/** 未移植命令的统一报错 */
-function notYet(what: string): CommandHandler {
-  return () => {
-    throw new Error(`${what}尚未移植到 Electron 版（阶段二）`)
-  }
+  // ── TTS ──────────────────────────────────────────────────────────────────
+  rust_load_tts_model: (args) => tts.loadTtsModel(str(args, 'modelPath'), str(args, 'device')),
+  rust_unload_tts_model: () => tts.unloadTtsModel(),
+  rust_set_tts_clone_voice: (args) =>
+    tts.setTtsCloneVoice(str(args, 'audioPath'), str(args, 'referenceText')),
+  rust_clear_tts_clone_voice: () => tts.clearTtsCloneVoice(),
+  rust_tts_voices_list: () => tts.listVoices(),
+  rust_tts_voice_add: (args) =>
+    tts.addVoice(
+      str(args, 'sourcePath'),
+      str(args, 'name'),
+      str(args, 'note'),
+      str(args, 'referenceText')
+    ),
+  rust_tts_voice_update: (args) =>
+    tts.updateVoice(
+      str(args, 'id'),
+      str(args, 'name'),
+      str(args, 'note'),
+      str(args, 'referenceText')
+    ),
+  rust_tts_voice_remove: (args) => tts.removeVoice(str(args, 'id')),
+  rust_tts_voice_use: (args) => tts.useVoice(str(args, 'id')),
+  rust_record_tts_reference: (args) => {
+    const seconds = typeof args.seconds === 'number' ? args.seconds : 6
+    return tts.recordTtsReference(seconds)
+  },
+  rust_list_tts_speakers: () => tts.listTtsSpeakers(),
+  rust_set_tts_language: (args) => tts.setTtsLanguage(str(args, 'language')),
+  rust_synthesize: (args) =>
+    tts.synthesize(str(args, 'text'), str(args, 'voice'), str(args, 'exportDir'), (done, total) => {
+      // 单段（短文本）不发进度：与「短文本免分段」一致，界面上不该冒出「第 1/1 段」
+      if (total > 1) {
+        emitSidecar(tts.ttsProgressPayload(done, total))
+      }
+    }),
+  rust_cancel_tts: () => tts.cancelTts()
 }

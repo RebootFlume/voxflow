@@ -145,7 +145,7 @@ async function listAudioDevices(): Promise<{
 
 /** 注册主进程指令监听（渲染进程入口调用一次） */
 export function registerCaptureBridge(): void {
-  window.voxflow.capture.onCommand(({ action, requestId }) => {
+  window.voxflow.capture.onCommand(({ action, requestId, seconds }) => {
     if (action === 'start') {
       void startRecording()
         .then(() => window.voxflow.capture.respond(requestId, true, { samples: new Float32Array(0), sampleRate: TARGET_SAMPLE_RATE, seconds: 0, peak: 0 }))
@@ -159,6 +159,20 @@ export function registerCaptureBridge(): void {
       }
       const result = recorder.stop()
       window.voxflow.capture.respond(requestId, true, result)
+    } else if (action === 'record') {
+      // 定长录音：录 seconds 秒后自动停止并回传（用于 TTS 克隆参考音频）
+      const dur = typeof seconds === 'number' && seconds > 0 ? seconds : 6
+      void startRecording()
+        .then(() => new Promise<void>((resolve) => window.setTimeout(resolve, dur * 1000)))
+        .then(() => {
+          if (!recorder) throw new Error('录音未在运行')
+          const result = recorder.stop()
+          window.voxflow.capture.respond(requestId, true, result)
+        })
+        .catch((e: unknown) => {
+          if (recorder) recorder.stop()
+          window.voxflow.capture.respond(requestId, false, undefined, e instanceof Error ? e.message : String(e))
+        })
     }
   })
 

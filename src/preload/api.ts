@@ -41,8 +41,8 @@ export interface VoxFlowAPI {
   }
   /** 采集请求回执（主进程发起） */
   capture: {
-    /** 订阅主进程下发的采集指令（start / stop） */
-    onCommand(handler: (payload: { action: string; requestId: number }) => void): void
+    /** 订阅主进程下发的采集指令（start / stop / record） */
+    onCommand(handler: (payload: { action: string; requestId: number; seconds?: number }) => void): void
     respond(requestId: number, ok: boolean, payload?: unknown, error?: string): Promise<void>
   }
   /** 音频设备请求回执（主进程发起） */

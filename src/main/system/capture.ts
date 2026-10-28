@@ -52,3 +52,16 @@ export function stopCapture(): Promise<CaptureResult> {
     15000
   )
 }
+
+/**
+ * 定长录音：录 `seconds` 秒后自动停止并返回样本（一次性完成）。
+ * 用于 TTS 克隆参考音频——那里需要的是「一段固定时长的参考音」，
+ * 而不是热键那种「按下开始、松开结束」的手动流程。
+ */
+export function recordCapture(seconds: number): Promise<CaptureResult> {
+  return rendererRequest<CaptureResult>(
+    CAPTURE_COMMAND_CHANNEL,
+    { action: 'record', seconds },
+    Math.max(15000, (seconds + 10) * 1000)
+  )
+}
