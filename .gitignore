@@ -1,0 +1,16 @@
+node_modules
+dist
+out
+release
+dist-bundle
+.DS_Store
+*.log*
+.env
+.env.*
+!.env.example
+
+# 推理框架运行时包（llama / sherpa，用户在「推理框架」页下载解压到 exe 旁 libs/）
+/libs/
+
+# 本地模型目录（数据根内，由应用自行管理）
+/data/
