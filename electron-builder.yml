@@ -1,0 +1,74 @@
+appId: com.voxflow.app
+productName: VoxFlow
+copyright: Copyright © 2026 VoxFlow
+directories:
+  buildResources: build
+  output: release
+icon: build/icon.ico
+files:
+  - '!**/.vscode/*'
+  - '!src/*'
+  - '!scripts/*'
+  - '!resources/**'
+  - '!electron.vite.config.{js,ts,mjs,cjs}'
+  - '!{.eslintcache,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
+  - '!{.env,.env.*,.npmrc,pnpm-lock.yaml,package-lock.json}'
+  - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+asarUnpack:
+  - '**/*.node'
+# 运行时资源：随包分发（不在 asar 内）
+extraResources:
+  - from: resources/espeak-ng
+    to: espeak-ng
+  - from: resources/pytorch
+    to: pytorch
+  - from: resources/icon.png
+    to: icon.png
+win:
+  executableName: voxflow
+  target:
+    - target: nsis
+      arch:
+        - x64
+        - arm64
+nsis:
+  artifactName: ${name}-${version}-setup.${ext}
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  shortcutName: ${productName}
+  uninstallDisplayName: ${productName}
+  deleteAppDataOnUninstall: false
+mac:
+  category: public.app-category.utilities
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+  entitlementsInherit: build/entitlements.mac.plist
+  extendInfo:
+    - NSCameraUsageDescription: Application requests access to the device's camera.
+    - NSMicrophoneUsageDescription: Application requests access to the device's microphone.
+    - NSDocumentsFolderUsageDescription: Application requests access to the user's Documents folder.
+    - NSDownloadsFolderUsageDescription: Application requests access to the user's Downloads folder.
+  notarize: false
+dmg:
+  artifactName: ${name}-${version}-${arch}.${ext}
+linux:
+  target:
+    - AppImage
+    - deb
+  maintainer: voxflow@example.com
+  category: Utility
+appImage:
+  artifactName: ${name}-${version}-${arch}.${ext}
+deb:
+  artifactName: ${name}-${version}-${arch}.${ext}
+# 打包时对原生依赖执行 rebuild，确保 ABI 与 Electron 一致
+npmRebuild: true
+publish:
+  provider: generic
+  url: https://example.com/auto-updates

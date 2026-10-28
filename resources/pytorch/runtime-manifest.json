@@ -1,0 +1,14 @@
+{
+  "framework": "pytorch-python",
+  "variant": "cpu-or-cuda",
+  "python": "3.11.x",
+  "torch": "2.14.0",
+  "torchaudio": null,
+  "cuda": "variant-specific",
+  "arch": "x86_64-pc-windows-msvc",
+  "worker_protocol": 1,
+  "entry": "python.exe",
+  "script": "worker.py",
+  "smoke_test": "python.exe worker.py --smoke-test",
+  "status": "template; replace with build output metadata before publishing"
+}
