@@ -166,7 +166,7 @@ const text = await window.voxflow.invoke<string>('rust_transcribe_llama', {
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | 一 | 前端移植 + IPC 桥 + 窗口/托盘/热键/剪贴板/持久化 + ASR 主链路 | ✅ **完成并验证** |
-| 二 | TTS 引擎 + 音色库 + 克隆音色 | ⬜ 未开始 |
+| 二 | TTS 引擎 + 音色库 + 克隆音色 | ✅ **完成并验证**（逻辑层已验证，缺 sherpa 运行时未做真机合成） |
 | 三-a | 模型下载 / 删除 / 磁盘占用（`model_manager`） | ✅ 已实现（未做真实下载验证） |
 | 三-b | 推理框架运行时下载（llama / sherpa 包） | ⬜ 未开始 |
 | 三-c | PyTorch worker 接入 | ⬜ 未开始 |
@@ -188,6 +188,9 @@ const text = await window.voxflow.invoke<string>('rust_transcribe_llama', {
 | 数据根 | `%APPDATA%\com.voxflow.app\` —— **与 Tauri 版同一目录**，config.json / logs 直接互通 |
 | 显存监控 | nvidia-smi 真值：RTX 4070 Laptop，1.7 / 8.0 GB (21%) |
 | 原生模块 | `uiohook-napi` 经 electron-builder rebuild 后正确解包（`asarUnpack: **/*.node`） |
+| TTS 单元测试 | `npm run test:tts` —— 48 项全过（切分 / 音色库 / argv 解释器 / 时长钳制） |
+| TTS 端到端 | `npm run verify:tts` —— 24 项全过（音色库增删改查 / 错误分支 / 索引格式） |
+| TTS 索引格式 | `voices.json` 用 snake_case，与 Tauri 版共用同一份文件可直接互换 |
 
 ### 验证脚本
 
@@ -196,6 +199,8 @@ const text = await window.voxflow.invoke<string>('rust_transcribe_llama', {
 electron out/main/index.js --remote-debugging-port=9222
 npm run verify:renderer   # UI 渲染 + IPC 冒烟
 npm run verify:events     # 事件总线载荷校验
+npm run verify:tts        # TTS 命令端到端校验
+npm run test:tts          # TTS 单元测试（纯逻辑，无需运行时）
 npm run screenshot        # 截图到 %TEMP%
 ```
 
