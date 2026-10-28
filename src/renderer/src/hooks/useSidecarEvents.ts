@@ -1,0 +1,565 @@
+import { useEffect } from "react";
+import { onSidecarEvent, rustListTtsSpeakers, rustTtsVoicesList, rustTtsVoiceUse, sendToSidecar } from "@/lib/ipc";
+import { applyEngineStatus, applyAsrFrameworkFromRust, applyTtsFrameworkFromRust, syncAsrFrameworkFromLoaded, syncTtsFrameworkFromLoaded, resolveModelKind, runtimeKeyOf, ttsSupportsClone } from "@/lib/modelState";
+import { useAppStore, type EngineState } from "@/stores";
+import { t } from "@/lib/i18n";
+
+/** 字节数 → 人类可读（GB/MB） */
+function formatSize(v: unknown): string {
+  const n = typeof v === "number" ? v : 0;
+  if (n <= 0) return "";
+  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(2)} GB`;
+  if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+  return `${(n / 1024).toFixed(0)} KB`;
+}
+
+/** 订阅 Sidecar 事件 → 驱动全局状态与运行日志。挂载一次。 */
+export function useSidecarEvents() {
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let unlisten2: (() => void) | undefined;
+    let disposed = false;
+    /** 已消费的最大状态快照 seq（Rust 单调递增），用于丢弃乱序到达的陈旧快照 */
+    let lastStatusSeq = 0;
+    /** 已恢复克隆音色的 TTS 模型名（model_ready / model_loaded 双事件只恢复一次） */
+    let cloneRestoredFor = "";
+
+    void onSidecarEvent((payload) => {
+      const store = useAppStore.getState();
+      const status = String(payload.status ?? "");
+      const model = typeof payload.model === "string" ? payload.model : "";
+
+      // 旧请求的迟到事件（reqId 不匹配当前最新请求）→ 丢弃，避免旧终态覆盖新状态
+      const reqId = typeof payload.reqId === "number" ? payload.reqId : null;
+      if (reqId !== null && reqId !== useAppStore.getState().asr.loadReqId) {
+        return;
+      }
+
+      // 事件自带 kind（Rust 权威）优先，缺省查清单（清单也查不到时默认 ASR）
+      const pk = payload.kind;
+      const kindOf = (modelName: string): "asr" | "tts" | null =>
+        pk === "asr" || pk === "tts" ? pk : resolveModelKind(modelName);
+      // 事件自带的引擎展示名（Rust 下发时优先采信；缺省由清单反查）
+      const evtEngine = typeof payload.engine === "string" ? payload.engine : null;
+
+      // 识别完成后自动回 idle（2 秒后）
+      if (status === "recognized") {
+        const text = typeof payload.text === "string" ? payload.text : "";
+        store.addLog(`${t(store.locale, "log.recognitionResult")}: ${text}`, "success");
+        if (text) store.addHistoryRecord(text);
+        store.updateAsr({ status: "done" });
+        window.setTimeout(() => {
+          useAppStore.getState().updateAsr({ status: "idle" });
+        }, 2000);
+        return;
+      }
+
+      // 运行日志：下载进度按 ≥5% 节流，其余全量留痕
+      if (status === "model_download_progress") {
+        const pct = typeof payload.percent === "number" ? payload.percent : null;
+        const last = store.models.items.find((i) => i.name === model)?.percent ?? -100;
+        store.applyDownloadProgress(payload);
+        if (pct != null && pct - last >= 5) {
+          store.addLog(`[download] ${model} ${pct.toFixed(1)}%`, "info");
+        }
+      } else if (
+        status !== "models_state" &&
+        status !== "volume" &&
+        status !== "accepted" &&
+        status !== "status_snapshot" &&
+        status !== "model_evicted" &&
+        status !== "capabilities" &&
+        status !== "transcribe_error" &&
+        status !== "transcribe_progress" &&
+        status !== "audio_devices" &&
+        // 以下状态已有友好日志（case 里 addLog），跳过通用 JSON 日志避免重复
+        status !== "model_loading" &&
+        status !== "model_progress" &&
+        status !== "model_ready" &&
+        status !== "model_loaded" &&
+        status !== "model_error" &&
+        status !== "model_downloaded" &&
+        status !== "model_download_cancelled" &&
+        status !== "model_download_extracting" &&
+        status !== "model_download_error" &&
+        status !== "model_deleted" &&
+        status !== "model_root_set" &&
+        status !== "model_download_started" &&
+        status !== "rust_log" &&
+        status !== "runtime_download_progress" &&
+        status !== "runtime_download_phase" &&
+        status !== "runtime_installed" &&
+        status !== "runtime_download_error" &&
+        status !== "runtime_download_cancelled" &&
+        status !== "api_started" &&
+        status !== "api_stopped"
+      ) {
+        const level = status.includes("error")
+          ? "error"
+          : status === "recognized" || status === "model_ready" || status === "api_started"
+            ? "success"
+            : "info";
+        store.addLog(`[sidecar] ${JSON.stringify(payload)}`, level);
+      }
+
+      switch (status) {
+        // ---- 推理框架下载（全局常住：切页/切窗口进度不丢）----
+        case "runtime_download_progress": {
+          const fw = typeof payload.framework === "string" ? payload.framework : "";
+          const pct = typeof payload.progress === "number" ? payload.progress : 0;
+          if (fw) {
+            const cur = useAppStore.getState().runtimeDownload;
+            const phase = cur?.framework === fw && cur?.phase ? cur.phase : "downloading";
+            useAppStore.getState().setRuntimeDownload(fw, pct, null, phase);
+          }
+          break;
+        }
+        case "runtime_download_phase": {
+          // 解压阶段等无百分比事件：保持 100%，切换状态文案（防 UI 假卡死）
+          const fw = typeof payload.framework === "string" ? payload.framework : "";
+          const phase = payload.phase === "extracting" ? "extracting" : "downloading";
+          if (fw) {
+            const cur = useAppStore.getState().runtimeDownload;
+            if (phase === "extracting") {
+              useAppStore.getState().setRuntimeDownload(fw, Math.max(cur?.pct ?? 100, 100), null, "extracting");
+            }
+          }
+          break;
+        }
+        case "runtime_installed": {
+          const fw = typeof payload.framework === "string" ? payload.framework : "";
+          useAppStore.getState().setRuntimeDownload(null, 0);
+          store.addLog(`[framework] ✅ ${fw} 下载完成`, "success");
+          break;
+        }
+        case "runtime_download_error": {
+          const fw = typeof payload.framework === "string" ? payload.framework : "";
+          const msg = typeof payload.msg === "string" ? payload.msg : "未知错误";
+          useAppStore.getState().setRuntimeDownload(null, 0, msg);
+          store.addLog(`[framework] ❌ ${fw} 下载失败: ${msg}`, "error");
+          break;
+        }
+        case "runtime_download_cancelled": {
+          // 与 error 分支同样的收尾：清空 store → 进度条与取消按钮一起消失，回到可再次下载
+          const fw = typeof payload.framework === "string" ? payload.framework : "";
+          useAppStore.getState().setRuntimeDownload(null, 0);
+          store.addLog(`[framework] ${t(store.locale, "framework.cancelLog", { name: fw })}`, "warn");
+          break;
+        }
+        case "models_state":
+          store.applyModelsState(payload);
+          // 启动阶段：清单落地后按开关自动加载（含"模型还在不在"校验）。只在此处触发一次。
+          void import("@/lib/modelLoader").then(({ autoLoadFromManifest }) => autoLoadFromManifest());
+          // 清理无效的 tts.model：不在已下载列表（或未下载）时重置为空，避免显示「未下载的选中模型」
+          {
+            const st = useAppStore.getState();
+            const ttsSel = st.tts.model;
+            if (ttsSel) {
+              const item = st.models.items.find((i) => i.name === ttsSel);
+              const isAsr = resolveModelKind(ttsSel) === "asr";
+              if (!item || (item.kind === "tts" && item.state === "not_downloaded" && st.engines.tts.status !== "ready") || isAsr) {
+                st.updateTts({ model: "" });
+                st.setTtsModelStatus("idle");
+              }
+            }
+            // 清单晚到时，用已加载模型对齐框架标签（启动自动加载早于清单的场景）
+            if (
+              st.engines.asr.model &&
+              (st.engines.asr.status === "ready" || st.engines.asr.status === "loading")
+            ) {
+              syncAsrFrameworkFromLoaded();
+            }
+            if (
+              st.engines.tts.model &&
+              (st.engines.tts.status === "ready" || st.engines.tts.status === "loading")
+            ) {
+              syncTtsFrameworkFromLoaded();
+            }
+          }
+          break;
+        case "model_download_started":
+          store.addLog(`[download] ⬇ 开始下载 ${model}...`, "info");
+          break;
+        case "model_download_extracting":
+          store.applyDownloadExtracting(model);
+          store.addLog(`[download] 📦 ${model} 下载完成，正在解压安装...`, "info");
+          break;
+        case "model_downloaded":
+          store.applyDownloadDone(status, model);
+          store.addLog(
+            `[download] ✅ ${model} 下载完成（${formatSize(payload.size_bytes)}）`,
+            "success",
+          );
+          void sendToSidecar({ action: "list_models" });
+          break;
+        case "model_download_cancelled":
+          store.applyDownloadDone(status, model);
+          store.addLog(`[download] ⏹ ${model} 下载已取消`, "warn");
+          void sendToSidecar({ action: "list_models" });
+          break;
+        case "model_download_error":
+          store.applyDownloadDone(status, model);
+          store.addLog(
+            `[download] ❌ ${model} 下载失败: ${typeof payload.msg === "string" ? payload.msg : "未知错误"}`,
+            "error",
+          );
+          void sendToSidecar({ action: "list_models" });
+          break;
+        case "model_deleted":
+          store.addLog(
+            `[model] 🗑 已删除 ${model}（释放 ${formatSize(payload.freed_bytes)}）`,
+            "success",
+          );
+          void sendToSidecar({ action: "list_models" });
+          break;
+        case "model_root_set":
+          store.addLog(
+            `[model] 📂 模型目录已切换: ${typeof payload.path === "string" ? payload.path : ""}`,
+            "info",
+          );
+          void sendToSidecar({ action: "list_models" });
+          break;
+        case "model_ready":
+        case "model_loaded": {
+          const device = typeof payload.device === "string" ? payload.device : null;
+          const loadMs = typeof payload.load_ms === "number" ? payload.load_ms : null;
+          store.addLog(
+            `[model] ✅ ${model} 加载成功（${device || ""}${loadMs != null ? `, ${loadMs}ms` : ""}）`,
+            "success",
+          );
+          if (device) {
+            const kind = kindOf(model);
+            if (kind) {
+              applyEngineStatus(kind, "ready");
+            }
+            if (kind === "tts") {
+              store.setTtsModelStatus("ready");
+              // 框架标签：事件权威 framework（Rust 注册表决定），前端不猜。
+              // 两个域都要对齐：engines.tts.framework（展示）+ tts.framework（模型页过滤/持久化），
+              // 否则加载了 PyTorch 模型、下拉框却还停在 sherpa —— 用户看到的"显示不对"。
+              applyTtsFrameworkFromRust(
+                typeof payload.framework === "string" ? payload.framework : "",
+                typeof payload.engine === "string" ? payload.engine : null,
+                model,
+              );
+              // 设备回写：加载可能来自模型管理页等其它入口，面板显示的必须是实际生效的设备
+              // （事件权威；此前只有 ASR 回写，TTS 面板可能显示 CUDA 而引擎跑在 CPU 上）
+              store.updateTts({ device: device as "cpu" | "cuda" });
+              store.setEngineStatus("tts", { device: device as "cpu" | "cuda" });
+              // 音色对齐：换了模型后把上一个模型遗留的 sid 纠正掉。
+              // 单音色 / 克隆模型的说话人列表为空 ⇒ 清空（= 用模型默认音色），否则界面会一直显示
+              // 上一个模型的 "sid 47"（用户实际看到的现象）；预设模型则对齐到该模型自己的列表。
+              // 与语言对齐同源（TtsPanel 的 LanguageSelector）：派生状态不能跨模型残留。
+              void (async () => {
+                try {
+                  const r = await rustListTtsSpeakers();
+                  const list = Array.isArray(r.speakers) ? r.speakers : [];
+                  const cur = useAppStore.getState().tts.voice;
+                  if (list.length === 0) {
+                    if (cur !== "") useAppStore.getState().updateTts({ voice: "" });
+                    return;
+                  }
+                  // `""` = 用模型默认音色（引擎收 sid 0，与第一个音色等价）⇒ 不动它，
+                  // 否则预设模型上永远保不住"默认音色"。非数字的旧值（如早前的 "default"）归一为空。
+                  if (cur === "") return;
+                  if (!/^\d+$/.test(cur)) {
+                    useAppStore.getState().updateTts({ voice: "" });
+                    return;
+                  }
+                  if (!list.some((s) => String(s.sid) === cur)) {
+                    useAppStore.getState().updateTts({ voice: String(list[0].sid) });
+                  }
+                } catch {
+                  // 列表拿不到时不动用户选择（下次就绪/切模型会再对齐）
+                }
+              })();
+
+              // TTS 就绪后恢复选中音色：**唯一来源是音色库的 active_id**（voice_use 会一并把
+              // 参考音频下发给引擎）。库里没有 active_id ⇒ 就是没选中音色，保持不激活。
+              // 按模型去重：model_ready / model_loaded 双事件只恢复一次
+              if (cloneRestoredFor !== model) {
+                cloneRestoredFor = model;
+                void (async () => {
+                  const lib = await rustTtsVoicesList().catch((e) => {
+                    // 音色库不可读（目录缺失等）→ 记日志后走持久化音频兜底
+                    useAppStore.getState().addLog(`[tts] 读取音色库失败，改用持久化音频恢复: ${String(e)}`, "warn");
+                    return null;
+                  });
+                  const activeId = lib?.active_id ?? null;
+                  // 克隆音色只对支持克隆的模型有意义（当前仅 zipvoice）：在预设 / 固定音色模型上
+                  // 恢复必然失败，属于**预期**而非错误 ⇒ 跳过并静默，不写错误日志、不显示报错。
+                  // 库里保留 active_id：切回支持克隆的模型时会照常恢复。
+                  if (!ttsSupportsClone(model)) {
+                    useAppStore
+                      .getState()
+                      .addLog(`[tts] 当前模型（${model}）不支持克隆，跳过音色恢复`, "info");
+                    useAppStore.getState().resetTtsClone();
+                    return;
+                  }
+                  if (activeId) {
+                    await rustTtsVoiceUse(activeId);
+                    const v = lib?.voices.find((x) => x.id === activeId);
+                    useAppStore.getState().updateTtsClone({
+                      active: true,
+                      status: "ok",
+                      error: "",
+                      ...(v ? { name: v.name, audioPath: v.audio_path, referenceText: v.reference_text } : {}),
+                    });
+                    return;
+                  }
+                  // 不再有"按持久化 audioPath 恢复"的兜底：克隆音色不落 config，路径只可能来自
+                  // 本次会话刚应用过的音色（那种情况下 active_id 必然也在库里）。库里没有
+                  // active_id ⇒ 就是"没有选中音色"，保持不激活。
+                  useAppStore.getState().resetTtsClone();
+                })().catch((e) => {
+                  // 失败时不能继续显示"克隆已激活"：当前模型不支持克隆 / 未就绪、
+                  // 参考音频或音色条目已被删除、便携版整体搬目录导致路径失效
+                  // （装/便携两种数据根见 data_root）
+                  useAppStore.getState().addLog(`[tts] 恢复克隆音色失败: ${String(e)}`, "error");
+                  useAppStore.getState().resetTtsClone();
+                  useAppStore.getState().updateTtsClone({ status: "error", error: String(e) });
+                });
+              }
+            } else if (kind === "asr") {
+              store.updateAsr({ modelStatus: "ready", device: device as "cpu" | "cuda" });
+              // 每个引擎各自记"实际生效的设备"：设备待应用判定用得到（共用 models.loadedDevice 会串）
+              store.setEngineStatus("asr", { device: device as "cpu" | "cuda" });
+              // 框架标签对齐：事件权威 framework 优先，清单兜底
+              if (typeof payload.framework === "string") {
+                applyAsrFrameworkFromRust(payload.framework, evtEngine, model);
+              } else {
+                syncAsrFrameworkFromLoaded();
+              }
+            }
+          }
+          break;
+        }
+        case "model_loading":
+          store.addLog(`[model] ⏳ 正在加载 ${model}...`, "info");
+          // 只有 ASR 加载才对齐 ASR 框架标签（kind 权威；TTS 事件不再串改 asr.framework）
+          if (kindOf(model) !== "tts" && typeof payload.framework === "string") {
+            applyAsrFrameworkFromRust(payload.framework, evtEngine, model);
+          }
+          applyEngineStatus(kindOf(model), "loading");
+          break;
+        case "model_progress": {
+          // 加载阶段进度：unload / loading / ready —— 逐条记入运行日志，体现完整切换流程
+          const stage = typeof payload.stage === "string" ? payload.stage : "loading";
+          const kind = kindOf(model);
+          if (kind) {
+            useAppStore.getState().setEngineStatus(kind, {
+              status: "loading",
+              stage: stage as EngineState["stage"],
+            });
+          }
+          const dev = typeof payload.device === "string" ? payload.device : "";
+          if (stage === "unload") {
+            store.addLog(`[model] 🛑 卸载旧引擎…`, "info");
+          } else if (stage.startsWith("unload:")) {
+            store.addLog(`[model] 🛑 卸载旧引擎: ${stage.slice("unload:".length)}`, "info");
+          } else if (stage === "loading") {
+            store.addLog(`[model] ⏳ 启动引擎中（${model}${dev ? `, ${dev}` : ""}）…`, "info");
+          } else if (stage === "ready") {
+            store.addLog(`[model] ✅ 引擎就绪（${model}）`, "success");
+          } else if (stage) {
+            store.addLog(`[model] 🔄 ${stage}`, "info");
+          }
+          break;
+        }
+        case "model_not_downloaded":
+          applyEngineStatus(kindOf(model), "idle");
+          break;
+        case "model_error": {
+          const errMsg =
+            typeof payload.msg === "string"
+              ? payload.msg
+              : typeof payload.error === "string"
+                ? payload.error
+                : null;
+          store.addLog(`[model] ❌ ${model} 加载失败: ${errMsg ?? "未知错误"}`, "error");
+          applyEngineStatus(kindOf(model), "error", errMsg);
+          break;
+        }
+        // ---- Rust 引擎侧日志（端口守卫/身份验证/引擎状态）----
+        case "rust_log": {
+          const lvl = String(payload.level ?? "info");
+          const msg = String(payload.msg ?? "");
+          if (!msg) break;
+          const tgt = String(payload.target ?? "");
+          const short = tgt.split("::").filter(Boolean).pop() || "rust";
+          store.addLog(
+            `[rust:${short}] ${msg}`,
+            lvl === "error" ? "error" : lvl === "warn" ? "warn" : "info",
+          );
+          break;
+        }
+        // ---- 状态对账：后端真实状态快照，用于纠偏 ----
+        case "status_snapshot": {
+          // 并发对账（启动/窗口聚焦/超时兜底）可能乱序到达 → 丢弃陈旧快照
+          const seq = typeof payload.seq === "number" ? payload.seq : 0;
+          if (seq > 0 && seq < lastStatusSeq) break;
+          if (seq > 0) lastStatusSeq = seq;
+          const asrSnap = payload.asr as
+            | { model?: string; device?: string; loaded?: boolean }
+            | undefined;
+          if (asrSnap) {
+            const loaded = asrSnap.loaded === true;
+            const isTts = resolveModelKind(asrSnap.model ?? "") === "tts";
+            if (!isTts) {
+              if (loaded && asrSnap.device) {
+                if (
+                  store.engines.asr.status !== "ready" ||
+                  store.asr.device !== asrSnap.device
+                ) {
+                  applyEngineStatus("asr", "ready");
+                  store.updateAsr({
+                    modelStatus: "ready",
+                    device: asrSnap.device as "cpu" | "cuda",
+                  });
+                  // 快照带出真实加载模型 → 对齐框架标签（key/engine 全部来自清单）
+                  if (asrSnap.model) {
+                    const item = useAppStore.getState().models.items.find((i) => i.name === asrSnap.model);
+                    const key = runtimeKeyOf(item);
+                    if (key) applyAsrFrameworkFromRust(key, item?.engine, asrSnap.model);
+                  }
+                }
+              } else if (!loaded && store.engines.asr.status === "ready") {
+                applyEngineStatus("asr", "idle");
+              }
+            }
+          }
+          if (
+            payload.recording === false &&
+            (store.asr.status === "recording" ||
+              store.asr.status === "recognizing")
+          ) {
+            store.updateAsr({ status: "idle" });
+          }
+          break;
+        }
+        // ---- 显存不足：被其他模型挤占释放 ----
+        case "model_evicted": {
+          const evicted = Array.isArray(payload.models) ? payload.models : [];
+          const freedFor = typeof payload.freed_for === "string" ? payload.freed_for : "";
+          const engines = useAppStore.getState().engines;
+          for (const evictedModel of evicted) {
+            const m = String(evictedModel);
+            // 事件只给模型名：先按「引擎已加载模型」这种数据判定，再查清单（不再靠名字特征猜）
+            const kind =
+              m && engines.tts.model === m ? "tts" : m && engines.asr.model === m ? "asr" : resolveModelKind(m);
+            applyEngineStatus(kind, "idle");
+          }
+          if (evicted.length > 0) {
+            store.addLog(
+              t(store.locale, "log.vramInsufficient", { models: evicted.join(", "), freedFor }),
+              "warn",
+            );
+          }
+          break;
+        }
+        case "recording_started":
+          store.updateAsr({ status: "recording", volume: 0 });
+          break;
+        case "volume":
+          if (typeof payload.level === "number") {
+            store.updateAsr({ volume: Math.min(1, Math.max(0, payload.level)) });
+          }
+          break;
+        case "recognized":
+          break;
+        case "recognition_error": {
+          const errMsg =
+            typeof payload.error === "string"
+              ? payload.error
+              : typeof payload.msg === "string"
+                ? payload.msg
+                : t(store.locale, "log.recognitionFailed");
+          store.addLog(`[asr] ${errMsg}`, "error");
+          store.updateAsr({ status: "idle" });
+          break;
+        }
+        case "api_started":
+          store.addLog("[api] ✅ API 服务已启动", "success");
+          store.updateApi({ enabled: true, endpoints: { asr: true, tts: true } });
+          break;
+        case "api_stopped":
+          store.addLog("[api] ⏹ API 服务已停止", "info");
+          store.updateApi({ enabled: false, endpoints: { asr: false, tts: false } });
+          break;
+        case "audio_devices": {
+          const devices = Array.isArray(payload.devices) ? payload.devices : [];
+          store.setAudioDevices(
+            String(payload.current ?? "default"),
+            typeof payload.currentName === "string" ? payload.currentName : devices[0]?.name ?? "—",
+          );
+          break;
+        }
+        case "gpu_info":
+          store.setGpu(
+            payload.available === true,
+            typeof payload.gpuName === "string" ? payload.gpuName : "",
+            typeof payload.deviceCount === "number" ? payload.deviceCount : 0,
+          );
+          break;
+        case "capabilities":
+          if (typeof payload.ffmpeg === "boolean") {
+            store.setCapabilities({ ffmpeg: payload.ffmpeg });
+          }
+          break;
+        // ---- 转写事件（全局处理，组件卸载不影响） ----
+        case "transcribe_progress": {
+          const tPath = typeof payload.path === "string" ? payload.path : "";
+          const tProgress = typeof payload.progress === "number" ? payload.progress : 0;
+          const doneSec = typeof payload.done_sec === "number" ? payload.done_sec : undefined;
+          const totalSec = typeof payload.total_sec === "number" ? payload.total_sec : undefined;
+          store.updateTranscribeTask(tPath, { status: "transcribing", progress: tProgress, doneSec, totalSec });
+          break;
+        }
+        case "transcribe_done": {
+          const dPath = typeof payload.path === "string" ? payload.path : "";
+          const dText = typeof payload.text === "string" ? payload.text : "";
+          const savedPath = typeof payload.saved_path === "string" ? payload.saved_path : "";
+          store.updateTranscribeTask(dPath, { status: "done", progress: 100, result: dText, savedPath });
+          break;
+        }
+        case "transcribe_error": {
+          const ePath = typeof payload.path === "string" ? payload.path : "";
+          const eMsg = typeof payload.msg === "string" ? payload.msg : t(store.locale, "log.transcriptionFailed");
+          store.updateTranscribeTask(ePath, { status: "error", error: eMsg });
+          break;
+        }
+        // ---- TTS 合成分段进度（只认正在 synthesizing 的那个任务；试听路径触发的进度自动落到空集上被忽略） ----
+        case "tts_progress": {
+          const chunk = typeof payload.chunk === "number" ? payload.chunk : 0;
+          const chunks = typeof payload.chunks === "number" ? payload.chunks : 0;
+          if (chunk > 0 && chunks > 0) store.updateSynthesizingTask({ progress: { chunk, chunks } });
+          break;
+        }
+        default:
+          break;
+      }
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+
+    // 订阅主进程热键状态（CapsLock 按下/松开时立即反映，不等 sidecar 回传）
+    void window.voxflow.listen<string>("asr://status", (payload) => {
+      const s = String(payload ?? "");
+      if (s === "recording" || s === "recognizing") {
+        useAppStore.getState().updateAsr({ status: s as "recording" | "recognizing" });
+      } else if (s === "idle") {
+        useAppStore.getState().updateAsr({ status: "idle" });
+      }
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten2 = fn;
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+      unlisten2?.();
+    };
+  }, []);
+}

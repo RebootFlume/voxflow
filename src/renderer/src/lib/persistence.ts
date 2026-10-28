@@ -1,0 +1,226 @@
+import { useAppStore, type HistoryRecord, type RuntimeLog, type RuntimeLogLevel } from "@/stores";
+
+// ---- 基础文件 I/O ----
+
+export async function loadData(filename: string): Promise<string | null> {
+  return window.voxflow.invoke<string | null>("read_data_file", { filename });
+}
+
+export async function saveData(filename: string, content: string): Promise<void> {
+  await window.voxflow.invoke("write_data_file", { filename, content });
+}
+
+// ---- 防抖写入 ----
+const pending = new Map<string, string>();
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+export function debouncedSave(filename: string, content: string) {
+  pending.set(filename, content);
+  if (flushTimer) clearTimeout(flushTimer);
+  flushTimer = setTimeout(flush, 300);
+}
+
+function flush() {
+  for (const [filename, content] of pending) {
+    void saveData(filename, content);
+  }
+  pending.clear();
+  flushTimer = null;
+}
+
+// ---- config.json ----
+
+/** 读取配置文件并恢复到 store */
+export async function loadConfig() {
+  try {
+    const data = await loadData("config.json");
+    if (!data) return;
+    const parsed = JSON.parse(data);
+    const store = useAppStore.getState();
+    useAppStore.setState({
+      asr: { ...store.asr, ...parsed.asr },
+      tts: { ...store.tts, ...parsed.tts },
+      // 克隆音色**不从 config 恢复**：它是纯运行态，权威在 `tts-voices/voices.json`，
+      // 由模型就绪时的恢复路径按 `active_id` 下发（见 useSidecarEvents）。启动时未加载模型
+      // 就显示"克隆已生效"是假象——引擎里根本没有参考音频。
+      api: { ...store.api, ...parsed.api, endpoints: { ...store.api.endpoints, ...parsed.api?.endpoints } },
+      overlay: { ...store.overlay, ...parsed.overlay },
+      theme: { ...store.theme, ...parsed.theme },
+      locale: parsed.locale ?? store.locale,
+      closeToTray: typeof parsed.closeToTray === "boolean" ? parsed.closeToTray : store.closeToTray,
+      io: { ...store.io, ...parsed.io },
+      models: {
+        ...store.models,
+        modelRoot: parsed.models?.modelRoot ?? store.models.modelRoot,
+        proxy: parsed.models?.proxy ?? store.models.proxy,
+        huggingfaceToken: typeof parsed.models?.huggingfaceToken === "string" ? parsed.models.huggingfaceToken : store.models.huggingfaceToken,
+        hasHfToken: typeof parsed.models?.huggingfaceToken === "string" ? parsed.models.huggingfaceToken.trim() !== "" : store.models.hasHfToken,
+      },
+      useRustEngine: parsed.useRustEngine ?? false,
+    });
+  } catch {}
+}
+
+/** 保存当前配置到文件 */
+export async function saveConfig() {
+  try {
+    const state = useAppStore.getState();
+    // modelRoot 落盘转「存储形式」：数据根内 → 相对（换目录/改名自动跟随），外部 → 绝对。
+    // 运行时 store 始终持有绝对路径（Rust 事件回传），仅落盘瞬间转换。
+    const storageRoot = state.models.modelRoot
+      ? await window.voxflow.invoke<string>("rust_storage_model_root", { root: state.models.modelRoot }).catch(
+          () => state.models.modelRoot,
+        )
+      : "models";
+    const config = {
+      asr: {
+        hotkey: state.asr.hotkey,
+        model: state.asr.model,
+        device: state.asr.device,
+        framework: state.asr.framework,
+        // 启动自动加载开关 + 每个框架上次选中的模型（切换框架时恢复它，不替用户挑）
+        autoLoad: state.asr.autoLoad,
+        lastModelByFramework: state.asr.lastModelByFramework,
+      },
+      tts: state.tts,
+      // 克隆音色不落 config（纯运行态）；权威与选中项都在 tts-voices/voices.json
+      api: { host: state.api.host, port: state.api.port, apiKey: state.api.apiKey },
+      io: { exportDir: state.io.exportDir },
+      overlay: state.overlay,
+      theme: state.theme,
+      locale: state.locale,
+      closeToTray: state.closeToTray,
+      models: { modelRoot: storageRoot, proxy: state.models.proxy, huggingfaceToken: state.models.huggingfaceToken },
+      useRustEngine: state.useRustEngine,
+    };
+    await saveData("config.json", JSON.stringify(config, null, 2));
+  } catch {}
+}
+
+// ---- 运行日志：logs/YYYY-MM-DD.log（每天一个文件，最近 300 条，一行一条，纯文本）----
+
+function todayKey(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/** 单条运行日志 → 一行文本（[时间] [级别] 内容，多行内容压成单行） */
+function logToLine(l: RuntimeLog): string {
+  const msg = l.msg.replace(/\r?\n/g, " ");
+  return `[${l.ts}] [${l.level}] ${msg}`;
+}
+
+/** 保存运行日志到当天文件（纯文本，一行一条） */
+export function saveRuntimeLogs(logs: RuntimeLog[]) {
+  debouncedSave(`logs/${todayKey()}.log`, logs.map(logToLine).join("\n"));
+}
+
+/** 加载当天运行日志 */
+export async function loadRuntimeLogs() {
+  try {
+    const data = await loadData(`logs/${todayKey()}.log`);
+    if (!data) {
+      // 兼容 0.2.0 的 JSON 旧格式
+      const old = await loadData(`logs/${todayKey()}.json`);
+      if (old) {
+        const logs = JSON.parse(old);
+        if (Array.isArray(logs)) useAppStore.setState({ runtimeLogs: logs });
+      }
+      return;
+    }
+    const logs: RuntimeLog[] = data
+      .split(/\r?\n/)
+      .filter((line) => line.trim().length > 0)
+      .map((line, i) => {
+        const m = line.match(/^\[(.+?)\] \[(.+?)\] (.*)$/);
+        return m ? { id: i + 1, ts: m[1], level: m[2].toLowerCase() as RuntimeLogLevel, msg: m[3] } : null;
+      })
+      .filter((l): l is RuntimeLog => l !== null);
+    useAppStore.setState({ runtimeLogs: logs });
+  } catch {}
+}
+
+// ---- history/YYYY-MM-DD.json ----
+
+function historyFile(date: string): string {
+  return `history/${date}.json`;
+}
+
+/** 加载所有历史记录文件（按日期分文件） */
+export async function loadAllHistory() {
+  try {
+    const listData = await loadData("history/index.json");
+    const dates: string[] = listData ? JSON.parse(listData) : [];
+    if (dates.length === 0) return;
+
+    const allRecords: HistoryRecord[] = [];
+    for (const date of dates) {
+      const data = await loadData(historyFile(date));
+      if (data) {
+        const records = JSON.parse(data);
+        if (Array.isArray(records)) allRecords.push(...records);
+      }
+    }
+    allRecords.sort((a, b) => b.id - a.id); // 最新的在前
+    useAppStore.setState({ history: { records: allRecords.slice(0, 500) } });
+  } catch {}
+}
+
+/** 保存当天的记录到文件 */
+export function saveHistoryForToday(records: HistoryRecord[]) {
+  const today = todayKey();
+  // 只保存今天的记录
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const todayRecords = records.filter((r) => r.id >= todayStart.getTime());
+
+  debouncedSave(historyFile(today), JSON.stringify(todayRecords));
+
+  // 更新索引（去重 + 排序）
+  updateHistoryIndex(today);
+}
+
+async function updateHistoryIndex(currentDate: string) {
+  try {
+    const listData = await loadData("history/index.json");
+    const dates: string[] = listData ? JSON.parse(listData) : [];
+    if (!dates.includes(currentDate)) {
+      dates.push(currentDate);
+      dates.sort();
+      debouncedSave("history/index.json", JSON.stringify(dates));
+    }
+  } catch {}
+}
+
+// ---- 初始化：启动时加载 + 监听变化 ----
+
+export async function initPersistence() {
+  await loadConfig();
+  await loadAllHistory();
+  await loadRuntimeLogs();
+
+  // 监听配置变化 → 防抖保存
+  let configTimer: ReturnType<typeof setTimeout> | null = null;
+  const watchConfigKeys = ["asr", "tts", "api", "io", "overlay", "theme", "locale", "closeToTray", "models", "useRustEngine"] as const;
+  useAppStore.subscribe((state, prev) => {
+    const changed = watchConfigKeys.some((k) => state[k] !== prev[k]);
+    if (changed) {
+      if (configTimer) clearTimeout(configTimer);
+      configTimer = setTimeout(() => saveConfig(), 500);
+    }
+  });
+
+  // 监听历史变化 → 按天写文件
+  useAppStore.subscribe((state, prev) => {
+    if (state.history.records !== prev.history.records) {
+      saveHistoryForToday(state.history.records);
+    }
+  });
+
+  // 监听运行日志变化 → 写文件
+  useAppStore.subscribe((state, prev) => {
+    if (state.runtimeLogs !== prev.runtimeLogs) {
+      saveRuntimeLogs(state.runtimeLogs);
+    }
+  });
+}

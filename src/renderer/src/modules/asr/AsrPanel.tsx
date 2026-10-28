@@ -1,0 +1,411 @@
+import { useCallback, useRef, useState } from "react";
+import { RotateCw } from "lucide-react";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import { ModelSelector } from "@/components/ModelSelector";
+import { ModelStatusBadge } from "@/components/ModelStatusBadge";
+import { useAppStore } from "@/stores";
+import { computeIsLoaded, frameworkOptionsOf, loadedFrameworkLabel, selectLoadingKind } from "@/lib/modelState";
+import { selectAsrFramework } from "@/lib/modelLoader";
+import { VolumeWave } from "@/components/VolumeWave";
+import { t } from "@/lib/i18n";
+import { rustCheckVram, sendToSidecar } from "@/lib/ipc";
+import { loadAsrModel } from "@/lib/modelLoader";
+import { alreadyConfirmedRemembered, rememberConfirmed } from "@/lib/vramGuard";
+import { VramGuardDialog, type VramGuardChoice } from "@/components/VramGuardDialog";
+import { TranscribePanel } from "./TranscribePanel";
+
+
+const STATUS_KEYS: Record<string, string> = {
+  idle: "asr.status.idle",
+  recording: "asr.status.recording",
+  recognizing: "asr.status.recognizing",
+  done: "asr.status.done",
+  error: "asr.status.error",
+};
+
+function InputDeviceDisplay() {
+  const locale = useAppStore((s) => s.locale);
+  const deviceName = useAppStore((s) => s.audioDevices.currentName);
+
+  return (
+    <span className="text-sm text-muted-foreground">
+      {t(locale, "asr.inputDevice.label")}：{deviceName}
+    </span>
+  );
+}
+
+function HotkeyRecorder({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [recording, setRecording] = useState(false);
+  const locale = useAppStore((s) => s.locale);
+  const inputRef = useRef<HTMLDivElement>(null);
+
+  return (
+    <div
+      ref={inputRef}
+      tabIndex={0}
+      onClick={() => { setRecording(true); inputRef.current?.focus(); }}
+      onKeyDown={(e) => {
+        if (!recording) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const key = e.key === " " ? "Space" : e.key;
+        const combo = [e.altKey && "Alt", e.ctrlKey && "Ctrl", e.shiftKey && "Shift", key]
+          .filter(Boolean)
+          .join("+");
+        onChange(combo);
+        setRecording(false);
+        inputRef.current?.blur();
+      }}
+      onBlur={() => setRecording(false)}
+      className="flex h-9 w-64 cursor-pointer items-center justify-center rounded-md border border-input bg-background px-3 text-sm font-medium transition-colors hover:border-primary/50 focus:outline-none focus:ring-2 focus:ring-ring"
+    >
+      {recording ? t(locale, "asr.hotkey.pressKey") : value}
+    </div>
+  );
+}
+
+/** 显存监控卡片：总显存 + 已用 + 各框架占用 + 录音状态 */
+function VramMonitorCard() {
+  const locale = useAppStore((s) => s.locale);
+  const asr = useAppStore((s) => s.asr);
+  // 读全局轮询结果（useVramPoller 每 3s 更新 store，不随本组件生命周期启停）
+  const vram = useAppStore((s) => s.vram);
+
+  const pct = vram && vram.total > 0 ? Math.round((vram.used / vram.total) * 100) : 0;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">{t(locale, "asr.vram.title")}</CardTitle>
+        <CardDescription>{t(locale, "asr.vram.desc")}</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {/* 录音状态 */}
+        <div className="flex items-center gap-3">
+          <span className="text-sm text-muted-foreground">{t(locale, "asr.status.current")}</span>
+          <Badge variant={asr.status === "recording" ? "default" : asr.status === "error" ? "destructive" : "secondary"}>
+            {t(locale, STATUS_KEYS[asr.status])}
+          </Badge>
+          <VolumeWave volume={asr.volume} active={asr.status === "recording"} />
+        </div>
+
+        {/* 显存 */}
+        {vram && vram.total > 0 ? (
+          <>
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-muted-foreground">{t(locale, "asr.vram.usage")}</span>
+              <span className="tabular-nums">
+                {(vram.used / 1024).toFixed(1)} / {(vram.total / 1024).toFixed(1)} GB ({pct}%)
+              </span>
+            </div>
+            <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+              <div
+                className={`h-full rounded-full transition-all ${pct > 90 ? "bg-red-500" : pct > 70 ? "bg-amber-500" : "bg-emerald-500"}`}
+                style={{ width: `${Math.min(100, pct)}%` }}
+              />
+            </div>
+            <div className="space-y-1 text-xs text-muted-foreground">
+              {/* 各框架占用：键由 Rust 下发；source=estimate 时标注「估算」，其余为驱动真值 */}
+              {Object.entries(vram.frameworks).map(([fw, v]) => (
+                <div key={fw} className="flex justify-between">
+                  <span>
+                    {fw}
+                    {v.source === "estimate" ? ` · ${t(locale, "asr.vram.estimated")}` : ""}
+                  </span>
+                  <span className="tabular-nums">
+                    {v.source === "estimate" ? "≈" : ""}
+                    {(v.mb / 1024).toFixed(2)} GB
+                  </span>
+                </div>
+              ))}
+              {Object.keys(vram.frameworks).length === 0 && (
+                <p className="text-xs text-muted-foreground/70">{t(locale, "asr.vram.noDetail")}</p>
+              )}
+            </div>
+          </>
+        ) : (
+          <p className="text-xs text-muted-foreground">{t(locale, "asr.vram.noGpu")}</p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** 弹框要展示的预检数字（Rust 判定不足时才有） */
+interface VramPrompt {
+  model: string;
+  device: string;
+  needMb: number | null;
+  freeMb: number | null;
+  totalMb: number | null;
+}
+
+/**
+ * ASR 加载前显存预检（用户主动加载专用，ASR 面板两处共用同一实现）。
+ *
+ * 流程：预检 → `ok` 直接加载 / 不足弹框 → 按选择（取消 / CPU / 仍用 GPU 试）加载。
+ * 不做预检的情形：设备为 CPU（不占显存）、目标 model+device 已加载（无意义重复点击）、
+ * 本会话已确认过「仍用 GPU 试」；预检自身失败则 fail-open（无法判定就放行）。
+ * 启动自动加载（main.tsx）不走本 hook —— 启动必须静默失败，绝不弹框。
+ */
+function useVramGuard() {
+  const [prompt, setPrompt] = useState<VramPrompt | null>(null);
+  // 弹框选择的一次性 resolver（弹框受控，选择通过 resolve 回传）
+  const resolverRef = useRef<((choice: VramGuardChoice) => void) | null>(null);
+
+  const ask = useCallback(async (model: string, device: string) => {
+    // 已有弹框在等选择：忽略并发点击，避免覆盖 resolver 造成悬挂
+    if (resolverRef.current) return;
+
+    const s = useAppStore.getState();
+    const skipCheck =
+      device === "cpu" ||
+      (computeIsLoaded("asr", model) && s.engines.asr.device === device) ||
+      alreadyConfirmedRemembered(model, device);
+
+    if (!skipCheck) {
+      const verdict = await rustCheckVram(model, device).catch((e) => {
+        s.addLog(`[model] 显存预检失败，直接加载: ${String(e)}`, "warn");
+        return null;
+      });
+
+      if (verdict && !verdict.ok) {
+        const choice = await new Promise<VramGuardChoice>((resolve) => {
+          resolverRef.current = resolve;
+          setPrompt({
+            model,
+            device,
+            needMb: verdict.need_mb,
+            freeMb: verdict.free_mb,
+            totalMb: verdict.total_mb,
+          });
+        });
+        resolverRef.current = null;
+        setPrompt(null);
+
+        if (choice === "cancel") return;
+        if (choice === "cpu") {
+          // 降级到 CPU：同步选中设备，避免 UI 与实际加载设备不一致
+          s.updateAsr({ device: "cpu" });
+          s.addLog(`[model] 显存不足，改用 CPU 加载 ${model}`, "info");
+          await loadAsrModel(model, "cpu");
+          return;
+        }
+        rememberConfirmed(model, device);
+        s.addLog(`[model] 忽略显存提示，仍用 ${device} 加载 ${model}`, "warn");
+      }
+    }
+
+    await loadAsrModel(model, device);
+  }, []);
+
+  const choose = useCallback((choice: VramGuardChoice) => {
+    resolverRef.current?.(choice);
+  }, []);
+
+  return { ask, prompt, choose };
+}
+
+export function AsrPanel() {
+  const sub = useAppStore((s) => s.activeSubMenu);
+  const asr = useAppStore((s) => s.asr);
+  const updateAsr = useAppStore((s) => s.updateAsr);
+  const locale = useAppStore((s) => s.locale);
+  const gpu = useAppStore((s) => s.gpu);
+  // 引擎加载状态 + 实际加载设备（判断「设备待应用」）。
+  // 必须读 engines.asr.device：models.loadedDevice 是 ASR/TTS 共用的单值，
+  // TTS 在 cuda 上加载一次就会把它改成 "cuda"，于是 ASR 这边明明是 cpu 也被判成"设备待应用"
+  // —— 用户看到的就是"这条提示一直出现，点了应用还在"。
+  const asrEngine = useAppStore((s) => s.engines.asr);
+  const asrEngineReady = asrEngine.status === "ready";
+  // 「当前」行的框架展示名
+  const loadedFw = loadedFrameworkLabel("asr");
+  const loadedDevice = useAppStore((s) => s.engines.asr.device);
+  const modelItems = useAppStore((s) => s.models.items);
+  const runtimePackages = useAppStore((s) => s.runtime.packages);
+  // 用户主动加载的显存预检（启动自动加载不走这里）
+  const vramGuard = useVramGuard();
+  // 加载中禁用"会发起加载"的入口（重载按钮）：门禁会拦下请求，但那是点完之后的事
+  const loading = useAppStore(selectLoadingKind) !== null;
+
+  // 框架下拉项：ASR 模型清单里的运行时包 key（去重，onnx 垫底）—— 与 TTS 面板共用一处实现
+  const frameworkOptions = frameworkOptionsOf(modelItems, "asr", runtimePackages, asr.framework);
+
+  if (sub === "hotkey") {
+    return (
+      <div className="space-y-4">
+        <Card>
+          <CardHeader>
+            <CardTitle>{t(locale, "asr.hotkey.title")}</CardTitle>
+            <CardDescription>{t(locale, "asr.hotkey.desc")}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">{t(locale, "asr.hotkey.label")}</label>
+              <HotkeyRecorder
+                value={asr.hotkey}
+                onChange={(hotkey) => {
+                  updateAsr({ hotkey });
+                  useAppStore.getState().addLog(`[settings] ⌨ 录音热键已设为 ${hotkey}`, "info");
+                }}
+              />
+              <p className="text-xs text-muted-foreground">{t(locale, "asr.hotkey.hint")}</p>
+            </div>
+            <Button variant="outline" onClick={() => updateAsr({ hotkey: "CapsLock" })}>
+              {t(locale, "common.resetDefault")}
+            </Button>
+          </CardContent>
+        </Card>
+
+        <VramMonitorCard />
+      </div>
+    );
+  }
+
+  if (sub === "model") {
+    return (
+      <div className="space-y-4">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">{t(locale, "asr.device.label")}</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <Select
+              value={asr.device}
+              onValueChange={(device) => {
+                // 切换设备不自动重载（避免闪屏 + 无谓的进程重启）
+                // 只保存选中设备，出现「应用并重载」按钮，用户确认后才重载
+                useAppStore.getState().updateAsr({ device });
+              }}
+            >
+              <SelectTrigger className="w-64">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="cpu">CPU</SelectItem>
+                <SelectItem value="cuda" disabled={!gpu.available}>
+                  CUDA GPU{gpu.available && gpu.name ? ` (${gpu.name})` : ` (${t(locale, "common.notDetected")})`}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            {/* 待应用提示 + 重载按钮：引擎已加载且选中设备 ≠ 实际加载设备时出现 */}
+            {asrEngineReady && asr.device !== loadedDevice && (
+              <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2">
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs text-amber-600 dark:text-amber-400">
+                    {t(locale, "asr.device.pending", { device: asr.device.toUpperCase() })}
+                  </p>
+                  <p className="mt-0.5 text-[11px] text-muted-foreground">
+                    {t(locale, "asr.device.pendingHint")}
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  disabled={loading}
+                  onClick={() => void vramGuard.ask(asr.model, asr.device)}
+                >
+                  <RotateCw className="mr-1.5 h-3.5 w-3.5" />
+                  {t(locale, "asr.device.apply")}
+                </Button>
+              </div>
+            )}
+            <InputDeviceDisplay />
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">{t(locale, "asr.model.label")}</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {/* 推理框架选择器 */}
+            <div className="flex items-center gap-3">
+              <label className="shrink-0 text-sm font-medium">{t(locale, "asr.framework.label")}</label>
+              <Select
+                value={asr.framework}
+                onValueChange={(v) => {
+                  // 只改选中（+ 把框架告知 sidecar）：**不加载、不卸载、不替用户挑模型**
+                  selectAsrFramework(v);
+                  void sendToSidecar({ action: "set_asr_framework", framework: v });
+                }}
+              >
+                <SelectTrigger className="w-56">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {frameworkOptions.map((o) => (
+                    <SelectItem key={o.key} value={o.key}>{o.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {/* 当前已加载模型提示 */}
+            {asr.modelStatus === "ready" && (
+              <div className="rounded-md border border-sky-500/30 bg-sky-500/5 px-3 py-2 text-xs text-sky-700 dark:text-sky-400">
+                {t(locale, "asr.framework.loaded", {
+                  model: asr.model,
+                  framework: asr.framework.toUpperCase(),
+                })}
+                <span className="ml-2 text-muted-foreground">
+                  {t(locale, "asr.framework.switchHint")}
+                </span>
+              </div>
+            )}
+
+            {/* 模型选择器：只展示已下载 + 匹配当前框架的模型 */}
+            <ModelSelector
+              kind="asr"
+              selected={asr.model}
+              formatFilter={asr.framework}
+              downloadedOnly
+              onSelect={(model) => {
+                void vramGuard.ask(model, asr.device);
+              }}
+            />
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <span>{t(locale, "common.current")}: </span>
+              {/* 同 TTS：显示引擎里正在起作用的模型（带框架名，避免跨框架重名时说不清） */}
+              <ModelStatusBadge status={asrEngine.status} modelName={asrEngine.model ?? ""} />
+              {asrEngine.status === "ready" && loadedFw && (
+                <span className="text-muted-foreground">({loadedFw})</span>
+              )}
+            </div>
+
+            {/* 启动时自动加载上次的模型（默认开：热键要求模型常驻，按下即用） */}
+            <div className="flex items-center justify-between gap-3 pt-1">
+              <div className="min-w-0">
+                <div className="text-sm font-medium">{t(locale, "models.autoLoad")}</div>
+                <div className="text-xs text-muted-foreground">{t(locale, "models.autoLoad.asrDesc")}</div>
+              </div>
+              <Switch checked={asr.autoLoad} onCheckedChange={(autoLoad) => updateAsr({ autoLoad })} />
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* 显存预检弹框：Rust 判定不足时出现；选择后由 guard 决定加载方式 */}
+        {vramGuard.prompt && (
+          <VramGuardDialog
+            open
+            model={vramGuard.prompt.model}
+            device={vramGuard.prompt.device}
+            needMb={vramGuard.prompt.needMb}
+            freeMb={vramGuard.prompt.freeMb}
+            totalMb={vramGuard.prompt.totalMb}
+            onChoose={vramGuard.choose}
+          />
+        )}
+      </div>
+    );
+  }
+
+  if (sub === "transcribe") {
+    return <TranscribePanel />;
+  }
+
+  return null;
+}

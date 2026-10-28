@@ -1,0 +1,55 @@
+import type { HistoryRecord, RuntimeLog, RuntimeLogLevel } from "../types";
+
+const nowTs = () => {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  const h = String(d.getHours()).padStart(2, "0");
+  const min = String(d.getMinutes()).padStart(2, "0");
+  const s = String(d.getSeconds()).padStart(2, "0");
+  return `${y}-${m}-${day} ${h}:${min}:${s}`;
+};
+
+export interface RuntimeSlice {
+  runtimeLogs: RuntimeLog[];
+  history: { records: HistoryRecord[] };
+  /** 推理框架下载进度/错误（全局常住：切页不丢）；phase: downloading=下, extracting=解压中 */
+  runtimeDownload: { framework: string | null; pct: number; phase: "downloading" | "extracting" | null; error: string | null };
+  addLog: (msg: string, level?: RuntimeLogLevel) => void;
+  clearLogs: () => void;
+  addHistoryRecord: (text: string) => void;
+  removeHistoryRecord: (id: number) => void;
+  setRuntimeDownload: (
+    framework: string | null,
+    pct: number,
+    error?: string | null,
+    phase?: "downloading" | "extracting" | null,
+  ) => void;
+}
+
+export const createRuntimeSlice = (set: (partial: Partial<RuntimeSlice> | ((s: RuntimeSlice) => Partial<RuntimeSlice>)) => void): RuntimeSlice => ({
+  runtimeLogs: [],
+  history: { records: [] },
+  runtimeDownload: { framework: null, pct: 0, phase: null, error: null },
+  addLog: (msg, level = "info") =>
+    set((s) => {
+      // id 基于现有日志的最大 id + 1（避免持久化加载后与旧日志 id 冲突）
+      const maxId = s.runtimeLogs.reduce((m, l) => Math.max(m, l.id), 0);
+      const next = [...s.runtimeLogs, { id: maxId + 1, ts: nowTs(), level, msg }];
+      return { runtimeLogs: next.length > 300 ? next.slice(-300) : next };
+    }),
+  clearLogs: () => set({ runtimeLogs: [] }),
+  addHistoryRecord: (text) =>
+    set((s) => ({
+      history: {
+        ...s.history,
+        // 顺序不变式：records[0] 恒为最新（loadAllHistory 亦按 id 倒序装载）—— 列表正序渲染即为「新的在上」
+        records: [{ id: Date.now(), text, time: new Date().toLocaleString() }, ...s.history.records].slice(0, 500),
+      },
+    })),
+  removeHistoryRecord: (id) =>
+    set((s) => ({ history: { ...s.history, records: s.history.records.filter((r) => r.id !== id) } })),
+  setRuntimeDownload: (framework, pct, error = null, phase = null) =>
+    set({ runtimeDownload: { framework, pct, phase, error } }),
+});
