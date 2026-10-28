@@ -1,0 +1,206 @@
+# VoxFlow（Electron 版）
+
+**本地语音识别（ASR）+ 语音合成（TTS）桌面工具** — Electron 移植版
+
+完全本地运行 · 隐私安全 · 多引擎架构 · 一键热键录音转文字
+
+> 本仓库是 Tauri 版的 **Electron 移植**。上游 Tauri 项目（`src-tauri/` + Rust 推理层）
+> 作为**只读参考**，本仓库不包含任何 Rust 代码。
+
+---
+
+## 🆚 与 Tauri 版的关系
+
+| | Tauri 版（上游） | Electron 版（本仓库） |
+|---|---|---|
+| 框架 | Tauri 2 + Rust 主进程 | **Electron 45 + TypeScript 主进程** |
+| 前端 | React 19 + Vite + Tailwind + shadcn/ui | **完全复用**（逐文件移植） |
+| 推理引擎 | Rust 内嵌 + 子进程 | **子进程**（llama-server / sherpa-onnx / Python worker） |
+| 内存占用 | ~30–50 MB | ~150 MB（自带 Chromium） |
+| 打包体积 | 10–20 MB | ~150 MB（不含模型与推理框架） |
+| 便携版形态 | 单文件 `portable.exe` | **zip 解压即用**（Electron 无法产出真单文件） |
+| 用户数据 | `%APPDATA%\com.voxflow.app\` | **同一位置**（两版可共存、数据互通） |
+
+### 移植范围
+
+- ✅ **前端 100%**：65 个源文件逐字移植，`src/components/ui/*`（shadcn）零改动
+- ✅ **IPC 桥接**：`src/lib/ipc.ts` 顶替原 `src/lib/tauri.ts`，**导出函数名与签名保持不变**
+- ✅ **主进程**：Tauri 的 45 个 `#[tauri::command]` 全量用 TypeScript 重写
+- ✅ **推理层**：llama-server / sherpa-onnx / PyTorch worker 全部走**独立子进程**（崩溃隔离不变）
+- ✅ **原生能力**：全局热键、模拟粘贴、托盘、对话框、剪贴板 → Electron 内置 API
+
+### 关键实现替换
+
+| Rust 原实现 | Electron 版替代 |
+|---|---|
+| `tauri-plugin-global-shortcut` + `rdev` | `uiohook-napi`（原生 N-API 模块，含预编译二进制） |
+| `enigo` 模拟 Ctrl+V | `uiohook.keyTap` → 回退 PowerShell `SendInput` |
+| `arboard` 剪贴板 | `electron.clipboard` |
+| `cpal` 麦克风采集 | 渲染进程 `getUserMedia` + `AudioContext`（主进程中继） |
+| `tauri-plugin-dialog` | `electron.dialog.showOpenDialog` |
+| `tiny_http` OpenAI 兼容 API | `node:http`（阶段三） |
+| `reqwest` / `tungstenite` | `fetch` / `ws` |
+| `hound` WAV 编解码 | 自实现 RIFF 解析器 |
+| `windows-sys` `GetDiskFreeSpaceExW` | `fs.statfsSync` / PowerShell |
+| `tauri::Emitter` 事件总线 | `webContents.send` + preload `contextBridge` |
+| `data-tauri-drag-region` | CSS `-webkit-app-region: drag`（`.app-drag-region`） |
+
+---
+
+## 🏗️ 架构
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   VoxFlow 桌面应用                        │
+│              Electron 45 + React 19 + TypeScript          │
+├─────────────────────────────────────────────────────────┤
+│  主进程（src/main）                                        │
+│  ├── ipc/          45 个命令的 IPC 路由                    │
+│  ├── inference/    ASR 引擎注册表 + llama-server + sherpa  │
+│  ├── models/       模型清单 / 下载 / 运行时检测              │
+│  ├── tts/          TTS 引擎 + 音色库                       │
+│  ├── audio/        WAV 编解码 / ffmpeg / 重采样             │
+│  ├── system/       热键 / 剪贴板 / 采集 / 对话框            │
+│  └── tray.ts       系统托盘                                 │
+├─────────────────────────────────────────────────────────┤
+│  预加载（src/preload）  contextBridge 安全桥               │
+├─────────────────────────────────────────────────────────┤
+│  渲染进程（src/renderer）  React UI + Zustand             │
+└─────────────────────────────────────────────────────────┘
+              │ 子进程（崩溃隔离）
+              ├── llama-server.exe        GGUF / Qwen3-ASR
+              ├── sherpa-onnx ... server  ONNX / SenseVoice
+              └── python worker.py        PyTorch
+```
+
+---
+
+## 📁 目录结构
+
+```
+.
+├── build/                    # 打包资源（图标、macOS entitlements）
+├── resources/                # 运行时资源（espeak-ng / pytorch worker）
+├── scripts/                  # 打包与发版脚本（PowerShell）
+├── src/
+│   ├── main/                 # Electron 主进程
+│   │   ├── core/             # 数据根 / 事件总线 / 持久化 / 日志
+│   │   ├── inference/        # ASR 引擎（注册表 / llama-server / 分段转写）
+│   │   ├── models/           # 模型清单与下载
+│   │   ├── audio/            # 音频解码
+│   │   ├── system/           # 热键 / 剪贴板 / 采集 / 托盘交互
+│   │   └── ipc/              # IPC 命令表（45 个命令）
+│   ├── preload/              # contextBridge 桥
+│   └── renderer/             # React 前端（与上游逐字一致）
+├── electron.vite.config.ts   # electron-vite 构建配置
+├── electron-builder.yml      # electron-builder 打包配置
+└── scripts/rust-spec-to-ts.mjs  # 模型描述符表转换器（一次性工具）
+```
+
+---
+
+## 🚀 快速开始
+
+### 环境要求
+
+- Windows 10/11 x64（当前主要支持平台）
+- Node.js 20+ / npm 10+
+- [FFmpeg](https://ffmpeg.org/download.html) 放入 PATH（多格式音频解码）
+- NVIDIA GPU + CUDA（可选，CPU 也可运行）
+- 编译原生模块需 Visual Studio Build Tools（`uiohook-napi` 已带预编译二进制，通常无需编译）
+
+```bash
+npm install     # 安装依赖（postinstall 自动 rebuild 原生模块）
+npm run dev     # 开发模式（主进程 / 预加载 / 渲染进程 HMR）
+npm run build   # 类型检查 + 构建到 out/
+npm start       # 预览构建产物
+```
+
+### 打包
+
+```bash
+npm run build:win      # NSIS 安装包
+npm run bundle         # 安装版 + 便携版 zip（产物在 dist-bundle/）
+npm run version:sync   # 版本号同步（事实源 = package.json）
+npm run release        # 一键发版（打包 + git push + gh release）
+```
+
+---
+
+## 🔌 IPC 命令表
+
+命令名与 Tauri 版**完全一致**，前端调用形状不变：
+
+```ts
+// 渲染进程
+const text = await window.voxflow.invoke<string>('rust_transcribe_llama', {
+  filePath: '/path/to/audio.wav'
+})
+```
+
+事件通道同样保持两个：
+
+- `sidecar://event` —— 主总线，payload 用 `status` 字段判别（约 39 个取值）
+- `asr://status` —— 热键录音状态（`idle` / `recording` / `recognizing`）
+
+---
+
+## 📊 数据存储
+
+与 Tauri 版**完全兼容同一数据根**：
+
+```
+%APPDATA%\com.voxflow.app\      # 安装模式
+├── models\                     # 模型文件
+├── config.json                 # 配置
+├── history\                    # 转写历史
+└── logs\                       # 运行日志
+```
+
+> 便携模式：exe 旁存在 `portable.txt` 时，数据根 = `<exe>\data\`
+
+---
+
+## 🗺️ 移植进度
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| 一 | 前端移植 + IPC 桥 + 窗口/托盘/热键/剪贴板/持久化 + ASR 主链路 | ✅ **完成并验证** |
+| 二 | TTS 引擎 + 音色库 + 克隆音色 | ⬜ 未开始 |
+| 三-a | 模型下载 / 删除 / 磁盘占用（`model_manager`） | ✅ 已实现（未做真实下载验证） |
+| 三-b | 推理框架运行时下载（llama / sherpa 包） | ⬜ 未开始 |
+| 三-c | PyTorch worker 接入 | ⬜ 未开始 |
+| 三-d | OpenAI 兼容对外 API 服务 | ⬜ 未开始 |
+| 四 | 打包与发版流程 | ✅ 脚本就绪，`build:unpack` 已验证 |
+
+未移植的命令会抛出明确的「尚未移植到 Electron 版（阶段 N）」错误，不会静默失败。
+
+### 已验证项
+
+| 项 | 结果 |
+|---|---|
+| `npm run typecheck` | node + web 双端 0 错误 |
+| `npm run build` | 通过（main / preload / renderer 三份产物） |
+| 开发态启动 | 无 stderr 报错，UI 正常渲染 |
+| 打包态启动 | 从 `app.asar` 渲染正常，`extraResources` 落位正确 |
+| IPC 桥 | 45 个命令路由通；未知命令正确报错 |
+| 事件总线 | `models_state` 载荷与 Tauri 版**逐字段一致**（14 个模型 / 磁盘余量 / 各框架能力字段） |
+| 数据根 | `%APPDATA%\com.voxflow.app\` —— **与 Tauri 版同一目录**，config.json / logs 直接互通 |
+| 显存监控 | nvidia-smi 真值：RTX 4070 Laptop，1.7 / 8.0 GB (21%) |
+| 原生模块 | `uiohook-napi` 经 electron-builder rebuild 后正确解包（`asarUnpack: **/*.node`） |
+
+### 验证脚本
+
+```bash
+# 启动应用（开 CDP 端口）
+electron out/main/index.js --remote-debugging-port=9222
+npm run verify:renderer   # UI 渲染 + IPC 冒烟
+npm run verify:events     # 事件总线载荷校验
+npm run screenshot        # 截图到 %TEMP%
+```
+
+---
+
+## 📄 License
+
+MIT
