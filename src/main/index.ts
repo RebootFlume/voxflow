@@ -13,6 +13,8 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { registerIpc } from './ipc'
 import { getCloseToTray } from './ipc/commands'
 import { isQuitting, setQuitting } from './core/app-state'
+import { log } from './core/logger'
+import { adoptProxyEnv } from './models/model-manager'
 import { createTray, destroyTray, showMainWindow } from './tray'
 import { startHotkeyListener, stopHotkeyListener } from './system/hotkey'
 import { llamaEngine } from './inference/llama-server'
@@ -82,6 +84,12 @@ function setupPermissions(): void {
 app.whenReady().then(() => {
   setQuitting(false)
   electronApp.setAppUserModelId('com.voxflow.app')
+
+  // 代理单一来源：配置为空则接管环境变量（HTTP_PROXY / HTTPS_PROXY / ALL_PROXY）。
+  // Rust 版靠 reqwest 隐式读 env，Node 的 fetch 不会 —— 所以这里显式接管，
+  // 让「用户只在系统里配了代理」的场景与 Tauri 版行为一致。
+  const effectiveProxy = adoptProxyEnv()
+  log.info(`[proxy] 生效代理: ${effectiveProxy === '' ? '(直连)' : effectiveProxy}`)
 
   // 开发态按 F12 打开 DevTools；生产态忽略 CommandOrControl+R
   app.on('browser-window-created', (_event, window) => {

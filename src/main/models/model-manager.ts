@@ -35,11 +35,11 @@ import {
   writeFileSync,
   writeSync
 } from 'node:fs'
-import { request as httpRequest, type IncomingHttpHeaders, type RequestOptions } from 'node:http'
-import { request as httpsRequest } from 'node:https'
+import { Agent as HttpAgent, request as httpRequest, type IncomingHttpHeaders, type RequestOptions } from 'node:http'
+import { Agent as HttpsAgent, request as httpsRequest } from 'node:https'
 import { connect as netConnect, type Socket } from 'node:net'
 import { basename, dirname, isAbsolute, join, parse as parsePath } from 'node:path'
-import type { Readable } from 'node:stream'
+import type { Duplex, Readable } from 'node:stream'
 import { connect as tlsConnect } from 'node:tls'
 
 import { defaultModelRoot, getDataRoot } from '../core/data-root'
@@ -194,20 +194,13 @@ export function adoptProxyEnv(): string {
       }
     }
   }
-  const p = cfg.proxy
-  for (const k of [
-    'HTTP_PROXY',
-    'HTTPS_PROXY',
-    'ALL_PROXY',
-    'http_proxy',
-    'https_proxy',
-    'all_proxy',
-    'NO_PROXY',
-    'no_proxy'
-  ]) {
-    delete process.env[k]
-  }
-  return p
+  // 与 Rust 版的差异：Rust 在此**删除**代理环境变量，因为 reqwest 会隐式读 env
+  // （删掉才能保证「代理只有一个来源」）。Node 内置 fetch / undici **不会**隐式读
+  // HTTP_PROXY（除非显式开 NODE_USE_ENV_PROXY），因此本移植**保留**环境变量：
+  // 删掉对"单一来源"没有收益，却会连带影响本进程拉起的子进程
+  // （llama-server / sherpa / python worker）与用户的其它期望。
+  // 代理仍然只经 `httpFetch(..., proxy)` 显式下发，行为与 Rust 版一致。
+  return cfg.proxy
 }
 
 /**
@@ -1375,10 +1368,19 @@ async function requestRaw(
 
   if (proxy) {
     const sock = await openProxiedSocket(proxy, host, port, isHttps)
-    options.createConnection = ((_opts: unknown, cb: (err: Error | null, socket?: Socket | null) => void) => {
+    // 必须用**自定义 Agent** 把已隧道化的 socket 交给请求：
+    // `options.createConnection` 在 Node 的 ClientRequest 里不会被采用
+    // （Agent 自己走 net.createConnection），结果是绕开代理直连 → ECONNREFUSED。
+    const agent = (isHttps ? new HttpsAgent({ keepAlive: false }) : new HttpAgent({ keepAlive: false })) as unknown as {
+      createConnection: (
+        opts: unknown,
+        cb: (err: Error | null, socket?: Duplex | null) => void
+      ) => void
+    }
+    agent.createConnection = (_opts, cb) => {
       cb(null, sock)
-      return undefined
-    }) as unknown as RequestOptions['createConnection']
+    }
+    options.agent = agent as unknown as RequestOptions['agent']
   }
 
   return new Promise<RawResponse>((resolve, reject) => {
@@ -1417,8 +1419,8 @@ async function httpFetch(
   throw new NetError(`重定向过多: ${url}`, true)
 }
 
-/** HEAD 取文件大小（失败 → null；仅用于进度权重，不阻断下载） */
-async function headSize(url: string, proxy: URL | null): Promise<number | null> {
+/** HEAD 取文件大小（失败 → null；仅用于进度权重，不阻断下载）。走显式代理。 */
+export async function headSize(url: string, proxy: URL | null): Promise<number | null> {
   try {
     const res = await httpFetch(url, 'HEAD', {}, proxy)
     res.stream.resume()
