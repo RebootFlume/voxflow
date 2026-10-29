@@ -33,6 +33,7 @@
     "verify:api": "node scripts/verify-api-server.mjs",
     "install:runtime": "node scripts/install-runtime.mjs",
     "test:tts": "node scripts/run-ts-tests.mjs scripts/tts-tests.ts",
+    "test:pytorch": "node scripts/run-ts-tests.mjs scripts/pytorch-tests.ts",
     "screenshot": "node scripts/screenshot.mjs"
   },
   "dependencies": {

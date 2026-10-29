@@ -169,7 +169,7 @@ const text = await window.voxflow.invoke<string>('rust_transcribe_llama', {
 | 二 | TTS 引擎 + 音色库 + 克隆音色 | ✅ **完成并验证**（逻辑层已验证，缺 sherpa 运行时未做真机合成） |
 | 三-a | 模型下载 / 删除 / 磁盘占用（`model_manager`） | ✅ 已实现（未做真实下载验证） |
 | 三-b | 推理框架运行时下载（llama / sherpa 包） | ✅ **完成并验证**（真实下载 + 解压 + 落位 + 试启动通过） |
-| 三-c | PyTorch worker 接入 | ⬜ 未开始（运行时包已就绪，适配器待接） |
+| 三-c | PyTorch worker 接入 | ✅ **完成并验证**（协议与两个适配器 39 项测试全过；缺真实运行时包未做真机推理） |
 | 三-d | OpenAI 兼容对外 API 服务 | ✅ **完成并验证**（16 项契约测试全过） |
 | 四 | 打包与发版流程 | ✅ 脚本就绪，`build:unpack` 已验证 |
 
@@ -194,6 +194,8 @@ const text = await window.voxflow.invoke<string>('rust_transcribe_llama', {
 | 运行时下载 | `npm run verify:runtime` —— 16 项全过；**真实下载 llama-cpp b10622（250MB）→ 解压 → 落位 → 试启动 → state:ready** |
 | 代理链路 | 系统代理（HTTP_PROXY）自动接管，HTTP CONNECT 隧道可用 |
 | 对外 API | `npm run verify:api` —— 16 项全过（鉴权 / 路由 / 错误码 / multipart / WAV 编码） |
+| PyTorch worker | `npm run test:pytorch` —— 39 项全过（协议握手 / 响应关联 / 非协议输出忽略 / 协议版本不符 / 超时 / 崩溃 / 错误透传 / ASR 与 TTS 适配器全流程） |
+| PyTorch 设备探测 | `npm run verify:runtime` 覆盖 `rust_pytorch_device_info` 的 `{ok, device, info\|error}` 契约 |
 
 ### 验证脚本
 
@@ -206,10 +208,35 @@ npm run verify:tts        # TTS 命令端到端校验
 npm run verify:runtime    # 推理框架运行时下载端到端校验
 npm run verify:api        # OpenAI 兼容 API 契约校验
 npm run test:tts          # TTS 单元测试（纯逻辑，无需运行时）
+npm run test:pytorch      # PyTorch worker 协议测试（假 worker + 真解释器）
 npm run screenshot        # 截图到 %TEMP%
 
 npm run install:runtime 9222 gguf   # 真实安装运行时（数百 MB，人工验证用）
 ```
+
+### PyTorch worker 协议
+
+长驻 Python 子进程，逐行 JSON（stdin 写 / stdout 读）：
+
+```
+请求  { id, method, params }
+响应  { id, ok, protocol, result }  |  { id, ok, protocol, error: { kind, message } }
+```
+
+| method | params | result |
+|---|---|---|
+| `ping` | — | `{ status }` |
+| `runtime_info` | — | `{ python, torch, cuda_available, cuda_version, device_count, adapters, loaded, … }` |
+| `load_model` | `{ adapter, model_dir, device, options }` | `{ adapter, device, model_dir, load_seconds, … }` |
+| `unload_model` | — | `{ unloaded }` |
+| `transcribe` | `{ wav, options: { language, context } }` | `{ adapter, sample_count, text, seconds }` |
+| `synthesize` | `{ text, out_wav, options: { voice, speed, language } }` | `{ adapter, wav, sample_rate, audio_seconds, voice }` |
+| `shutdown` | — | `{ status }` |
+
+适配器白名单（模型目录**不得携带可执行代码**）：`whisper`（ASR）、`kokoro`（TTS）。
+
+客户端实现见 `src/main/inference/pytorch.ts`：懒启动、崩溃自愈、按 id 关联响应、
+忽略非协议输出、协议版本校验、超时与报错都带 stderr 尾巴。
 
 ### 已知偏差（与 Tauri 版）
 
