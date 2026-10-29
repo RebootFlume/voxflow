@@ -31,6 +31,7 @@
     "verify:tts": "node scripts/verify-tts-ipc.mjs",
     "verify:runtime": "node scripts/verify-runtime-download.mjs",
     "verify:api": "node scripts/verify-api-server.mjs",
+    "verify:real": "node scripts/verify-real-inference.mjs",
     "install:runtime": "node scripts/install-runtime.mjs",
     "test:tts": "node scripts/run-ts-tests.mjs scripts/tts-tests.ts",
     "test:pytorch": "node scripts/run-ts-tests.mjs scripts/pytorch-tests.ts",

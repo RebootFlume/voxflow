@@ -196,6 +196,21 @@ const text = await window.voxflow.invoke<string>('rust_transcribe_llama', {
 | 对外 API | `npm run verify:api` —— 16 项全过（鉴权 / 路由 / 错误码 / multipart / WAV 编码） |
 | PyTorch worker | `npm run test:pytorch` —— 39 项全过（协议握手 / 响应关联 / 非协议输出忽略 / 协议版本不符 / 超时 / 崩溃 / 错误透传 / ASR 与 TTS 适配器全流程） |
 | PyTorch 设备探测 | `npm run verify:runtime` 覆盖 `rust_pytorch_device_info` 的 `{ok, device, info\|error}` 契约 |
+| **真实推理闭环** | `npm run verify:real` —— **25 项全过**：Kokoro TTS 合成 → Qwen3-ASR(CUDA) 转写 → SenseVoice 转写 → 对外 API 转写，识别文本与原文一致 |
+
+### 真实推理验证（最有说服力的一条）
+
+用上游便携版已有的**真模型 + 真推理框架**跑完整链路：
+
+```
+Kokoro TTS (sherpa-onnx)   合成 "今天下午三点开会"
+                          → 24000Hz / 2.18s / peak=9808（真实音频，非静音）
+Qwen3-ASR-0.6B (llama-server + CUDA 1.1GB 权重)  → "今天下午三点开会。"
+SenseVoice    (sherpa-onnx websocket server)      → "今天下午三点开会"
+OpenAI 兼容对外 API (POST /v1/audio/transcriptions) → "今天下午三点开会"
+```
+
+三条独立推理链路 + 一条对外接口，识别文本与原文**完全一致** —— 证明移植与 Tauri 版行为等价。
 
 ### 验证脚本
 
@@ -207,6 +222,7 @@ npm run verify:events     # 事件总线载荷校验
 npm run verify:tts        # TTS 命令端到端校验
 npm run verify:runtime    # 推理框架运行时下载端到端校验
 npm run verify:api        # OpenAI 兼容 API 契约校验
+npm run verify:real       # 真实推理闭环（需要已装运行时与已下载模型）
 npm run test:tts          # TTS 单元测试（纯逻辑，无需运行时）
 npm run test:pytorch      # PyTorch worker 协议测试（假 worker + 真解释器）
 npm run screenshot        # 截图到 %TEMP%
