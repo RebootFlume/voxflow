@@ -9,6 +9,7 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { emitSidecar } from '../core/events'
+import { setTtsBusy } from '../api-server'
 import { getDataRoot } from '../core/data-root'
 import { findSpec } from '../models/model-manager'
 import type { PresetSpec } from '../models/spec-data'
@@ -216,10 +217,13 @@ export async function synthesize(
   if (!engine) throw new Error('TTS 模型未加载，请先在「模型与设备」中加载模型')
 
   ttsCancel.begin()
+  // UI 合成期间对外 HTTP API 返回 503（对齐 Rust 的 try_lock 忙碌语义）
+  setTtsBusy(true)
   let outcome: { samples: Int16Array; sampleRate: number; cancelled: boolean }
   try {
     outcome = await synthesizeChunks(engine, ttsCancel, chunks, voice, onProgress)
   } finally {
+    setTtsBusy(false)
     ttsCancel.end()
   }
 

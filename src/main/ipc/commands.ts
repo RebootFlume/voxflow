@@ -22,6 +22,7 @@ import { transcribeFileWithProgress } from '../inference/transcribe-file'
 import { getGpuInfo, getVramStatus } from '../inference/vram'
 import {
   activeEntryOf,
+  adoptProxyEnv,
   checkLoadVram,
   deleteModel,
   emitModelsState,
@@ -34,7 +35,8 @@ import {
   setToken,
   startDownload
 } from '../models/model-manager'
-import { runtimeStatus, verifyRuntime } from '../models/runtime'
+import { runtimeStatus, verifyRuntimeFull, downloadRuntime, requestCancelRuntime } from '../inference/runtime-download'
+import * as apiServer from '../api-server'
 import * as tts from '../tts/commands'
 import { setHotkey } from '../system/hotkey'
 import { openInExplorer } from '../system/explorer'
@@ -101,6 +103,9 @@ async function dispatchSidecarAction(payload: Record<string, unknown>): Promise<
       }
       const proxy = optStr(payload, 'proxy')
       if (proxy !== undefined) setProxy(proxy)
+      // 代理单一来源：配置为空则接管 env（对齐 Rust 版 bootstrap 的 adopt_proxy_env）
+      const effective = adoptProxyEnv()
+      log.info(`[proxy] 生效代理: ${effective === '' ? '(直连)' : effective}`)
       const token = optStr(payload, 'hf_token')
       if (token !== undefined) setToken(token)
       emitModelsState()
@@ -265,13 +270,22 @@ async function dispatchSidecarAction(payload: Record<string, unknown>): Promise<
     }
 
     case 'start_api': {
-      // OpenAI 兼容 API 服务在阶段三移植
-      const msg = '对外 API 服务尚未移植到 Electron 版（阶段三）'
-      emitError(msg)
-      return { status: 'error', msg }
+      const host = optStr(payload, 'host') ?? '127.0.0.1'
+      const port = typeof payload.port === 'number' ? payload.port : 9870
+      const apiKey = optStr(payload, 'api_key') ?? ''
+      try {
+        apiServer.start({ host, port, apiKey })
+        emitStatus('api_started', { port })
+        return { ok: true }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        emitError(msg)
+        return { status: 'error', msg }
+      }
     }
 
     case 'stop_api': {
+      apiServer.stop()
       emitStatus('api_stopped')
       return { ok: true }
     }
@@ -509,12 +523,24 @@ export const commands: Record<string, CommandHandler> = {
 
   // ── 运行时（推理框架 libs）───────────────────────────────────────────────
   check_runtime: () => runtimeStatus(),
-  rust_verify_runtime: async (args) => verifyRuntime(str(args, 'framework')),
-  download_runtime: async (args) => {
-    throw new Error(`推理框架运行时下载尚未移植到 Electron 版（阶段三）：${str(args, 'framework')}`)
+  rust_verify_runtime: (args) => verifyRuntimeFull(str(args, 'framework')),
+  download_runtime: (args) => {
+    const framework = str(args, 'framework')
+    // 后台执行 + 事件驱动状态（下载可能耗时数分钟）
+    void downloadRuntime(framework).catch((e: unknown) => {
+      // 事件已在 downloadRuntime 内部发出；这里只吞掉避免 unhandled rejection
+      log.warn(`[framework] 下载 ${framework} 失败: ${e instanceof Error ? e.message : String(e)}`)
+    })
+    return { ok: true, framework }
   },
-  cancel_runtime_download: async (args) => {
-    throw new Error(`推理框架运行时下载尚未移植到 Electron 版（阶段三）：${str(args, 'framework')}`)
+  cancel_runtime_download: (args) => {
+    const framework = str(args, 'framework')
+    const ok = requestCancelRuntime(framework)
+    if (!ok) {
+      emitStatus('runtime_download_error', { framework, msg: `no active download: ${framework}` })
+      return { ok: false }
+    }
+    return { ok: true }
   },
   rust_pytorch_device_info: async (args) => {
     throw new Error(`PyTorch 设备探测尚未移植到 Electron 版（阶段三）：${str(args, 'device')}`)
