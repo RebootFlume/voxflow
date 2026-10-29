@@ -12,6 +12,7 @@
 import { log } from '../core/logger'
 import type { AsrEngine } from './engine'
 import { LlamaAsrAdapter, lastRequestedModel, recordLastRequested } from './llama-server'
+import { SherpaAsrAdapter } from './sherpa-asr'
 import { PyTorchAsrAdapter } from './pytorch-asr'
 import { SPECS, type ModelSpec } from '../models/spec-data'
 
@@ -36,6 +37,8 @@ export class AsrRegistry {
 
   constructor() {
     this.register('gguf', new LlamaAsrAdapter())
+    // onnx → sherpa-onnx websocket server（低端设备引擎）
+    this.register('onnx', new SherpaAsrAdapter())
     // pytorch → 独立 Python worker（按需下载运行时；模型适配器在运行时白名单里）
     this.register('pytorch', new PyTorchAsrAdapter())
   }

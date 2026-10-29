@@ -12,5 +12,8 @@ dist-bundle
 # 推理框架运行时包（llama / sherpa，用户在「推理框架」页下载解压到 exe 旁 libs/）
 /libs/
 
+# sherpa-onnx 服务端自己写的日志（落在工作目录）
+log.txt
+
 # 本地模型目录（数据根内，由应用自行管理）
 /data/

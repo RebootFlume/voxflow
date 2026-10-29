@@ -18,6 +18,7 @@ import { log } from '../core/logger'
 import { decodeAny } from '../audio'
 import { registry, findModelSpec } from '../inference/registry'
 import { llamaEngine } from '../inference/llama-server'
+import { globalSherpaEngine } from '../inference/sherpa-asr'
 import { transcribeFileWithProgress } from '../inference/transcribe-file'
 import { getGpuInfo, getVramStatus } from '../inference/vram'
 import {
@@ -438,8 +439,9 @@ export const commands: Record<string, CommandHandler> = {
 
   rust_unload_asr: async () => {
     await registry().unloadActive()
-    // 双保险：即使 active 判定异常，也把引擎停掉
+    // 双保险：即使 active 判定异常，也把两个引擎都停掉（对齐 Rust 版）
     await llamaEngine.unload()
+    globalSherpaEngine().unload()
     return { ok: true, loaded: false }
   },
 
@@ -492,7 +494,10 @@ export const commands: Record<string, CommandHandler> = {
     model: llamaEngine.modelName() ?? ''
   }),
 
-  rust_unload_sherpa_asr: async () => ({ status: 'unloaded' }),
+  rust_unload_sherpa_asr: async () => {
+    globalSherpaEngine().unload()
+    return { status: 'unloaded' }
+  },
 
   // ── 音频 ────────────────────────────────────────────────────────────────
   decode_audio_file: async (args) => {
