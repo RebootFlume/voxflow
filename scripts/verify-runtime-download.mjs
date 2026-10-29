@@ -163,7 +163,29 @@ check(
   JSON.stringify(seen.map((e) => e.status))
 )
 
-// 4. 取消后的临时目录：Rust 版语义 = **保留 .part**（下次可断点续传），
+// 4. PyTorch 设备探测（未安装运行时 ⇒ 明确错误，不是崩溃）
+const probe = await call('rust_pytorch_device_info', { device: 'cpu' })
+check('rust_pytorch_device_info 可调用', probe.ok === true, JSON.stringify(probe))
+check(
+  '返回 { ok, device, info|error } 契约',
+  probe.ok && probe.r.device === 'cpu' && ('info' in probe.r || 'error' in probe.r),
+  JSON.stringify(probe)
+)
+if (probe.ok && probe.r.info) {
+  check(
+    'info 带齐前端契约字段',
+    ['python', 'torch', 'cuda_available', 'cuda_version', 'device_count'].every((k) => k in probe.r.info),
+    JSON.stringify(probe.r.info)
+  )
+} else {
+  check(
+    '未安装运行时时给出可读错误',
+    typeof probe.r.error === 'string' && probe.r.error.length > 0,
+    JSON.stringify(probe)
+  )
+}
+
+// 5. 取消后的临时目录：Rust 版语义 = **保留 .part**（下次可断点续传），
 //    目录本身不清理（取消路径上 Rust 也没做清理）。这里断言同样语义。
 const tmpDir = join(LIBS, `_runtime_${DL}`)
 const tmpLeft = existsSync(tmpDir) ? readdirSync(tmpDir) : []
