@@ -72,6 +72,11 @@ function check(name, cond, detail) {
 
 console.log('\n【TTS 命令 IPC】')
 
+// 0. 复位：先卸掉可能残留的引擎（上一轮真实推理会留下已加载的 TTS/ASR），
+//    否则"未加载模型时应当报错"这类断言会因引擎还在而失效。
+await call('rust_unload_tts_model')
+await call('rust_unload_asr')
+
 // 1. 音色库列表（初始为空）
 const list0 = await call('rust_tts_voices_list')
 check('音色库列表可调用', list0.ok === true, JSON.stringify(list0))
@@ -159,9 +164,18 @@ const cancel = await call('rust_cancel_tts')
 check('取消命令返回 cancelled=false（无合成在跑）',
   cancel.ok === true && cancel.r.cancelled === false, JSON.stringify(cancel))
 
-// 11. 加载 TTS 模型（无 sherpa 运行时 ⇒ 明确报错）
-const load = await call('rust_load_tts_model', { modelPath: 'Kokoro-v1_0', device: 'cpu' })
-check('加载未安装的 TTS 模型报错', load.ok === false, JSON.stringify(load))
+// 11. 加载 TTS 模型
+// 不存在的模型 ⇒ 必须报错（不静默成功）
+const badLoad = await call('rust_load_tts_model', { modelPath: '不存在的模型', device: 'cpu' })
+check('加载不存在的 TTS 模型报错', badLoad.ok === false, JSON.stringify(badLoad))
+// 已安装的模型 ⇒ 应当能真的加载上（前提：本机已装 sherpa 运行时 + 已下载该模型）
+const realLoad = await call('rust_load_tts_model', { modelPath: 'Kokoro-v1_0', device: 'cpu' })
+if (realLoad.ok === false && String(realLoad.err).includes('缺少主模型文件')) {
+  console.log('    ! 本机未安装 Kokoro 模型，跳过"真实加载"断言')
+} else {
+  check('加载已安装的 TTS 模型成功', realLoad.ok === true, JSON.stringify(realLoad))
+  await call('rust_unload_tts_model')
+}
 
 // 12. 清理：删除条目 + 删掉测试文件
 const rm = await call('rust_tts_voice_remove', { id: voiceId })
