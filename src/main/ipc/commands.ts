@@ -37,6 +37,7 @@ import {
   startDownload
 } from '../models/model-manager'
 import { runtimeStatus, verifyRuntimeFull, downloadRuntime, requestCancelRuntime } from '../inference/runtime-download'
+import { ttsRegistry } from '../tts/registry'
 import * as apiServer from '../api-server'
 import { probeDevice } from '../inference/pytorch'
 import * as tts from '../tts/commands'
@@ -609,5 +610,12 @@ export const commands: Record<string, CommandHandler> = {
         emitSidecar(tts.ttsProgressPayload(done, total))
       }
     }),
-  rust_cancel_tts: () => tts.cancelTts()
+  rust_cancel_tts: () => tts.cancelTts(),
+
+  // ── 调试 ──────────────────────────────────────────────────────────────────
+  /** 调试用：硬编码加载 Kokoro-v1_0（CPU），验证 TTS 链路是否通 */
+  rust_test_tts_model: async () => {
+    const { framework, model } = await ttsRegistry().load('Kokoro-v1_0', 'cpu')
+    return { status: 'loaded', model, framework, device: 'cpu' }
+  }
 }

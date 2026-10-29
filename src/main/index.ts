@@ -19,6 +19,7 @@ import { adoptProxyEnv, setModelRoot } from './models/model-manager'
 import { createTray, destroyTray, showMainWindow } from './tray'
 import { startHotkeyListener, stopHotkeyListener } from './system/hotkey'
 import { llamaEngine } from './inference/llama-server'
+import { globalSherpaEngine } from './inference/sherpa-asr'
 import { registry } from './inference/registry'
 
 let mainWindow: BrowserWindow | null = null
@@ -139,7 +140,10 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   setQuitting(true)
   stopHotkeyListener()
+  // 退出路径只终止子进程、不等它退出（对齐 Rust 的 kill_for_exit：
+  // 等进程退出会让「点了关闭要等好几秒托盘图标才消失」）
   llamaEngine.killForExit()
+  globalSherpaEngine().killForExit()
   void registry().unloadActive().catch(() => {})
   destroyTray()
 })
