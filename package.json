@@ -28,6 +28,11 @@
     "release": "powershell -ExecutionPolicy Bypass -File scripts/release.ps1",
     "verify:renderer": "node scripts/verify-renderer.mjs",
     "verify:events": "node scripts/verify-events.mjs",
+    "verify:tts": "node scripts/verify-tts-ipc.mjs",
+    "verify:runtime": "node scripts/verify-runtime-download.mjs",
+    "verify:api": "node scripts/verify-api-server.mjs",
+    "install:runtime": "node scripts/install-runtime.mjs",
+    "test:tts": "node scripts/run-ts-tests.mjs scripts/tts-tests.ts",
     "screenshot": "node scripts/screenshot.mjs"
   },
   "dependencies": {

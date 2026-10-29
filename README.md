@@ -168,9 +168,9 @@ const text = await window.voxflow.invoke<string>('rust_transcribe_llama', {
 | 一 | 前端移植 + IPC 桥 + 窗口/托盘/热键/剪贴板/持久化 + ASR 主链路 | ✅ **完成并验证** |
 | 二 | TTS 引擎 + 音色库 + 克隆音色 | ✅ **完成并验证**（逻辑层已验证，缺 sherpa 运行时未做真机合成） |
 | 三-a | 模型下载 / 删除 / 磁盘占用（`model_manager`） | ✅ 已实现（未做真实下载验证） |
-| 三-b | 推理框架运行时下载（llama / sherpa 包） | ⬜ 未开始 |
-| 三-c | PyTorch worker 接入 | ⬜ 未开始 |
-| 三-d | OpenAI 兼容对外 API 服务 | ⬜ 未开始 |
+| 三-b | 推理框架运行时下载（llama / sherpa 包） | ✅ **完成并验证**（真实下载 + 解压 + 落位 + 试启动通过） |
+| 三-c | PyTorch worker 接入 | ⬜ 未开始（运行时包已就绪，适配器待接） |
+| 三-d | OpenAI 兼容对外 API 服务 | ✅ **完成并验证**（16 项契约测试全过） |
 | 四 | 打包与发版流程 | ✅ 脚本就绪，`build:unpack` 已验证 |
 
 未移植的命令会抛出明确的「尚未移植到 Electron 版（阶段 N）」错误，不会静默失败。
@@ -189,8 +189,11 @@ const text = await window.voxflow.invoke<string>('rust_transcribe_llama', {
 | 显存监控 | nvidia-smi 真值：RTX 4070 Laptop，1.7 / 8.0 GB (21%) |
 | 原生模块 | `uiohook-napi` 经 electron-builder rebuild 后正确解包（`asarUnpack: **/*.node`） |
 | TTS 单元测试 | `npm run test:tts` —— 48 项全过（切分 / 音色库 / argv 解释器 / 时长钳制） |
-| TTS 端到端 | `npm run verify:tts` —— 24 项全过（音色库增删改查 / 错误分支 / 索引格式） |
+| TTS 端到端 | `npm run verify:tts` —— 24 项全过（音色库全流程 / 错误分支 / 索引格式） |
 | TTS 索引格式 | `voices.json` 用 snake_case，与 Tauri 版共用同一份文件可直接互换 |
+| 运行时下载 | `npm run verify:runtime` —— 16 项全过；**真实下载 llama-cpp b10622（250MB）→ 解压 → 落位 → 试启动 → state:ready** |
+| 代理链路 | 系统代理（HTTP_PROXY）自动接管，HTTP CONNECT 隧道可用 |
+| 对外 API | `npm run verify:api` —— 16 项全过（鉴权 / 路由 / 错误码 / multipart / WAV 编码） |
 
 ### 验证脚本
 
@@ -200,9 +203,21 @@ electron out/main/index.js --remote-debugging-port=9222
 npm run verify:renderer   # UI 渲染 + IPC 冒烟
 npm run verify:events     # 事件总线载荷校验
 npm run verify:tts        # TTS 命令端到端校验
+npm run verify:runtime    # 推理框架运行时下载端到端校验
+npm run verify:api        # OpenAI 兼容 API 契约校验
 npm run test:tts          # TTS 单元测试（纯逻辑，无需运行时）
 npm run screenshot        # 截图到 %TEMP%
+
+npm run install:runtime 9222 gguf   # 真实安装运行时（数百 MB，人工验证用）
 ```
+
+### 已知偏差（与 Tauri 版）
+
+| 项 | Tauri 版 | Electron 版 | 原因 |
+|---|---|---|---|
+| 代理环境变量 | 删掉（reqwest 隐式读 env） | **保留** | Node 的 fetch 不隐式读 env，删掉只会影响本进程拉起的子进程 |
+| 运行时试启动超时 | 6s | 15s | 冷缓存下要加载 ~550MB CUDA DLL 才 listen，6s 会误报「DLL 缺失」 |
+| 便携版形态 | 单文件 `portable.exe` | zip 解压即用 | Electron 无法产出真单文件（自解压需每次解 150MB Chromium） |
 
 ---
 
