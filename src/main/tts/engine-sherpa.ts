@@ -15,7 +15,7 @@
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { findSpec, getModelRoot } from '../models/model-manager'
 import type { ModelSpec, VoiceModeSpec } from '../models/spec-data'
 import { sherpaExe } from '../inference/runtime-paths'
@@ -44,7 +44,9 @@ interface SherpaInner {
 
 /** 从模型文件路径解析描述符：目录名优先（models_root/<dir>/model.onnx），文件名兜底。 */
 function resolveSpec(modelPath: string): ModelSpec | undefined {
-  const dir = modelPath.replace(/[\\/]+$/, '')
+  // 注意取的是**父目录名**（模型目录 = models_root/<spec.id>），
+  // 不是文件名本身——Rust 版用的是 `model_path.parent()`。
+  const dir = dirname(modelPath)
   const dirName = basename(dir)
   if (dirName) {
     const spec = findSpec(dirName)

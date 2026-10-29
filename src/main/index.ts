@@ -14,7 +14,8 @@ import { registerIpc } from './ipc'
 import { getCloseToTray } from './ipc/commands'
 import { isQuitting, setQuitting } from './core/app-state'
 import { log } from './core/logger'
-import { adoptProxyEnv } from './models/model-manager'
+import { defaultModelRoot, readSavedModelRoot } from './core/data-root'
+import { adoptProxyEnv, setModelRoot } from './models/model-manager'
 import { createTray, destroyTray, showMainWindow } from './tray'
 import { startHotkeyListener, stopHotkeyListener } from './system/hotkey'
 import { llamaEngine } from './inference/llama-server'
@@ -90,6 +91,17 @@ app.whenReady().then(() => {
   // 让「用户只在系统里配了代理」的场景与 Tauri 版行为一致。
   const effectiveProxy = adoptProxyEnv()
   log.info(`[proxy] 生效代理: ${effectiveProxy === '' ? '(直连)' : effectiveProxy}`)
+
+  // 恢复已保存的模型根（对齐 Rust 版 setup()：从 config.json 读 models.modelRoot）。
+  // 不恢复的话主进程会一直用默认的「数据根/models」，而前端展示的是用户另存的目录
+  // → 清单、下载、加载全都对不上。
+  const savedModelRoot = readSavedModelRoot() ?? defaultModelRoot()
+  try {
+    const resolved = setModelRoot(savedModelRoot)
+    log.info(`[model] 模型根: ${resolved}`)
+  } catch (e) {
+    log.warn(`[model] 恢复模型根失败（改用默认）: ${e instanceof Error ? e.message : String(e)}`)
+  }
 
   // 开发态按 F12 打开 DevTools；生产态忽略 CommandOrControl+R
   app.on('browser-window-created', (_event, window) => {
