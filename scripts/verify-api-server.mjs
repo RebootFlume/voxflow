@@ -10,7 +10,8 @@ import { WebSocket } from 'ws'
 
 const port = process.argv[2] ?? '9222'
 const API_HOST = '127.0.0.1'
-const API_PORT = 19871
+// 随机高位端口：避免与上一轮测试残留的 API 服务撞端口
+const API_PORT = 20000 + Math.floor(Math.random() * 20000)
 const API_KEY = 'test-key-123'
 
 const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()

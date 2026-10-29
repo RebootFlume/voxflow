@@ -127,8 +127,10 @@ check(
 )
 
 // 3. 真实下载 + 取消
-// 用 'onnx'（sherpa-onnx）：gguf 可能已被装上（已装 → 直接跳过下载，没有进度事件）。
-const DL = 'onnx'
+// 选一个**当前未安装**的包（已安装的会直接跳过下载 ⇒ 没有进度事件）。
+// 优先用 onnx；都装了就用 pytorch-cpu（取消早，只拉几 MB）。
+const notInstalled = pkgs.filter((p) => !p.installed).map((p) => p.framework)
+const DL = notInstalled.includes('onnx') ? 'onnx' : notInstalled[0] ?? 'onnx'
 console.log(`  … 启动真实下载（${DL}），稍后取消`)
 const events = await evaluate(`(async () => {
   const seen = []
@@ -194,7 +196,8 @@ check(
   tmpLeft.some((n) => n.endsWith('.part')),
   JSON.stringify(tmpLeft)
 )
-check('取消后未落盘主程序（目标目录仍为空）', !existsSync(join(LIBS, 'sherpa-onnx', 'bin')))
+const targetDir = join(LIBS, pkgs.find((p) => p.framework === DL)?.framework === 'onnx' ? 'sherpa-onnx' : DL)
+check('取消后未落盘主程序（目标目录仍为空）', !existsSync(join(targetDir, 'bin', 'sherpa-onnx-offline-websocket-server.exe')))
 
 console.log(`\n通过 ${pass} 项，失败 ${fail} 项`)
 ws.close()
