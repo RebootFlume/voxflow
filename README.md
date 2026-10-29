@@ -212,6 +212,11 @@ OpenAI 兼容对外 API (POST /v1/audio/transcriptions) → "今天下午三点�
 ```
 
 三条独立推理链路 + 一条对外接口，识别文本与原文**完全一致** —— 证明移植与 Tauri 版行为等价。
+**开发态与打包态（从 `app.asar` 运行）各跑一遍，均 25/25 通过。**
+
+> 依赖：本机需已装 `llama-cpp` / `sherpa-onnx` 运行时（在 exe 旁 `libs/`），
+> 并已下载对应模型（模型根由 `config.json` 的 `models.modelRoot` 决定，
+> 默认是 `<数据根>/models`）。
 
 ### 验证脚本
 
