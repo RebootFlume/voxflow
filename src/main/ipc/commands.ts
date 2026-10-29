@@ -37,6 +37,7 @@ import {
 } from '../models/model-manager'
 import { runtimeStatus, verifyRuntimeFull, downloadRuntime, requestCancelRuntime } from '../inference/runtime-download'
 import * as apiServer from '../api-server'
+import { probeDevice } from '../inference/pytorch'
 import * as tts from '../tts/commands'
 import { setHotkey } from '../system/hotkey'
 import { openInExplorer } from '../system/explorer'
@@ -543,7 +544,28 @@ export const commands: Record<string, CommandHandler> = {
     return { ok: true }
   },
   rust_pytorch_device_info: async (args) => {
-    throw new Error(`PyTorch 设备探测尚未移植到 Electron 版（阶段三）：${str(args, 'device')}`)
+    // 一次性设备探测：拉起 worker → runtime_info → 关闭
+    const device = str(args, 'device', 'cpu')
+    try {
+      const info = await probeDevice(device)
+      return {
+        ok: true,
+        device,
+        info: {
+          python: String(info.python ?? ''),
+          torch: String(info.torch ?? ''),
+          cuda_available: info.cuda_available === true,
+          cuda_version: (info.cuda_version as string | null) ?? null,
+          device_count: Number(info.device_count ?? 0)
+        }
+      }
+    } catch (e) {
+      return {
+        ok: false,
+        device,
+        error: e instanceof Error ? e.message : String(e)
+      }
+    }
   },
 
   // ── TTS ──────────────────────────────────────────────────────────────────

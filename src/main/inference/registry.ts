@@ -12,6 +12,7 @@
 import { log } from '../core/logger'
 import type { AsrEngine } from './engine'
 import { LlamaAsrAdapter, lastRequestedModel, recordLastRequested } from './llama-server'
+import { PyTorchAsrAdapter } from './pytorch-asr'
 import { SPECS, type ModelSpec } from '../models/spec-data'
 
 /** 归一化：大小写不敏感 + 去掉 - 和 _（"Kokoro-v1_0" → "kokorov10"） */
@@ -35,6 +36,8 @@ export class AsrRegistry {
 
   constructor() {
     this.register('gguf', new LlamaAsrAdapter())
+    // pytorch → 独立 Python worker（按需下载运行时；模型适配器在运行时白名单里）
+    this.register('pytorch', new PyTorchAsrAdapter())
   }
 
   /** 注册一个引擎 */

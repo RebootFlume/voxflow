@@ -11,6 +11,7 @@ import { join } from 'node:path'
 import { getModelRoot, mainModelFile, findSpec } from '../models/model-manager'
 import type { ModelSpec } from '../models/spec-data'
 import { SherpaTtsEngine } from './engine-sherpa'
+import { PyTorchTtsEngine } from './engine-pytorch'
 import type { TtsEngine } from './traits'
 
 /** TTS 引擎注册表 */
@@ -20,7 +21,8 @@ export class TtsRegistry {
 
   constructor() {
     this.register('sherpa', new SherpaTtsEngine())
-    // PyTorch Python worker（Kokoro 等）在阶段三接入
+    // PyTorch Python worker（Kokoro 等）
+    this.register('pytorch', new PyTorchTtsEngine())
   }
 
   /** 注册一个引擎 */
