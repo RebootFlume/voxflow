@@ -8,7 +8,14 @@ export function useHotkeySync() {
   const hotkey = useAppStore((s) => s.asr.hotkey);
   useEffect(() => {
     if (!hotkey) return;
-    void window.voxflow.invoke("set_hotkey", { hotkey }).catch(() => {});
+    void window.voxflow
+      .invoke("set_hotkey", { hotkey })
+      .catch((e: unknown) => {
+        // 不能静默吞掉：解析失败时主进程仍用旧热键，界面却显示新键
+        // ⇒ 用户会以为"热键坏了"。把原因写进运行日志。
+        const msg = e instanceof Error ? e.message : String(e);
+        useAppStore.getState().addLog(`[hotkey] 录音热键「${hotkey}」不可用：${msg}`, "error");
+      });
   }, [hotkey]);
 }
 

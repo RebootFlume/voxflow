@@ -22,7 +22,7 @@ import { pasteText } from './clipboard'
 import { startCapture, stopCapture } from './capture'
 import { loadUiohook, UIKEY, type UiohookKeyboardEvent } from './uiohook'
 
-/** uIOhook 键码表（X11 风格，库内部按平台映射） */
+/** uIOhook 键码表（X11 风格，库内部按平台映射；数值以 `uiohook-napi` 的 UiohookKey 为准） */
 const KEY_CODES: Record<string, number> = {
   CapsLock: UIKEY.CapsLock,
   Space: UIKEY.Space,
@@ -30,7 +30,7 @@ const KEY_CODES: Record<string, number> = {
   Escape: UIKEY.Escape,
   Backspace: UIKEY.Backspace,
   Tab: UIKEY.Tab,
-  Insert: 3657,
+  Insert: 3666,
   Delete: 3667,
   Home: 3655,
   End: 3663,
@@ -47,15 +47,37 @@ const KEY_CODES: Record<string, number> = {
   Shift: UIKEY.Shift,
   ShiftRight: UIKEY.ShiftRight,
   Meta: UIKEY.Meta,
-  MetaRight: UIKEY.MetaRight
+  MetaRight: UIKEY.MetaRight,
+  // 功能键（浏览器 keydown 的 e.key 就是 "F1".."F12"；码值与 uiohook-napi 的 UiohookKey 一致）
+  F1: 59,
+  F2: 60,
+  F3: 61,
+  F4: 62,
+  F5: 63,
+  F6: 64,
+  F7: 65,
+  F8: 66,
+  F9: 67,
+  F10: 68,
+  F11: 87,
+  F12: 88
 }
 
-/** 字母 / 数字键码（X11：a=38 起，0=11 起；实际用小写字母表推导） */
+/**
+ * 字母 / 数字键码（X11：a=38 起，0=11 起）。
+ *
+ * **必须严格单字符**：JS 的 `>=` / `<=` 对字符串是字典序比较，多字符字符串
+ * （"F9" / "F12" / "Bogus"）会通过 `'A'`..`'Z'` 的区间判断，被换算成一个
+ * 不存在的键码（实测 `"F9" => 43`、`"Bogus" => 39`）——结果就是热键"设置成功"
+ * 却永远匹配不上真实按键（用户看到的现象：改成 F9 后按住录音没反应）。
+ * 功能键走上面的 KEY_CODES 精确表，这里只负责单字符。
+ */
 function letterCode(ch: string): number | null {
-  if (ch >= 'a' && ch <= 'z') return 38 + (ch.charCodeAt(0) - 97)
-  if (ch >= 'A' && ch <= 'Z') return 38 + (ch.charCodeAt(0) - 65)
-  if (ch >= '0' && ch <= '9') return 11 + (ch.charCodeAt(0) - 48)
-  if (ch === 'F1') return 59
+  if (ch.length !== 1) return null
+  const c = ch.charCodeAt(0)
+  if (c >= 97 && c <= 122) return 38 + (c - 97) // a-z
+  if (c >= 65 && c <= 90) return 38 + (c - 65) // A-Z
+  if (c >= 48 && c <= 57) return 11 + (c - 48) // 0-9
   return null
 }
 
@@ -162,6 +184,8 @@ export function stopHotkeyListener(): void {
 export function setHotkey(hotkey: string): void {
   currentSpec = parseHotkey(hotkey)
   if (!listening) startHotkeyListener()
+  // 成功也记一条：运行日志里能直接看到"现在真正生效的键"，排查"改了没反应"时有用
+  log.info(`[hotkey] 录音热键已注册：${hotkey}`)
 }
 
 /** 开始录音 */
