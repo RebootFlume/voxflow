@@ -77,4 +77,14 @@ export interface AsrEngine {
    * （实测踩过：我自己的测试残留实例把"我们的占用"顶到 4.3 GB）。
    */
   pid(): number | null
+
+  /**
+   * 退出路径专用：**同步**杀掉引擎子进程（不等它退出、不做协议握手）。
+   *
+   * 可选方法：只有持有长驻子进程的引擎需要实现
+   * （llama-server / sherpa-asr server / python worker）。
+   * 退出时如果只走 `unload()`（异步、要等协议握手），进程可能来不及
+   * 走完握手就被杀掉 → 子进程变成孤儿继续占显存/端口。
+   */
+  killForExit?(): void
 }

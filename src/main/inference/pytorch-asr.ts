@@ -159,6 +159,16 @@ export class PyTorchAsrAdapter implements AsrEngine {
     this.inner.modelDir = ''
   }
 
+  /**
+   * 退出路径专用：直接杀掉 python worker 子进程（不等它退出）。
+   * 只走 unload() 的话要等 worker 的 shutdown 协议应答，应用退出时经常来不及，
+   * python.exe 就会变成孤儿进程继续占着显存。
+   */
+  killForExit(): void {
+    this.inner.worker?.kill()
+    this.inner.worker = null
+  }
+
   isLoaded(): boolean {
     return this.inner.worker !== null && this.inner.worker.isRunning()
   }

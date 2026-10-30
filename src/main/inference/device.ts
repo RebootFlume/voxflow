@@ -88,6 +88,125 @@ async function processExePath(pid: number): Promise<string | null> {
 }
 
 /**
+ * **批量**取多个 PID 的可执行文件路径（一次 PowerShell 调用）。
+ *
+ * 为什么要批量：之前是"每个 PID 起一次 PowerShell"（冷启动 ~0.3~0.5s/次），
+ * 端口上常有 1~2 个 PID，串起来就是 1 秒左右的等待 —— 每次加载模型都要付一次。
+ * 合成一次调用后只剩一次冷启动（实测 Get-Process 批量查 2 个 PID ≈ 210ms，
+ * 其中绝大部分就是 PowerShell 冷启动）。
+ *
+ * 输出格式：`PID|路径`，用单引号 + `-f` 格式化，避免命令里出现双引号
+ * （Node 传参 + PowerShell 二次解析时双引号最容易被吃掉）。
+ */
+export async function processExePaths(pids: number[]): Promise<Map<number, string>> {
+  const out = new Map<number, string>()
+  if (pids.length === 0) return out
+  if (process.platform !== 'win32') return out
+
+  const idList = pids.join(',')
+  try {
+    const r = await execFileAsync(
+      'powershell',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `Get-Process -Id ${idList} -ErrorAction SilentlyContinue | ForEach-Object { '{0}|{1}' -f $_.Id, $_.Path }`
+      ],
+      { windowsHide: true, maxBuffer: 4 * 1024 * 1024 }
+    )
+    for (const line of r.stdout.split(/\r?\n/)) {
+      const t = line.trim()
+      if (t === '') continue
+      const idx = t.indexOf('|')
+      if (idx <= 0) continue
+      const pid = Number.parseInt(t.slice(0, idx), 10)
+      const path = t.slice(idx + 1).trim()
+      if (Number.isFinite(pid) && path !== '') out.set(pid, path)
+    }
+    return out
+  } catch {
+    // 批量查询失败 → 退回逐个查询（慢，但不会漏判）
+  }
+
+  for (const pid of pids) {
+    const p = await processExePath(pid)
+    if (p) out.set(pid, p)
+  }
+  return out
+}
+
+/**
+ * 清理「本软件 libs 目录下的引擎残留进程」（崩溃 / 被强杀留下的孤儿）。
+ *
+ * 为什么需要：用户强杀应用时，子进程（llama-server / sherpa / python worker）
+ * 会变成孤儿继续占着端口和显存；下次启动时端口守卫要一个个查路径再杀，
+ * 慢且容易留下"端口通 = 假就绪"的怪状态。这里在启动后扫一遍，
+ * 一次性把不属于本次会话的引擎清掉。
+ *
+ * 判定规则与端口守卫一致：**按可执行文件路径归属**（在本软件 libs 目录下），
+ * 不是按进程名 —— 用户自己装的同名引擎绝不能被误杀。
+ *
+ * @param exclude 需要跳过的 PID（本次会话自己起的引擎）。传函数是为了**杀之前**再取一次，
+ *               避免扫描快照之后我们新起的引擎被误杀。
+ * @returns 被杀掉的 PID 列表
+ */
+export async function killOrphanEngineProcesses(
+  exclude: () => Set<number> = () => new Set()
+): Promise<number[]> {
+  if (process.platform !== 'win32') return []
+
+  let stdout: string
+  try {
+    const r = await execFileAsync(
+      'powershell',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        "Get-Process -ErrorAction SilentlyContinue | ForEach-Object { try { '{0}|{1}' -f $_.Id, $_.Path } catch { } }"
+      ],
+      { windowsHide: true, maxBuffer: 8 * 1024 * 1024 }
+    )
+    stdout = r.stdout
+  } catch (e) {
+    log.warn(`[orphan-clean] 进程清单查询失败: ${e instanceof Error ? e.message : String(e)}`)
+    return []
+  }
+
+  const candidates: number[] = []
+  for (const line of stdout.split(/\r?\n/)) {
+    const t = line.trim()
+    if (t === '') continue
+    const idx = t.indexOf('|')
+    if (idx <= 0) continue
+    const pid = Number.parseInt(t.slice(0, idx), 10)
+    const path = t.slice(idx + 1).trim()
+    if (!Number.isFinite(pid) || path === '') continue
+    if (pid === process.pid) continue
+    if (!isOurEngineExe(path)) continue
+    candidates.push(pid)
+  }
+
+  const killed: number[] = []
+  for (const pid of candidates) {
+    // 杀之前再取一次排除集：扫描快照之后我们可能刚起了新引擎
+    if (exclude().has(pid)) continue
+    try {
+      await execFileAsync('taskkill', ['/PID', String(pid), '/F'], { windowsHide: true })
+      killed.push(pid)
+      log.warn(`[orphan-clean] 清理残留引擎 PID=${pid}`)
+    } catch {
+      // 进程可能已经自己退了 —— 忽略
+    }
+  }
+  if (killed.length > 0) {
+    log.warn(`[orphan-clean] 共清理 ${killed.length} 个残留引擎进程`)
+  }
+  return killed
+}
+
+/**
  * 杀掉占用指定端口的「本软件引擎」进程（仅 Windows）。
  * 判定依据 = 进程可执行文件是否在本软件 libs 目录下（路径归属），不是图像名：
  * - 自己的引擎 / 历史会话残留 → 杀掉（防止死进程占着固定端口造成"端口通=假就绪"）
@@ -118,8 +237,11 @@ export async function killPortOwner(port: number): Promise<void> {
     if (Number.isFinite(pid) && !pids.includes(pid)) pids.push(pid)
   }
 
+  // 一次性查出所有占用进程的路径（一次 PowerShell 调用，而不是每个 PID 一次）
+  const exeMap = await processExePaths(pids)
+
   for (const pid of pids) {
-    const exe = await processExePath(pid)
+    const exe = exeMap.get(pid)
     if (!exe) {
       log.warn(`[port-guard] 端口 ${port} 的 PID=${pid} 无法确认路径，保守跳过（不误杀）`)
       continue

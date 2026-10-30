@@ -12,7 +12,7 @@
  * - `synthesize` 返回真实采样率，不硬编码 24k、不重采样。
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -40,6 +40,26 @@ interface SherpaInner {
   referenceAudio: string | null
   /** 语音克隆：参考音频对应的文本（ZipVoice 需要） */
   referenceText: string | null
+}
+
+/**
+ * 正在运行的 sherpa-tts 子进程（每次合成起一个）。
+ *
+ * 之前没有跟踪 → 应用在合成过程中被关掉时，子进程会变成孤儿继续跑
+ * （Rust 版在退出路径上会杀掉它）。这里登记一份，退出时统一杀掉。
+ */
+const runningTtsChildren = new Set<ChildProcess>()
+
+/** 退出路径专用：杀掉所有还在跑的 sherpa-tts 子进程（同步、不等它退出） */
+export function killTtsChildrenForExit(): void {
+  for (const child of runningTtsChildren) {
+    try {
+      child.kill()
+    } catch {
+      /* 已退出 */
+    }
+  }
+  runningTtsChildren.clear()
 }
 
 /** 从模型文件路径解析描述符：目录名优先（models_root/<dir>/model.onnx），文件名兜底。 */
@@ -157,15 +177,18 @@ export class SherpaTtsEngine implements TtsEngine {
 
     return new Promise((resolve, reject) => {
       const child = spawn(SherpaTtsEngine.ttsExe(), [...args, text], { windowsHide: true })
+      runningTtsChildren.add(child)
       const outChunks: Buffer[] = []
       const errChunks: Buffer[] = []
       child.stdout?.on('data', (c: Buffer) => outChunks.push(c))
       child.stderr?.on('data', (c: Buffer) => errChunks.push(c))
       child.on('error', (e) => {
+        runningTtsChildren.delete(child)
         rmSync(outPath, { force: true })
         reject(new Error(`sherpa-tts 启动失败: ${e.message}`))
       })
       child.on('close', (code) => {
+        runningTtsChildren.delete(child)
         if (code !== 0) {
           rmSync(outPath, { force: true })
           const stderr = Buffer.concat(errChunks).toString('utf-8')
