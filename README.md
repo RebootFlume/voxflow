@@ -23,9 +23,9 @@
 
 ### 移植范围
 
-- ✅ **前端 100%**：65 个源文件逐字移植，`src/components/ui/*`（shadcn）零改动
+- ✅ **前端全量移植**：65 个源文件全部有对应物（63 个仅改 import 路径 `src/lib/tauri` → `src/lib/ipc`，`App.tsx` 逐字相同），`src/components/ui/*`（shadcn）13 个零改动
 - ✅ **IPC 桥接**：`src/lib/ipc.ts` 顶替原 `src/lib/tauri.ts`，**导出函数名与签名保持不变**
-- ✅ **主进程**：Tauri 的 45 个 `#[tauri::command]` 全量用 TypeScript 重写
+- ✅ **主进程**：Tauri 的 45 个 `#[tauri::command]` 中 **44 个**已用 TypeScript 重写（仅缺 demo 用的 `greet`）；Electron 侧另加 1 个诊断命令 `get_instance_info`（单实例判定），共 **45 个**；前端实际调用的 36 个命令 **100% 已实现**
 - ✅ **推理层**：llama-server / sherpa-onnx / PyTorch worker 全部走**独立子进程**（崩溃隔离不变）
 - ✅ **原生能力**：全局热键、模拟粘贴、托盘、对话框、剪贴板 → Electron 内置 API
 
@@ -38,7 +38,7 @@
 | `arboard` 剪贴板 | `electron.clipboard` |
 | `cpal` 麦克风采集 | 渲染进程 `getUserMedia` + `AudioContext`（主进程中继） |
 | `tauri-plugin-dialog` | `electron.dialog.showOpenDialog` |
-| `tiny_http` OpenAI 兼容 API | `node:http`（阶段三） |
+| `tiny_http` OpenAI 兼容 API | `node:http` |
 | `reqwest` / `tungstenite` | `fetch` / `ws` |
 | `hound` WAV 编解码 | 自实现 RIFF 解析器 |
 | `windows-sys` `GetDiskFreeSpaceExW` | `fs.statfsSync` / PowerShell |
@@ -80,7 +80,7 @@
 ```
 .
 ├── build/                    # 打包资源（图标、macOS entitlements）
-├── resources/                # 运行时资源（espeak-ng / pytorch worker）
+├── resources/                # 运行时资源（托盘图标；pytorch worker 源码模板，不打包）
 ├── scripts/                  # 打包与发版脚本（PowerShell）
 ├── src/
 │   ├── main/                 # Electron 主进程
@@ -91,7 +91,7 @@
 │   │   ├── system/           # 热键 / 剪贴板 / 采集 / 托盘交互
 │   │   └── ipc/              # IPC 命令表（45 个命令）
 │   ├── preload/              # contextBridge 桥
-│   └── renderer/             # React 前端（与上游逐字一致）
+│   └── renderer/             # React 前端（与上游同源，仅改 import 路径）
 ├── electron.vite.config.ts   # electron-vite 构建配置
 ├── electron-builder.yml      # electron-builder 打包配置
 └── scripts/rust-spec-to-ts.mjs  # 模型描述符表转换器（一次性工具）
@@ -174,7 +174,7 @@ const text = await window.voxflow.invoke<string>('rust_transcribe_llama', {
 | 三-e | sherpa-onnx ASR 引擎（SenseVoice / Paraformer） | ✅ **完成并验证**（真实模型转写通过） |
 | 四 | 打包与发版流程 | ✅ 脚本就绪，`build:unpack` 已验证 |
 
-未移植的命令会抛出明确的「尚未移植到 Electron 版（阶段 N）」错误，不会静默失败。
+前端调用的命令已 100% 实现；调用未注册的命令会抛出「未知命令: xxx」，不会静默失败。
 
 ### 已验证项
 
@@ -267,6 +267,12 @@ npm run install:runtime 9222 gguf   # 真实安装运行时（数百 MB，人工
 | 代理环境变量 | 删掉（reqwest 隐式读 env） | **保留** | Node 的 fetch 不隐式读 env，删掉只会影响本进程拉起的子进程 |
 | 运行时试启动超时 | 6s | 15s | 冷缓存下要加载 ~550MB CUDA DLL 才 listen，6s 会误报「DLL 缺失」 |
 | 便携版形态 | 单文件 `portable.exe` | zip 解压即用 | Electron 无法产出真单文件（自解压需每次解 150MB Chromium） |
+| 多实例 | 可同时开多个 | **全局单实例**：第二实例唤起主窗口后退出（控制端口 8930；调试可用 `VOXFLOW_ALLOW_MULTI=1` 绕过） | 冲突根源是全局资源而非配置文件：全局热键、固定端口（8931 / 9002）、显存。双开会互相覆盖 `config.json`、双触发热键、甚至互杀对方的引擎进程 |
+| 麦克风设备名 | cpal 直接给真实名 | 需先真正打开过一次麦克风才有真名（启动时自动探测并回填），未授权时显示「麦克风 N」 | 浏览器规范要求未授权时 `deviceInfo.label` 为空 |
+| 麦克风选择 | 可指定设备 | 暂用系统默认（未做选择器 UI） | 渲染进程已透传真实 deviceId 到 `getUserMedia`，仅缺 UI |
+| 录音重采样 | cpal 原生采 16kHz | 线性插值重采样 | Web Audio 的采集采样率不保证是 16k |
+| 录音音量 | 不推 volume 事件 | 不推 volume 事件 | 上游缺口，两版一致（音量条恒为 0） |
+| 显存轮询 | 每 10s | 每 15s；窗口隐藏时停摆、重新可见立即补一次 | Electron 主进程每轮会拉外部进程（nvidia-smi / WMI），降频以避免点击卡顿 |
 
 ---
 
