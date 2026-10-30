@@ -53,14 +53,23 @@ export class AsrRegistry {
     return this.engines.get(framework)
   }
 
-  /** 当前已加载的引擎（有且只有一个） */
+  /**
+   * 当前已加载的引擎（有且只有一个）。
+   *
+   * 为什么要多问一句 `isLoaded()`：Rust 版是**实时**按引擎 slot 算 active
+   * （`src-tauri/src/inference/slot.rs:56-63`），这里存的是 `activeFramework`
+   * 这个缓存字符串。两者会不一致 —— 例如 `rust_unload_sherpa_asr` 直接调引擎的
+   * unload() 绕过了注册表，缓存还停在 'onnx'，于是上层（文件转写 / 对外 API /
+   * 热键）以为引擎还在跑 → 跳过重新加载 → 直接报「sherpa ASR 未加载」。
+   */
   activeEngine(): AsrEngine | undefined {
-    return this.activeFramework ? this.engines.get(this.activeFramework) : undefined
+    const e = this.activeFramework ? this.engines.get(this.activeFramework) : undefined
+    return e && e.isLoaded() ? e : undefined
   }
 
-  /** 当前已加载的框架名（如 "gguf" / "onnx"），无则空 */
+  /** 当前已加载的框架名（如 "gguf" / "onnx"），无则空（与 activeEngine 同一口径） */
   activeFrameworkName(): string {
-    return this.activeFramework
+    return this.activeEngine() ? this.activeFramework : ''
   }
 
   /** 按模型名解析引擎注册键（模型存在性 + kind 校验） */
@@ -186,7 +195,12 @@ export class AsrRegistry {
   /** 卸载当前已加载的引擎 */
   async unloadActive(): Promise<void> {
     const e = this.activeEngine()
-    if (!e) return
+    // 没有已加载的引擎也要把缓存清掉：否则 activeFramework 会一直停在旧框架名上，
+    // 后续判断「引擎在不在跑」会被这份陈旧缓存误导（见 activeEngine 的注释）。
+    if (!e) {
+      this.activeFramework = ''
+      return
+    }
     await e.unload()
     this.activeFramework = ''
   }

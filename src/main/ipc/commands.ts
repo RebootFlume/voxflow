@@ -9,16 +9,16 @@
  *  - `asr://status`：热键录音状态（裸字符串）
  */
 
-import { readFileSync } from 'fs'
+import { readFile } from 'node:fs/promises'
 import { extname } from 'path'
 import { emitSidecar, emitStatus, nextStatusSeq } from '../core/events'
 import { getDataRootInfo, storageModelRoot } from '../core/data-root'
+import { instanceInfo } from '../core/single-instance'
 import { getDataDir, readDataFile, removeDataFile, writeDataFile } from '../core/persistence'
 import { log } from '../core/logger'
 import { decodeAny } from '../audio'
 import { registry, findModelSpec } from '../inference/registry'
 import { llamaEngine } from '../inference/llama-server'
-import { globalSherpaEngine } from '../inference/sherpa-asr'
 import { transcribeFileWithProgress } from '../inference/transcribe-file'
 import { getGpuInfo, getVramStatus } from '../inference/vram'
 import {
@@ -109,6 +109,10 @@ async function dispatchSidecarAction(payload: Record<string, unknown>): Promise<
       // 代理单一来源：配置为空则接管 env（对齐 Rust 版 bootstrap 的 adopt_proxy_env）
       const effective = adoptProxyEnv()
       log.info(`[proxy] 生效代理: ${effective === '' ? '(直连)' : effective}`)
+      // 单实例判定结果也在这里补一条：bootstrap 是渲染进程启动时发的第一条消息，
+      // 此时渲染进程已连上 → 这条日志能落进应用日志文件
+      // （启动早期直接 log.info 会因为渲染进程还没订阅 sidecar 而丢失）
+      log.info(`[single-instance] ${instanceInfo().status}`)
       const token = optStr(payload, 'hf_token')
       if (token !== undefined) setToken(token)
       emitModelsState()
@@ -307,6 +311,17 @@ function isModelInUse(name: string): boolean {
     const engine = registry().activeEngine()
     return engine ? engine.currentModel() === name : false
   }
+  if (spec.kind === 'tts') {
+    // Rust 版是「TTS 引擎一加载就全挡住」（src-tauri/src/lib.rs:58-70），
+    // 这里做得更精确一点：TTS 引擎的模型目录是**按 spec** 组织的
+    // （src/main/tts/registry.ts:121 modelDir(specId)），所以只有**同一个 spec**
+    // 的模型才真的被引擎占用，别的 spec 可以安全删除。
+    const loaded = ttsRegistry().loadedModel()
+    if (!loaded) return false
+    if (loaded === name) return true
+    const loadedSpec = findModelSpec(loaded)
+    return !!loadedSpec && loadedSpec.id === spec.id
+  }
   return false
 }
 
@@ -340,6 +355,8 @@ export const commands: Record<string, CommandHandler> = {
   },
   get_data_dir: () => getDataDir(),
   get_data_root_info: () => getDataRootInfo(),
+  // 单实例判定结果（Electron 版新增；Tauri 版没有这个概念）
+  get_instance_info: () => instanceInfo(),
   rust_storage_model_root: (args) => storageModelRoot(str(args, 'root')),
 
   // ── 显存 / GPU ───────────────────────────────────────────────────────────
@@ -442,7 +459,9 @@ export const commands: Record<string, CommandHandler> = {
     await registry().unloadActive()
     // 双保险：即使 active 判定异常，也把两个引擎都停掉（对齐 Rust 版）
     await llamaEngine.unload()
-    globalSherpaEngine().unload()
+    // 走注册表卸载：注册表里的 activeFramework 缓存会被一起清掉
+    // （直接调 globalSherpaEngine().unload() 会把缓存留在 'onnx'）。
+    await registry().unload('onnx')
     return { ok: true, loaded: false }
   },
 
@@ -496,7 +515,11 @@ export const commands: Record<string, CommandHandler> = {
   }),
 
   rust_unload_sherpa_asr: async () => {
-    globalSherpaEngine().unload()
+    // 走注册表卸载：SherpaAsrAdapter 包的就是全局单例（sherpa-asr.ts:300-301），
+    // 效果一样，但注册表会顺手清掉 activeFramework 缓存 —— 之前这里直接调
+    // globalSherpaEngine().unload() 绕过了注册表，缓存停在 'onnx'，
+    // 上层以为引擎还在跑 → 跳过重载 → 报「sherpa ASR 未加载」。
+    await registry().unload('onnx')
     return { status: 'unloaded' }
   },
 
@@ -508,15 +531,16 @@ export const commands: Record<string, CommandHandler> = {
 
   rust_list_audio_devices: () => listAudioDevices(),
 
-  rust_read_audio: (args) => {
-    // 返回裸字节（前端拿到 ArrayBuffer）——扩展名白名单 + 32MiB 上限
+  rust_read_audio: async (args) => {
+    // 返回裸字节（前端拿到 ArrayBuffer）——扩展名白名单 + 32MiB 上限。
+    // 用异步读：试听几十 MB 的音频时，同步 readFileSync 会让主线程（进而整个 UI）顿一下。
     const path = str(args, 'path')
     const allowed = ['wav', 'mp3', 'flac', 'ogg', 'm4a']
     const ext = extname(path).replace(/^\./, '').toLowerCase()
     if (!allowed.includes(ext)) {
       throw new Error(`不支持的文件类型: ${ext}`)
     }
-    const data = readFileSync(path)
+    const data = await readFile(path)
     if (data.length > 32 * 1024 * 1024) {
       throw new Error('文件过大（上限 32MB）')
     }

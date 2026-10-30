@@ -117,7 +117,7 @@ export function rustTranscribeLlama(
   filePath: string,
   exportDir?: string,
   exportFormat?: string
-): Promise<{ text: string; duration: number; model: string; saved_path?: string }> {
+): Promise<{ text: string; duration: number; model: string; saved_path?: string | null }> {
   return invoke('rust_transcribe_llama', { filePath, exportDir, exportFormat })
 }
 

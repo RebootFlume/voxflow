@@ -94,7 +94,7 @@ export function TranscribePanel() {
           result: result.text,
           doneSec: result.duration,
           totalSec: result.duration,
-          savedPath: result.saved_path,
+          savedPath: result.saved_path ?? undefined,
         });
       } catch (e) {
         store.updateTranscribeTask(task.filePath, { status: "error", error: String(e) });

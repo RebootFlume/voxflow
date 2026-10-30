@@ -18,7 +18,8 @@ export interface TranscribeResult {
   text: string
   duration: number
   model: string
-  saved_path?: string
+  /** 导出文件路径；未导出时为 null（与 Rust 版 `saved_path: null` 一致，不要用缺省省略 key） */
+  saved_path?: string | null
 }
 
 /** 带进度回调的转写 */
@@ -55,7 +56,10 @@ export async function transcribeFileWithProgress(
     text,
     duration: Math.round(duration * 100) / 100,
     model: engine.currentModel(),
-    ...(savedPath ? { saved_path: savedPath } : {})
+    // 未导出时也要带上这个 key（值为 null）——Rust 版是 `saved_path: null`，
+    // 之前这里条件展开把整个 key 省掉了，前端 `=== null` / `=== undefined` 两个分支
+    // 行为不同，对不上源项目。
+    saved_path: savedPath ?? null
   }
 }
 
