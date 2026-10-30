@@ -17,11 +17,8 @@ files:
 asarUnpack:
   - '**/*.node'
 # 运行时资源：随包分发（不在 asar 内）
+# 只带托盘图标。PyTorch worker.py 是源码模板、espeak-ng 已确认未被引用 —— 都不再打进安装包。
 extraResources:
-  - from: resources/espeak-ng
-    to: espeak-ng
-  - from: resources/pytorch
-    to: pytorch
   - from: resources/icon.png
     to: icon.png
 win:
