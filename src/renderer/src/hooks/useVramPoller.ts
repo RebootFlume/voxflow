@@ -17,21 +17,27 @@ function collectFrameworkVram(
 /**
  * 全局显存监控轮询器。
  *
- * 在 App 根挂载一次（不随面板组件生命周期启停），每 10s 轮询一次
+ * 在 App 根挂载一次（不随面板组件生命周期启停），每 15s 轮询一次
  * 显存状态写入 store。任意组件通过 store 读共享数据，避免：
  *   - 每次进入页面重复启动 nvidia-smi 查询（快速切页时的卡顿）
  *   - 多个组件各自轮询造成重复请求
  *   - 转写等高负载时轮询干扰（转写中暂停，避免 IPC 竞争）
  *
- * 说明：Rust 端 get_vram_status 已改为 spawn_blocking 异步执行
- * （powershell/nvidia-smi/目录遍历不占主线程），这里再降低频率 + 转写暂停双保险。
+ * 为什么从 10s 放宽到 15s：主进程的 WMI 查询实测 3.3s（PowerShell + 两次 CIM）。
+ * 即使已异步化，Windows 每次起进程本身仍有主线程开销（杀软更久）⇒ 频率越高越容易
+ * 「时不时点一下卡一下」。15s 与主进程 20s TTL 配合 ⇒ 最多两轮才真查一次；
+ * 窗口隐藏到托盘时直接不轮询（没人看，不必花这个 CPU）。
  */
+const POLL_INTERVAL_MS = 15_000
+
 export function useVramPoller() {
   useEffect(() => {
     let alive = true;
     let timer: number | undefined;
 
     const poll = () => {
+      // 窗口隐藏到托盘 / 最小化：不查（重新可见时会立刻补一次）
+      if (typeof document !== "undefined" && document.hidden) return;
       // 转写/合成进行中暂停轮询（避免与推理竞争，界面更流畅）
       const s = useAppStore.getState();
       const transcribing = s.transcribeTasks?.some((t) => t.status === "transcribing") ?? false;
@@ -51,11 +57,17 @@ export function useVramPoller() {
         .catch(() => {});
     };
 
+    const onVisibilityChange = () => {
+      if (!document.hidden) poll();
+    };
+
     poll();
-    timer = window.setInterval(poll, 10_000);
+    timer = window.setInterval(poll, POLL_INTERVAL_MS);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       alive = false;
       if (timer) window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, []);
 }

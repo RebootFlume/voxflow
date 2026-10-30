@@ -18,6 +18,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, s
 import { join } from 'node:path'
 import { emitSidecar } from '../core/events'
 import { log } from '../core/logger'
+import { extractArchiveAsync } from '../core/extract'
 import { libsDir } from './runtime-paths'
 import {
   freeBytesForDir,
@@ -482,93 +483,12 @@ function placeExtracted(src: string, dest: string): void {
     }
   }
 }
+// ── 归档解压 ──────────────────────────────────────────────────────────────
+//
+// 解压统一走共享的异步实现（core/extract.ts）：Rust 版用同步 Command 解压，
+// 移植到 Electron 后会占住主线程 ⇒ 渲染进程收不到 IPC ⇒ 窗口「未响应」被系统判 AppHang。
+// 这里改成 spawn + Promise，解压期间主线程照常服务 IPC。
 
-/** 尝试用 bsdtar 解压（System32 全路径，避免 GNU tar 把 D: 当远程主机） */
-function extractWithBsdtar(pkgPath: string, dest: string): void {
-  const systemRoot = process.env.SystemRoot ?? 'C:\\Windows'
-  const bsdtar = join(systemRoot, 'System32', 'tar.exe')
-  if (!existsSync(bsdtar)) throw new Error('bsdtar 不存在')
-  const res = spawnSyncCapture(bsdtar, ['-xf', pkgPath, '-C', dest])
-  if (res !== 0) throw new Error(`bsdtar 失败（退出码: ${res}）`)
-}
-
-/** 尝试用 7-Zip 解压 */
-function extractWith7z(pkgPath: string, dest: string): void {
-  const candidates = [
-    'C:\\Program Files\\7-Zip\\7z.exe',
-    'C:\\Program Files (x86)\\7-Zip\\7z.exe',
-    'D:\\app\\7-Zip\\7z.exe'
-  ]
-  for (const exe of candidates) {
-    if (!existsSync(exe)) continue
-    const code = spawnSyncCapture(exe, ['x', pkgPath, '-y', `-o${dest}`])
-    if (code === 0) return
-  }
-  throw new Error('7-Zip 不可用或失败')
-}
-
-/** 同步执行外部命令，返回退出码（不抛异常） */
-function spawnSyncCapture(exe: string, args: string[]): number {
-  const { spawnSync } = require('node:child_process') as typeof import('node:child_process')
-  const res = spawnSync(exe, args, { windowsHide: true, stdio: 'ignore' })
-  return res.status ?? -1
-}
-
-/**
- * 解压压缩包（zip / tar.bz2 / tar.gz 通用）。
- * 关键：tar.bz2/tar.gz 是「压缩层 + tar 层」两层 —— 7z 单次只解掉压缩层、吐出内层 .tar。
- * 因此本函数支持递归：解完后若目标根出现内层 .tar，继续解、删掉内层包，直到没有为止。
- */
-export function extractArchive(pkgPath: string, dest: string): void {
-  const name = pkgPath.toLowerCase()
-  const isTwoLayer = name.endsWith('.tar.bz2') || name.endsWith('.tar.gz') || name.endsWith('.tgz')
-  // 先按类型选优解压器
-  if (isTwoLayer) {
-    try {
-      extractWithBsdtar(pkgPath, dest)
-    } catch {
-      extractWith7z(pkgPath, dest)
-    }
-  } else {
-    try {
-      extractWith7z(pkgPath, dest)
-    } catch {
-      extractWithBsdtar(pkgPath, dest)
-    }
-  }
-
-  // 递归展开：7z 只解出内层 .tar 时，把它也解开并删除（最多 3 层，防恶意包）
-  for (let i = 0; i < 3; i++) {
-    let inner: string | null = null
-    try {
-      for (const e of readdirSync(dest, { withFileTypes: true })) {
-        const f = e.name.toLowerCase()
-        if (f.endsWith('.tar') || f.endsWith('.tar.bz2') || f.endsWith('.tar.gz')) {
-          inner = join(dest, e.name)
-          break
-        }
-      }
-    } catch {
-      break
-    }
-    if (!inner) break
-    const t = inner.toLowerCase()
-    if (t.endsWith('.tar.bz2') || t.endsWith('.tar.gz') || t.endsWith('.tgz')) {
-      try {
-        extractWithBsdtar(inner, dest)
-      } catch {
-        /* 忽略：内层解不开就保留原样 */
-      }
-    } else {
-      try {
-        extractWith7z(inner, dest)
-      } catch {
-        /* 忽略 */
-      }
-    }
-    rmSync(inner, { force: true })
-  }
-}
 
 /**
  * 试启动验证框架（不带模型）。
@@ -582,14 +502,42 @@ export async function smokeTestRuntime(pkg: RuntimePkg): Promise<void> {
   }
 
   if (pkg.smokeProbe.type === 'pythonWorker') {
-    const { spawnSync } = require('node:child_process') as typeof import('node:child_process')
-    const res = spawnSync(exe, pkg.smokeArgs, {
-      cwd: dir,
-      windowsHide: true,
-      encoding: 'utf-8'
-    })
-    const stdout = String(res.stdout ?? '')
-    const stderr = String(res.stderr ?? '')
+    // 异步起进程：Python worker 冷启动 1–3s，用 spawnSync 会把主线程整个占住
+    // （「点验证按钮卡一下」就是这么来的）。
+    const res = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
+      (resolve) => {
+        const child = spawn(exe, pkg.smokeArgs, {
+          cwd: dir,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe']
+        })
+        const out: Buffer[] = []
+        const err: Buffer[] = []
+        child.stdout?.on('data', (c: Buffer) => out.push(c))
+        child.stderr?.on('data', (c: Buffer) => err.push(c))
+        const timer = setTimeout(() => {
+          try {
+            child.kill()
+          } catch {
+            /* 已退出 */
+          }
+        }, 60_000)
+        child.on('error', () => {
+          clearTimeout(timer)
+          resolve({ status: null, stdout: '', stderr: '启动失败' })
+        })
+        child.on('close', (code) => {
+          clearTimeout(timer)
+          resolve({
+            status: code,
+            stdout: Buffer.concat(out).toString('utf-8'),
+            stderr: Buffer.concat(err).toString('utf-8')
+          })
+        })
+      }
+    )
+    const stdout = res.stdout
+    const stderr = res.stderr
     if (res.status === 0 && stdout.includes('"ok": true')) return
     throw new Error(
       `Python worker smoke test 失败：退出=${res.status}，stdout=${stdout.trim()}，stderr=${stderr.trim()}`
@@ -768,7 +716,7 @@ export async function downloadRuntime(framework: string): Promise<void> {
     const downloaded = (mainSize ?? 0) + (auxSize ?? 0)
     const need = downloaded + (pkg.unpackedBytes ?? downloaded)
     if (need > 0) {
-      const free = freeBytesForDir(root)
+      const free = await freeBytesForDir(root)
       if (free !== null && free < need) {
         throw new Error(
           `磁盘空间不足：需要约 ${(need / 1024 ** 3).toFixed(1)}GB，剩余 ${(free / 1024 ** 3).toFixed(1)}GB`
@@ -792,7 +740,7 @@ export async function downloadRuntime(framework: string): Promise<void> {
     mkdirSync(mainX, { recursive: true })
     log.info('[framework] 解压主程序包...')
     try {
-      extractArchive(mainArch, mainX)
+      await extractArchiveAsync(mainArch, mainX)
     } catch (e) {
       throw new Error(`解压主程序失败: ${e instanceof Error ? e.message : String(e)}`)
     }
@@ -803,7 +751,7 @@ export async function downloadRuntime(framework: string): Promise<void> {
       mkdirSync(auxX, { recursive: true })
       log.info('[framework] 解压附加运行库包...')
       try {
-        extractArchive(auxArch, auxX)
+        await extractArchiveAsync(auxArch, auxX)
       } catch (e) {
         throw new Error(`解压附加运行库失败: ${e instanceof Error ? e.message : String(e)}`)
       }

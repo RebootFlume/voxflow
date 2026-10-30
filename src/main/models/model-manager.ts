@@ -18,7 +18,7 @@
  * - 记账：下载完成写 `.voxflow-manifest.json`（条目 id + repo@revision + 文件与大小）
  */
 
-import { spawnSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import {
   closeSync,
   existsSync,
@@ -41,11 +41,13 @@ import { connect as netConnect, type Socket } from 'node:net'
 import { basename, dirname, isAbsolute, join, parse as parsePath } from 'node:path'
 import type { Duplex, Readable } from 'node:stream'
 import { connect as tlsConnect } from 'node:tls'
+import { promisify } from 'node:util'
 
 import { defaultModelRoot, getDataRoot } from '../core/data-root'
+import { extractArchiveAsync } from '../core/extract'
 import { emitSidecar } from '../core/events'
 import { log } from '../core/logger'
-import { estimateVramMb, gpuMemMb, readGgufKvGeometry, setFrameworkGpuSources } from '../inference/vram'
+import { estimateVramMb, gpuMemMb, readGgufKvGeometryCached, setFrameworkGpuSources } from '../inference/vram'
 import {
   SPECS,
   type DownloadEntrySpec,
@@ -416,6 +418,48 @@ export function findMmprojFile(dir: string): string | null {
   return null
 }
 
+/** 文件发现结果缓存项（带目录 mtime 指纹） */
+interface DiscoveryCacheEntry {
+  mtimeMs: number
+  main: string | null
+  mmproj: string | null
+}
+
+const DISCOVERY_CACHE_LIMIT = 64
+const discoveryCache = new Map<string, DiscoveryCacheEntry>()
+
+/**
+ * 带缓存的「主模型文件 / mmproj」发现。
+ *
+ * 为什么缓存：无条目声明时 `findMainModelFile` 要递归列目录并逐个 stat
+ * （本机实测 Kokoro 目录 378 个文件 ≈ 50ms、ZipVoice 363 个 ≈ 45ms）。
+ * `list_models` 会被启动、模型页刷新、下载完成反复触发，每次都付这个钱
+ * ⇒ 点「模型管理」就卡一下。目录 mtime 没变就复用上次结果
+ * （增删文件会更新目录 mtime，缓存自然失效）。
+ */
+function discoveredMainFiles(
+  spec: ModelSpec,
+  dir: string
+): { main: string | null; mmproj: string | null } {
+  const key = `${spec.id}|${dir}`
+  let mtimeMs: number
+  try {
+    mtimeMs = statSync(dir).mtimeMs
+  } catch {
+    return { main: findMainModelFile(dir, spec.framework), mmproj: findMmprojFile(dir) }
+  }
+  const hit = discoveryCache.get(key)
+  if (hit && hit.mtimeMs === mtimeMs) return { main: hit.main, mmproj: hit.mmproj }
+  const entry: DiscoveryCacheEntry = {
+    mtimeMs,
+    main: mainModelFile(spec, dir),
+    mmproj: usesMmproj(spec.framework) ? mmprojFile(spec, dir) : null
+  }
+  if (discoveryCache.size >= DISCOVERY_CACHE_LIMIT) discoveryCache.clear()
+  discoveryCache.set(key, entry)
+  return { main: entry.main, mmproj: entry.mmproj }
+}
+
 /** 检查模型目录是否已下载完成 */
 export function isComplete(dir: string): boolean {
   if (!isDir(dir)) return false
@@ -476,6 +520,52 @@ export function dirSizeBytes(dir: string): number {
   return total
 }
 
+/**
+ * 「磁盘占用」优先用清单里记录的文件字节数（下载时已逐文件记录）。
+ *
+ * 清单存在时无需再递归遍历目录 —— 这一步在 `list_models` 里是同步文件 IO，
+ * 目录里文件多（sherpa/onnx 包动辄上千个小文件）时会让主线程顿一下。
+ * 清单缺失（旧式目录 / 手动拷进来的模型）才回退递归统计。
+ */
+function onDiskBytes(dir: string): number {
+  const m = readManifest(dir)
+  if (m && m.files.length > 0) {
+    return m.files.reduce((sum, [, size]) => sum + (Number.isFinite(size) ? size : 0), 0)
+  }
+  return dirSizeBytes(dir)
+}
+
+/** 目录体积缓存项（带目录 mtime 指纹：新增/删除文件会更新目录 mtime） */
+interface DirSizeCacheEntry {
+  mtimeMs: number
+  bytes: number
+}
+
+const DIR_SIZE_CACHE_LIMIT = 64
+const dirSizeCache = new Map<string, DirSizeCacheEntry>()
+
+/**
+ * 带缓存的「磁盘占用」。
+ *
+ * 为什么缓存：旧式目录（没有 manifest）只能递归遍历；本机实测 Kokoro 目录
+ * 100ms、ZipVoice 90ms，而 `list_models` 会被启动、模型页刷新、下载完成反复触发
+ * —— 每次都同步遍历，点「模型管理」就会明显卡一下。目录 mtime 变了才重算。
+ */
+function onDiskBytesCached(dir: string): number {
+  let mtimeMs: number
+  try {
+    mtimeMs = statSync(dir).mtimeMs
+  } catch {
+    return onDiskBytes(dir)
+  }
+  const hit = dirSizeCache.get(dir)
+  if (hit && hit.mtimeMs === mtimeMs) return hit.bytes
+  const bytes = onDiskBytes(dir)
+  if (dirSizeCache.size >= DIR_SIZE_CACHE_LIMIT) dirSizeCache.clear()
+  dirSizeCache.set(dir, { mtimeMs, bytes })
+  return bytes
+}
+
 /** 取盘符根目录（如 "D:\"） */
 function driveRootOf(path: string): string {
   const root = parsePath(path).root
@@ -488,9 +578,19 @@ function driveRootOf(path: string): string {
  * Rust 用 Win32 `GetDiskFreeSpaceExW`（freeBytesAvailableToCaller）；
  * Node 的 `fs.statfsSync` 在 Windows 上正是同一口径（bavail × bsize），优先用它；
  * 取不到再退回 PowerShell 的 `[System.IO.DriveInfo]`。
+ *
+ * 异步返回：PowerShell 兜底曾用 `spawnSync`，最长把 Electron 主线程占住 15s
+ * （窗口无响应）；现改为异步执行，调用方 await 即可。
  */
-export function freeBytesForDir(path: string): number | null {
+export async function freeBytesForDir(path: string): Promise<number | null> {
   const drive = driveRootOf(path)
+  const fast = freeBytesViaStatfs(drive)
+  if (fast !== null) return fast
+  return freeBytesViaPowerShell(drive)
+}
+
+/** statfs 快路径：与 PowerShell 同口径（bavail × bsize），毫秒级，不阻塞主线程 */
+function freeBytesViaStatfs(drive: string): number | null {
   try {
     const st = statfsSync(drive)
     const free = Number(st.bavail) * Number(st.bsize)
@@ -498,30 +598,101 @@ export function freeBytesForDir(path: string): number | null {
   } catch {
     // 落到 PowerShell 兜底
   }
-  return freeBytesViaPowerShell(drive)
+  return null
 }
 
-/** PowerShell 兜底：可用空间（字节） */
-function freeBytesViaPowerShell(drive: string): number | null {
+/**
+ * 同步快路径：供不能改成 async 的调用方使用（如 `listModelsPayload`——
+ * 它被范围外的 IPC 层同步调用，改 async 会破坏调用契约）。
+ * statfs 命中即返回；否则返回兜底缓存值（可能为 null），兜底值由后台任务刷新。
+ */
+function freeBytesForDirSync(path: string): number | null {
+  const drive = driveRootOf(path)
+  const fast = freeBytesViaStatfs(drive)
+  if (fast !== null) return fast
+  const hit = freeBytesCache.get(drive)
+  if (hit && Date.now() - hit.at < freeBytesTtlMs(hit.value)) return hit.value
+  return null
+}
+
+/** 兜底结果的缓存 TTL：成功 30s，失败 5s（失败后尽快能重试） */
+const FREE_BYTES_TTL_MS = 30_000
+const FREE_BYTES_FAIL_TTL_MS = 5_000
+/** 兜底结果缓存：盘符 → { value, at }（避免连续触发时反复起 PowerShell） */
+const freeBytesCache = new Map<string, { value: number | null; at: number }>()
+
+function freeBytesTtlMs(value: number | null): number {
+  return value === null ? FREE_BYTES_FAIL_TTL_MS : FREE_BYTES_TTL_MS
+}
+
+/** execFile 的 Promise 包装（显式标注类型，不用 any） */
+const execFileAsync = promisify(execFile) as (
+  file: string,
+  args: string[],
+  options: { encoding: 'utf-8'; windowsHide: boolean; timeout: number }
+) => Promise<{ stdout: string; stderr: string }>
+
+/**
+ * PowerShell 兜底：可用空间（字节）。
+ *
+ * 异步执行：`spawnSync` 会把 Electron 主线程占住最长 15s（窗口无响应）；
+ * 结果按 TTL 缓存，连续触发时不重复起进程。
+ */
+async function freeBytesViaPowerShell(drive: string): Promise<number | null> {
+  const hit = freeBytesCache.get(drive)
+  if (hit && Date.now() - hit.at < freeBytesTtlMs(hit.value)) return hit.value
   const script = `$d = [System.IO.DriveInfo]::new('${drive.replace(/'/g, "''")}'); [int64]$d.AvailableFreeSpace`
   try {
-    const res = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    const { stdout } = await execFileAsync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
       encoding: 'utf-8',
       windowsHide: true,
       timeout: 15000
     })
-    if (res.error || res.status !== 0) return null
-    const raw = (res.stdout ?? '').trim()
-    if (!/^\d+$/.test(raw)) return null
-    return Number(raw)
+    const raw = (stdout ?? '').trim()
+    const value = /^\d+$/.test(raw) ? Number(raw) : null
+    freeBytesCache.set(drive, { value, at: Date.now() })
+    return value
   } catch {
+    freeBytesCache.set(drive, { value: null, at: Date.now() })
     return null
   }
 }
 
-/** 模型根所在卷的可用字节 */
-function freeBytesForRoot(): number | null {
+/** 模型根所在卷的可用字节（异步） */
+async function freeBytesForRoot(): Promise<number | null> {
   return freeBytesForDir(getModelRoot())
+}
+
+/** 模型根所在卷的可用字节（同步快路径；供同步调用方使用） */
+function freeBytesForRootSync(): number | null {
+  return freeBytesForDirSync(getModelRoot())
+}
+
+/**
+ * 后台刷新兜底磁盘空间：拿到新值后重发一次模型清单（前端才能看到 disk_free_gb）。
+ * 节流 30s；statfs 快路径命中时值不变，不会产生多余事件。
+ */
+let diskFreeRefreshAt = 0
+let diskFreeRefreshInFlight = false
+let lastDiskFreeGb: number | null = null
+
+async function refreshDiskFreeInBackground(): Promise<void> {
+  const now = Date.now()
+  if (diskFreeRefreshInFlight || now - diskFreeRefreshAt < FREE_BYTES_TTL_MS) return
+  diskFreeRefreshAt = now
+  diskFreeRefreshInFlight = true
+  try {
+    const bytes = await freeBytesForRoot()
+    const gb = bytes === null ? null : Math.round((bytes / 1024 ** 3) * 10) / 10
+    if (gb !== lastDiskFreeGb) {
+      lastDiskFreeGb = gb
+      emitModelsState()
+    }
+  } catch {
+    // 磁盘空间只是展示 / 预检信息，取不到就算了
+  } finally {
+    diskFreeRefreshInFlight = false
+  }
 }
 
 // ── 模型目录清单（manifest）："这个目录装的是哪条 + 装了哪些文件"的唯一真源 ──
@@ -627,7 +798,7 @@ export function entryVramEstimateMb(dir: string, entry: DownloadEntrySpec): numb
     if (f.role === 'mmproj') mmproj += size
     else weights += size
   }
-  const geom = readGgufKvGeometry(mainPath)
+  const geom = readGgufKvGeometryCached(mainPath)
   return estimateVramMb(weights, mmproj, geom, DEFAULT_CTX_SIZE)
 }
 
@@ -780,7 +951,7 @@ function vramPass(reason: string): VramCheck {
  * 需求用与模型页「预计显存」**同一个估算**（权重 + mmproj + KV + 固定开销，见 `vram`），
  * 故此处不再叠加额外余量。任何一环读不到 → fail-open（`ok = true`），由加载失败路径兜底。
  */
-export function checkLoadVram(name: string, device: string): VramCheck {
+export async function checkLoadVram(name: string, device: string): Promise<VramCheck> {
   if (device.trim().toLowerCase() === 'cpu') {
     return vramPass('cpu') // 纯 CPU：不占显存
   }
@@ -797,7 +968,7 @@ export function checkLoadVram(name: string, device: string): VramCheck {
   if (needMb === null) {
     return vramPass('need_unknown') // 文件不全 → 不猜
   }
-  const mem = gpuMemMb()
+  const mem = await gpuMemMb()
   if (!mem) {
     return vramPass('no_vram_info') // 非 NVIDIA / 无权限 → 放行
   }
@@ -1062,23 +1233,24 @@ export function listModelsPayload(kind?: string): ModelsStatePayload {
       supports_clone: spec.voiceMode.type === 'clone' || spec.voiceMode.type === 'presetAndClone'
     }
     if (state === 'downloaded') {
-      const bytes = dirSizeBytes(dir)
+      // 有清单就走清单 / 无清单走缓存版遍历（不每轮递归）
+      const bytes = onDiskBytesCached(dir)
       obj.size_on_disk_gb = Math.round((bytes / 1024 ** 3) * 100) / 100
-      // 附带主模型文件路径，方便前端直接加载
-      const mainFile = mainModelFile(spec, dir)
-      if (mainFile) {
-        obj.model_path = mainFile
-        // GGUF 模型额外附带 mmproj 路径
-        if (usesMmproj(spec.framework)) {
-          const mmproj = mmprojFile(spec, dir)
-          if (mmproj) obj.mmproj_path = mmproj
-        }
+      // 附带主模型文件路径，方便前端直接加载（发现结果带缓存，不每轮扫目录）
+      const found = discoveredMainFiles(spec, dir)
+      if (found.main) {
+        obj.model_path = found.main
+        if (found.mmproj) obj.mmproj_path = found.mmproj
       }
     }
     items.push(obj)
   }
-  const diskFree = freeBytesForRoot()
+  // 磁盘可用空间：同步快路径（statfs，毫秒级）；未命中时用兜底缓存值，
+  // 兜底值由后台异步刷新（PowerShell 已改异步，这里不能 await）
+  const diskFree = freeBytesForRootSync()
   const diskFreeGb = diskFree === null ? null : Math.round((diskFree / 1024 ** 3) * 10) / 10
+  lastDiskFreeGb = diskFreeGb
+  void refreshDiskFreeInBackground()
   return {
     status: 'models_state',
     model_root: root,
@@ -1621,7 +1793,7 @@ const DEFAULT_CTX_SIZE = 2048
  * 现在引擎找引擎目录名（matcha-icefall-zh-baker）。若旧目录已存在且完整，
  * 直接迁移到新目录名并返回"已就绪"，避免用户重新下载。
  */
-export function startDownload(name: string, entryId: string): void {
+export async function startDownload(name: string, entryId: string): Promise<void> {
   const spec = findSpec(name)
   if (!spec) throw new Error(`unknown model: ${name}`)
   if (!spec.available) {
@@ -1656,7 +1828,14 @@ export function startDownload(name: string, entryId: string): void {
       }
     }
   }
-  const free = freeBytesForRoot()
+  // 占位要早于磁盘预检（下面有 await 点），否则并发点击会重复下载
+  const cancel: CancelFlag = { cancelled: false }
+  if (ACTIVE.has(spec.name)) {
+    return // 同模型已在下载（含切条目），忽略重复点击
+  }
+  ACTIVE.set(spec.name, { cancel, entryId })
+  // 磁盘预检（异步：PowerShell 兜底不能占 Electron 主线程）
+  const free = await freeBytesForRoot()
   if (free !== null) {
     // 峰值 = 下载归档 + 解压产物（解压期间两者并存）≈ 2× 体积；
     // 有条目时按**并集**体积（一次下全，切换不再下）
@@ -1666,16 +1845,13 @@ export function startDownload(name: string, entryId: string): void {
         : entryUnion(spec).reduce((sum, f) => sum + f.sizeMb, 0) / 1024) * 2
     const need = Math.floor(needGb * 1024 ** 3)
     if (free < need) {
+      // 预检没过：撤销占位，别把模型卡在「下载中」
+      ACTIVE.delete(spec.name)
       throw new Error(
         `disk full: need ~${needGb.toFixed(1)}GB, free ${(free / 1024 ** 3).toFixed(1)}GB`
       )
     }
   }
-  const cancel: CancelFlag = { cancelled: false }
-  if (ACTIVE.has(spec.name)) {
-    return // 同模型已在下载（含切条目），忽略重复点击
-  }
-  ACTIVE.set(spec.name, { cancel, entryId })
   // 后台执行（Rust 是 spawn 一个线程）
   void runDownload(spec, entryId, cancel)
 }
@@ -1951,7 +2127,7 @@ async function downloadGithubRelease(
   // 解压阶段：发"解压中"事件（进度无百分比，防 UI 停在 100% 像卡死）
   emitSidecar({ status: 'model_download_extracting', model: modelName })
   try {
-    extractArchive(arch, dest)
+    await extractArchiveAsync(arch, dest)
   } catch (e) {
     // 保留归档：重跑只重试解压，不重新下载
     throw e as Error
@@ -2028,121 +2204,9 @@ function flattenTarballSubdir(dest: string): void {
   }
 }
 
-// ── 归档解压（对齐 Rust `inference::runtime_download::extract_archive`）──
+// ── 归档解压 ──────────────────────────────────────────────────────────────
+//
+// 解压统一走共享的异步实现（core/extract.ts）：Rust 版用同步 Command 解压，
+// 移植到 Electron 后会占住主线程 ⇒ 渲染进程收不到 IPC ⇒ 窗口「未响应」被系统判 AppHang。
+// 这里改成 spawn + Promise，解压期间主线程照常服务 IPC。
 
-/** 7-Zip 候选路径（与 Rust 一致） */
-const SEVEN_ZIP_CANDIDATES = [
-  'C:\\Program Files\\7-Zip\\7z.exe',
-  'C:\\Program Files (x86)\\7-Zip\\7z.exe',
-  'D:\\app\\7-Zip\\7z.exe'
-]
-
-/** 尝试用 bsdtar 解压（Windows 用 System32 全路径，避免 GNU tar 把 D: 当远程主机；
- * bsdtar 一次处理 tar.bz2 的压缩层+tar 层） */
-function extractWithBsdtar(pkgPath: string, dest: string): void {
-  const bsdtar =
-    process.platform === 'win32'
-      ? join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'tar.exe')
-      : 'tar'
-  if (process.platform === 'win32' && !existsSync(bsdtar)) {
-    throw new Error('bsdtar 不存在')
-  }
-  const res = spawnSync(bsdtar, ['-xf', pkgPath, '-C', dest], {
-    windowsHide: true,
-    stdio: 'ignore'
-  })
-  if (res.error) throw new Error(`bsdtar start failed: ${res.error.message}`)
-  if (res.status !== 0) throw new Error(`bsdtar 失败（退出码: ${res.status ?? -1}）`)
-}
-
-/** 尝试用 7-Zip 解压（一次） */
-function extractWith7z(pkgPath: string, dest: string): void {
-  for (const exe of SEVEN_ZIP_CANDIDATES) {
-    if (!existsSync(exe)) continue
-    const res = spawnSync(exe, ['x', pkgPath, '-y', `-o${dest}`], {
-      windowsHide: true,
-      stdio: 'ignore'
-    })
-    if (!res.error && res.status === 0) return
-  }
-  throw new Error('7-Zip 不可用或失败')
-}
-
-/** 先试 a 再试 b；都不行 → 返回第一个错误 */
-function tryExtract(
-  a: () => void,
-  b: () => void
-): Error | null {
-  try {
-    a()
-    return null
-  } catch (e) {
-    const first = e as Error
-    try {
-      b()
-      return null
-    } catch (e2) {
-      return first
-    }
-  }
-}
-
-/**
- * 解压压缩包（zip / tar.bz2 / tar.gz 通用）。
- * 关键：tar.bz2/tar.gz 是「压缩层 + tar 层」两层 —— 7z 单次只解掉压缩层、吐出内层 .tar。
- * 因此本函数支持递归：解完后若目标根出现内层 .tar，继续解、删掉内层包，直到没有为止。
- */
-export function extractArchive(pkgPath: string, dest: string): void {
-  const name = basename(pkgPath).toLowerCase()
-  const isTwoLayer = name.endsWith('.tar.bz2') || name.endsWith('.tar.gz') || name.endsWith('.tgz')
-  // 先按类型选优解压器
-  const first = isTwoLayer
-    ? tryExtract(
-        () => extractWithBsdtar(pkgPath, dest),
-        () => extractWith7z(pkgPath, dest)
-      )
-    : tryExtract(
-        () => extractWith7z(pkgPath, dest),
-        () => extractWithBsdtar(pkgPath, dest)
-      )
-  if (first) throw new Error(`解压失败: ${first.message}`)
-
-  // 递归展开：7z 只解出内层 .tar 时，把它也解开并删除（最多 3 层，防恶意包）
-  for (let i = 0; i < 3; i++) {
-    let inner: string | null = null
-    let names: string[]
-    try {
-      names = readdirSync(dest)
-    } catch {
-      break
-    }
-    for (const f of names) {
-      const lower = f.toLowerCase()
-      const isTar = lower.endsWith('.tar') || lower.endsWith('.tar.bz2') || lower.endsWith('.tar.gz')
-      const path = join(dest, f)
-      if (isTar && path !== pkgPath) {
-        inner = path
-        break
-      }
-    }
-    if (!inner) break
-    // 内层若是 .tar.bz2/.tar.gz（理论上不会，保险起见）先解压缩层
-    const t = basename(inner).toLowerCase()
-    if (t.endsWith('.tar.bz2') || t.endsWith('.tar.gz') || t.endsWith('.tgz')) {
-      tryExtract(
-        () => extractWithBsdtar(inner as string, dest),
-        () => extractWith7z(inner as string, dest)
-      )
-    } else {
-      tryExtract(
-        () => extractWith7z(inner as string, dest),
-        () => extractWithBsdtar(inner as string, dest)
-      )
-    }
-    try {
-      unlinkSync(inner)
-    } catch {
-      // 删不掉就留着
-    }
-  }
-}

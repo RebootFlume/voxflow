@@ -14,7 +14,8 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
-import { closeSync, existsSync, openSync, readSync, statSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
+import { readGgufKvGeometryCached } from './vram'
 import { basename, join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { SPECS, type ModelSpec } from '../models/spec-data'
@@ -274,153 +275,15 @@ export function estimateVramMb(
   return Math.ceil((weightsBytes + mmprojBytes + kv) / (1024 * 1024)) + GPU_FIXED_OVERHEAD_MB
 }
 
-/** GGUF 元数据读取器（只读 KV 块，不碰张量数据） */
-class GgufReader {
-  private readonly fd: number
-  private filePos = 0
-
-  constructor(fd: number) {
-    this.fd = fd
-  }
-
-  /** 精确读 n 字节 */
-  readExact(n: number): Buffer | null {
-    const out = Buffer.alloc(n)
-    let read = 0
-    while (read < n) {
-      const r = readSync(this.fd, out, read, n - read, this.filePos + read)
-      if (r <= 0) return null
-      read += r
-    }
-    this.filePos += n
-    return out
-  }
-
-  readU32(): number | null {
-    const b = this.readExact(4)
-    return b ? b.readUInt32LE(0) : null
-  }
-
-  readU64(): bigint | null {
-    const b = this.readExact(8)
-    return b ? b.readBigUInt64LE(0) : null
-  }
-
-  readStr(): string | null {
-    const len = this.readU64()
-    if (len === null) return null
-    if (len > BigInt(1 << 20)) return null
-    const b = this.readExact(Number(len))
-    if (!b) return null
-    return b.toString('utf8')
-  }
-
-  /**
-   * 读一个元数据值；数值型返回 value，其余类型（字符串/数组等）消费字节后返回 null。
-   * 返回 null 表示读取失败（整个文件放弃解析）。
-   */
-  readNum(ty: number): { value: number | null } | null {
-    if (ty === 8) {
-      // string：消费字节后返回"无数值"
-      if (this.readStr() === null) return null
-      return { value: null }
-    }
-    if (ty === 9 || ty === 12) {
-      // array / f64 array：逐元素消费
-      const elemTy = this.readU32()
-      if (elemTy === null) return null
-      const len = this.readU64()
-      if (len === null || len > BigInt(1 << 20)) return null
-      for (let i = 0; i < Number(len); i++) {
-        if (this.readNum(elemTy) === null) return null
-      }
-      return { value: null }
-    }
-    const size = GGUF_INT_SIZES[ty]
-    if (size === undefined) return null
-    const b = this.readExact(size)
-    if (!b) return null
-    // 与 Rust 一致：按小端零填充读成 u64（负数不做符号扩展）
-    const padded = Buffer.alloc(8)
-    b.copy(padded, 0)
-    return { value: Number(padded.readBigUInt64LE(0)) }
-  }
-}
-
-/** GGUF 整数类型字节宽度（0=u8 1=i8 2=u16 3=i16 4=u32 5=i32 6=f32 7=bool 10=u64 11=i64） */
-const GGUF_INT_SIZES: Record<number, number> = {
-  0: 1,
-  1: 1,
-  2: 2,
-  3: 2,
-  4: 4,
-  5: 4,
-  6: 4,
-  7: 1,
-  10: 8,
-  11: 8
-}
-
 /**
- * 读取 GGUF 的 KV 几何；文件不存在 / 非 GGUF / 缺关键字段 → null（调用方退化为下界估算）。
+ * 读取 GGUF 的 KV 几何（供加载时算显存预估）。
  *
- * 架构前缀因模型而异（`qwen3vl.` / `qwen3.` / `llama.` …），故按键名**后缀**匹配。
+ * 实现统一在 `inference/vram.ts`（成块读 + 跳过 tokenizer 大数组 + 结果缓存）：
+ * 旧版这里有一份逐字段 `readSync` 的副本，实测读一次 7.2 秒且同步跑在主线程上，
+ * 「点加载模型按钮窗口卡死」就是这么来的。这里只做转发，避免两份实现再次分叉。
  */
 export function readGgufKvGeometry(path: string): GgufKvGeometry | null {
-  let fd: number
-  try {
-    fd = openSync(path, 'r')
-  } catch {
-    return null
-  }
-  try {
-    const r = new GgufReader(fd)
-    const magic = r.readExact(4)
-    if (!magic || magic.toString('ascii') !== 'GGUF') return null
-    if (r.readU32() === null) return null // version
-    if (r.readU64() === null) return null // n_tensors
-    const nKv = r.readU64()
-    if (nKv === null) return null
-
-    let layers: number | null = null
-    let kvHeads: number | null = null
-    let keyLen: number | null = null
-    let valLen: number | null = null
-    let emb: number | null = null
-    let heads: number | null = null
-
-    // 元数据块远小于此上限；防御性截断，避免坏文件把循环拖死
-    const count = Math.min(Number(nKv), 8192)
-    for (let i = 0; i < count; i++) {
-      const key = r.readStr()
-      if (key === null) return null
-      const ty = r.readU32()
-      if (ty === null) return null
-      const num = r.readNum(ty)
-      if (num === null) return null
-      const v = num.value
-      if (v === null) continue
-      if (key.endsWith('.block_count')) layers = v
-      else if (key.endsWith('.attention.head_count_kv')) kvHeads = v
-      else if (key.endsWith('.attention.key_length')) keyLen = v
-      else if (key.endsWith('.attention.value_length')) valLen = v
-      else if (key.endsWith('.embedding_length')) emb = v
-      else if (key.endsWith('.attention.head_count')) heads = v
-    }
-
-    if (layers === null) return null
-    // KV 头数缺失时退化为注意力头数（MHA 模型）
-    const kvh = kvHeads ?? heads
-    if (kvh === null || kvh <= 0) return null
-    let headDim = keyLen ?? valLen
-    if (headDim === null && emb !== null && heads !== null && heads > 0) {
-      headDim = Math.floor(emb / heads)
-    }
-    if (headDim === null || headDim <= 0) return null
-    return { layers, kvHeads: kvh, headDim }
-  } finally {
-    closeSync(fd)
-  }
+  return readGgufKvGeometryCached(path)
 }
 
 /**

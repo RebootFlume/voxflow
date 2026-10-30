@@ -17,8 +17,8 @@
  * - 真值（驱动口径）由本模块的「按进程查询」（WMI 计数器）给出；本模块负责**可预测的预估值**。
  */
 
-import { spawnSync } from 'node:child_process'
-import { closeSync, openSync, readSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { closeSync, openSync, readSync, statSync } from 'node:fs'
 
 /**
  * 进程级固定开销（CUDA 上下文 + cuBLAS 工作区 + 计算缓冲），MiB。
@@ -65,21 +65,106 @@ export function estimateVramMb(
 // 预估（上面）用于「需要多少」；本段用于「还剩多少」。两者都只做**读**，
 // 判定与放行策略在调用方（见 `model_manager::checkLoadVram`）。
 
-/** 跑一条外部命令（隐藏控制台窗口；失败一律返回 ok=false，不抛） */
-function runCommand(cmd: string, args: string[]): { ok: boolean; stdout: string } {
-  try {
-    const res = spawnSync(cmd, args, {
-      encoding: 'utf-8',
-      windowsHide: true,
-      timeout: 15000,
-      maxBuffer: 8 * 1024 * 1024
+/**
+ * 跑一条外部命令（隐藏控制台窗口；失败一律返回 ok=false，不抛）。
+ *
+ * ## 必须是异步的
+ * Rust 版用同步 `Command::output()`，这里如果照抄成 `spawnSync`：
+ *   - `nvidia-smi` 约 0.1s —— 尚可
+ *   - **PowerShell + WMI 查询约 3.3s**（实测）—— 主线程被占住 3.3s，
+ *     期间渲染进程收不到任何 IPC ⇒ 点击标签/按钮明显卡一下、
+ *     窗口被 Windows 判为「未响应」（AppHang）。
+ * 所以全部改成 `spawn` + Promise，主线程只等 IO 不等进程。
+ */
+function runCommand(cmd: string, args: string[]): Promise<{ ok: boolean; stdout: string }> {
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (ok: boolean, stdout: string): void => {
+      if (settled) return
+      settled = true
+      resolve({ ok, stdout })
+    }
+    let child: ReturnType<typeof spawn>
+    try {
+      child = spawn(cmd, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
+    } catch {
+      finish(false, '')
+      return
+    }
+    const chunks: Buffer[] = []
+    let size = 0
+    child.stdout?.on('data', (c: Buffer) => {
+      size += c.length
+      // 8MB 上限（与原同步实现的 maxBuffer 一致）
+      if (size > 8 * 1024 * 1024) {
+        try {
+          child.kill()
+        } catch {
+          /* 已退出 */
+        }
+        finish(false, '')
+        return
+      }
+      chunks.push(c)
     })
-    if (res.error) return { ok: false, stdout: '' }
-    return { ok: res.status === 0, stdout: res.stdout ?? '' }
-  } catch {
-    return { ok: false, stdout: '' }
+    child.on('error', () => finish(false, ''))
+    child.on('close', (code) => finish(code === 0, Buffer.concat(chunks).toString('utf-8')))
+    // 15 秒超时（与原同步实现的 timeout 一致）
+    setTimeout(() => {
+      try {
+        child.kill()
+      } catch {
+        /* 已退出 */
+      }
+      finish(false, '')
+    }, 15_000)
+  })
+}
+
+/**
+ * 带 TTL 缓存 + 单飞（single-flight）的异步结果。
+ *
+ * - **TTL**：结果在有效期内直接复用，不再起外部命令。
+ * - **单飞**：并发调用共享同一个 in-flight Promise，只跑一次外部命令。
+ */
+function cachedAsync<T>(
+  fn: () => Promise<T>,
+  ttlMs: number
+): () => Promise<T> {
+  let cached: { value: T; at: number } | null = null
+  let inflight: Promise<T> | null = null
+  return async (): Promise<T> => {
+    const now = Date.now()
+    if (cached && now - cached.at < ttlMs) return cached.value
+    if (inflight) return inflight
+    inflight = (async () => {
+      try {
+        const value = await fn()
+        cached = { value, at: Date.now() }
+        return value
+      } finally {
+        inflight = null
+      }
+    })()
+    return inflight
   }
 }
+
+/**
+ * 外部命令本身也有主线程开销 —— 不只是「阻塞」问题。
+ *
+ * Windows 上每次 `child_process.spawn` 都要在主线程里同步走一次 CreateProcess：
+ * 几毫秒起步，装了杀软/EDR 的机器能到几十毫秒。所以即便已经改成异步，
+ * **每 10 秒打一轮 nvidia-smi + PowerShell 仍会周期性地让点击卡一下**
+ * （异步只保证不长时间占住，不保证没有成本）。
+ * 因此每个查询都挂 TTL + 单飞：同一时刻最多一条命令在跑，结果还能被后续轮询复用。
+ */
+
+/** GPU 静态信息（型号 / 总显存）：进程生命周期内不变 → 60s 缓存 */
+const gpuInfoCached = cachedAsync(() => detectGpu(), 60_000)
+
+/** 已用显存：会变，但不必每次轮询都问驱动 → 20s 缓存（> 前端 15s 轮询 ⇒ 通常隔轮才真查一次） */
+const smiUsedCached = cachedAsync(() => smiUsedMb(), 20_000)
 
 /**
  * 解析 `nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits` 的首行数字（MiB）。
@@ -95,8 +180,8 @@ export function parseSmiUsedMb(stdout: string): number | null {
 }
 
 /** nvidia-smi 查询「已用显存」MiB。读不到（非 NVIDIA / 无驱动 / 无权限）→ null。 */
-export function smiUsedMb(): number | null {
-  const out = runCommand('nvidia-smi', [
+export async function smiUsedMb(): Promise<number | null> {
+  const out = await runCommand('nvidia-smi', [
     '--query-gpu=memory.used',
     '--format=csv,noheader,nounits'
   ])
@@ -115,8 +200,8 @@ export interface GpuInfo {
 /**
  * Rust 直接检测 GPU：调 nvidia-smi（<100ms，零依赖）
  */
-export function detectGpu(): GpuInfo {
-  const out = runCommand('nvidia-smi', [
+export async function detectGpu(): Promise<GpuInfo> {
+  const out = await runCommand('nvidia-smi', [
     '--query-gpu=name,memory.total',
     '--format=csv,noheader,nounits'
   ])
@@ -134,9 +219,9 @@ export function detectGpu(): GpuInfo {
   return { available: true, gpuName: name, memoryMB: mem, source: 'nvidia-smi' }
 }
 
-/** 前端同步查询 GPU 信息（对应 Rust Tauri 命令 `get_gpu_info`） */
-export function getGpuInfo(): GpuInfo {
-  return detectGpu()
+/** 前端查询 GPU 信息（对应 Rust Tauri 命令 `get_gpu_info`）：走 60s 缓存 + 单飞 */
+export async function getGpuInfo(): Promise<GpuInfo> {
+  return gpuInfoCached()
 }
 
 /**
@@ -144,16 +229,16 @@ export function getGpuInfo(): GpuInfo {
  *
  * 调用方拿到 null 必须 **fail-open**（显存预检只是提醒，绝不误拦加载）。
  */
-export function gpuMemMb(): [number, number] | null {
-  const total = detectGpu().memoryMB
-  const used = smiUsedMb()
+export async function gpuMemMb(): Promise<[number, number] | null> {
+  const total = (await gpuInfoCached()).memoryMB
+  const used = await smiUsedCached()
   if (used === null) return null
   return total > 0 ? [total, used] : null
 }
 
 /** 可用显存 MiB（总 − 已用）。无法判定 → null。 */
-export function gpuFreeMb(): number | null {
-  const mem = gpuMemMb()
+export async function gpuFreeMb(): Promise<number | null> {
+  const mem = await gpuMemMb()
   if (!mem) return null
   const [total, used] = mem
   return Math.max(0, total - used)
@@ -164,24 +249,73 @@ export function gpuFreeMb(): number | null {
 /** 严格 UTF-8 解码（Rust 的 `String::from_utf8` 对非法序列直接失败） */
 const utf8Strict = new TextDecoder('utf-8', { fatal: true })
 
-/** GGUF 元数据读取器（按文件偏移顺序读） */
+/**
+ * GGUF 元数据读取的块大小：一次 pread 取一块，解析只在内存里移动游标。
+ *
+ * 为什么必须成块读：旧实现每个字段一次 `readSync`。Qwen3-ASR 的 GGUF 元数据里
+ * 有十几万个 tokenizer 词条（字符串数组），逐字段读 = 上百万次 syscall。
+ * 本机实测（0.6B Q8）：读一次 KV 几何 **7.2 秒**，而且这段是同步跑在 Electron
+ * 主线程上的 ⇒ 点一下模型页/启动时整个窗口卡死（AppHang 的真凶之一，不是感觉）。
+ */
+const GGUF_READ_CHUNK = 256 * 1024
+
+/** GGUF 标量类型字节宽度（0=u8 1=i8 2=u16 3=i16 4=u32 5=i32 6=f32 7=bool 10=u64 11=i64 12=f64） */
+const GGUF_SCALAR_SIZES: Record<number, number> = {
+  0: 1,
+  1: 1,
+  2: 2,
+  3: 2,
+  4: 4,
+  5: 4,
+  6: 4,
+  7: 1,
+  10: 8,
+  11: 8,
+  12: 8
+}
+
+/** GGUF 元数据读取器（成块缓冲 + 可整块跳过值，不在大数组上逐元素解码） */
 class GgufReader {
   private pos = 0
+  private buf: Buffer = Buffer.alloc(0)
+  private bufStart = 0
 
   constructor(private readonly fd: number) {}
+
+  /** 取当前游标位置起 n 字节的视图（必要时从文件补一块） */
+  private view(n: number): Buffer | null {
+    const rel = this.pos - this.bufStart
+    if (rel < 0 || rel + n > this.buf.length) {
+      const chunk = Math.max(n, GGUF_READ_CHUNK)
+      const b = Buffer.allocUnsafe(chunk)
+      let got = 0
+      try {
+        got = readSync(this.fd, b, 0, chunk, this.pos)
+      } catch {
+        return null
+      }
+      if (got < n) return null
+      this.buf = b.subarray(0, got)
+      this.bufStart = this.pos
+      return this.buf.subarray(0, n)
+    }
+    return this.buf.subarray(rel, rel + n)
+  }
 
   /** 读 n 字节；不足 → null（对应 Rust `read_exact` 的 Err） */
   readBytes(n: number): Buffer | null {
     if (n === 0) return Buffer.alloc(0)
-    const buf = Buffer.alloc(n)
-    let got = 0
-    while (got < n) {
-      const r = readSync(this.fd, buf, got, n - got, this.pos + got)
-      if (r <= 0) return null
-      got += r
-    }
+    const v = this.view(n)
+    if (!v) return null
     this.pos += n
-    return buf
+    return v
+  }
+
+  /** 跳过 n 字节（只挪游标，不读内容） */
+  private skipBytes(n: number): boolean {
+    if (!Number.isFinite(n) || n < 0) return false
+    this.pos += n
+    return true
   }
 
   readU32(): number | null {
@@ -189,11 +323,11 @@ class GgufReader {
     return b ? b.readUInt32LE(0) : null
   }
 
+  /** 读 u64 并收敛到安全整数范围（越界 → null） */
   readU64(): number | null {
     const b = this.readBytes(8)
     if (!b) return null
     const v = b.readBigUInt64LE(0)
-    // 超出安全整数范围的值在本模块无意义（层数/头数/长度都是小整数）
     return v <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(v) : null
   }
 
@@ -209,43 +343,64 @@ class GgufReader {
     }
   }
 
-  /**
-   * 读一个元数据值；数值型返回 `value`，其余类型（字符串/数组等）消费字节后返回 null。
-   * `ok=false` 表示读取失败（Rust 的 `Option` 为 None → 整个解析失败）。
-   */
-  readNum(ty: number): { ok: boolean; value: number | null } {
-    if (ty === 0 || ty === 1 || ty === 2 || ty === 3 || ty === 4 || ty === 5 || ty === 6 || ty === 7 || ty === 10 || ty === 11) {
-      // u8/i8/u16/i16/u32/i32/f32/bool/i64/f64 —— 取整数位
-      const n = ty === 0 || ty === 1 || ty === 7 ? 1 : ty === 2 || ty === 3 ? 2 : ty === 4 || ty === 5 || ty === 6 ? 4 : 8
-      const raw = this.readBytes(n)
-      if (!raw) return { ok: false, value: null }
-      // Rust：读进 8 字节零填充缓冲再按小端解释（高位补 0）
-      const padded = Buffer.alloc(8)
-      raw.copy(padded, 0)
-      const v = padded.readBigUInt64LE(0)
-      return { ok: true, value: v <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(v) : null }
-    }
-    if (ty === 8) {
-      // string
-      const s = this.readStr()
-      if (s === null) return { ok: false, value: null }
-      return { ok: true, value: null }
-    }
-    if (ty === 9 || ty === 12) {
-      // array
-      const elemTy = this.readU32()
-      if (elemTy === null) return { ok: false, value: null }
-      const len = this.readU64()
-      if (len === null || len > 1 << 20) return { ok: false, value: null }
-      for (let i = 0; i < len; i++) {
-        const sub = this.readNum(elemTy)
-        if (!sub.ok) return { ok: false, value: null }
-      }
-      return { ok: true, value: null }
-    }
-    // 未知类型 → 解析失败
-    return { ok: false, value: null }
+  /** 读标量数值（零填充到 8 字节后按小端解释，与 Rust 口径一致） */
+  readScalar(size: number): number | null {
+    const raw = this.readBytes(size)
+    if (!raw) return null
+    const padded = Buffer.alloc(8)
+    raw.copy(padded, 0)
+    const v = padded.readBigUInt64LE(0)
+    return v <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(v) : null
   }
+
+  /**
+   * 跳过一个元数据值（字符串 / 数组 / 标量），**不解码内容**。
+   *
+   * 性能关键：tokenizer 词表/合并表是十几万个字符串的数组，逐元素 decode 既慢又没必要
+   * —— 我们要的几何信息全是标量。
+   */
+  skipValue(ty: number): boolean {
+    // string
+    if (ty === 8) {
+      const len = this.readU64()
+      return len !== null && this.skipBytes(len)
+    }
+    // array / array of f64
+    if (ty === 9 || ty === 12) {
+      const elemTy = this.readU32()
+      if (elemTy === null) return false
+      const len = this.readU64()
+      if (len === null) return false
+      const es = GGUF_SCALAR_SIZES[elemTy]
+      if (es !== undefined) return this.skipBytes(len * es)
+      // 数组套字符串 / 数组套数组：逐元素推进长度即可（仍在内存里，不做 decode）
+      if (elemTy === 8) {
+        for (let i = 0; i < len; i++) {
+          const l = this.readU64()
+          if (l === null || !this.skipBytes(l)) return false
+        }
+        return true
+      }
+      if (elemTy === 9 || elemTy === 12) {
+        for (let i = 0; i < len; i++) if (!this.skipValue(elemTy)) return false
+        return true
+      }
+      return false
+    }
+    const size = GGUF_SCALAR_SIZES[ty]
+    return size !== undefined && this.skipBytes(size)
+  }
+}
+
+/** 几何信息关心的键分类（后缀匹配；架构前缀因模型而异） */
+function geometryKeyOf(key: string): 'layers' | 'kvHeads' | 'keyLen' | 'valLen' | 'emb' | 'heads' | null {
+  if (key.endsWith('.block_count')) return 'layers'
+  if (key.endsWith('.attention.head_count_kv')) return 'kvHeads'
+  if (key.endsWith('.attention.key_length')) return 'keyLen'
+  if (key.endsWith('.attention.value_length')) return 'valLen'
+  if (key.endsWith('.embedding_length')) return 'emb'
+  if (key.endsWith('.attention.head_count')) return 'heads'
+  return null
 }
 
 /**
@@ -285,23 +440,24 @@ export function readGgufKvGeometry(filePath: string): GgufKvGeometry | null {
       if (key === null) return null
       const ty = r.readU32()
       if (ty === null) return null
-      const num = r.readNum(ty)
-      if (!num.ok) return null
-      const v = num.value
-      if (v === null) continue
-      if (key.endsWith('.block_count')) {
-        layers = v
-      } else if (key.endsWith('.attention.head_count_kv')) {
-        kvHeads = v
-      } else if (key.endsWith('.attention.key_length')) {
-        keyLen = v
-      } else if (key.endsWith('.attention.value_length')) {
-        valLen = v
-      } else if (key.endsWith('.embedding_length')) {
-        emb = v
-      } else if (key.endsWith('.attention.head_count')) {
-        heads = v
+      const which = geometryKeyOf(key)
+      const scalarSize = GGUF_SCALAR_SIZES[ty]
+      if (which === null || scalarSize === undefined) {
+        // 不关心的键（tokenizer 大数组等）→ 整块跳过，不逐元素解码
+        if (!r.skipValue(ty)) return null
+        continue
       }
+      const v = r.readScalar(scalarSize)
+      if (v === null) return null
+      if (which === 'layers') layers = v
+      else if (which === 'kvHeads') kvHeads = v
+      else if (which === 'keyLen') keyLen = v
+      else if (which === 'valLen') valLen = v
+      else if (which === 'emb') emb = v
+      else heads = v
+      // 注意：这里**不做早停**。Qwen3-ASR 这类"文本解码器 + 音频编码器"的模型里，
+      // 两层架构的 key_length 不一样（实测 0.6B：先出现 64，文本层 128）；
+      // 早停会读到音频编码器的值，KV 显存就算错。旧口径是"后出现的覆盖前面的"，保持一致。
     }
 
     if (layers === null) return null
@@ -317,6 +473,45 @@ export function readGgufKvGeometry(filePath: string): GgufKvGeometry | null {
   } finally {
     closeSync(fd)
   }
+}
+
+/** 几何解析结果缓存项（带文件指纹，文件被替换后自动失效） */
+interface GeometryCacheEntry {
+  size: number
+  mtimeMs: number
+  geom: GgufKvGeometry | null
+}
+
+/** 缓存上限（模型数量有限，超了整体清空，简单且不会泄漏） */
+const GEOMETRY_CACHE_LIMIT = 32
+
+const geometryCache = new Map<string, GeometryCacheEntry>()
+
+/**
+ * 读取（并缓存）GGUF 的 KV 几何。
+ *
+ * 为什么需要缓存：`list_models` 会给**每个已安装条目**算显存预估，
+ * 模型页刷新 / 启动 / 下载完成都会触发；同一份 GGUF 会被反复解析。
+ * 单次解析即使优化后仍有几十毫秒，缓存后只有首次付代价。
+ *
+ * 指纹取 (size, mtime)：重新下载/替换模型文件后缓存自然失效，不会读到旧几何。
+ */
+export function readGgufKvGeometryCached(filePath: string): GgufKvGeometry | null {
+  let size: number
+  let mtimeMs: number
+  try {
+    const st = statSync(filePath)
+    size = st.size
+    mtimeMs = st.mtimeMs
+  } catch {
+    return null
+  }
+  const hit = geometryCache.get(filePath)
+  if (hit && hit.size === size && hit.mtimeMs === mtimeMs) return hit.geom
+  const geom = readGgufKvGeometry(filePath)
+  if (geometryCache.size >= GEOMETRY_CACHE_LIMIT) geometryCache.clear()
+  geometryCache.set(filePath, { size, mtimeMs, geom })
+  return geom
 }
 
 // ─── 各框架显存占用（按 PID 过滤）──────────────────────────────────────────
@@ -347,12 +542,19 @@ export function setFrameworkGpuSources(sources: readonly FrameworkGpuSource[]): 
   frameworkSources = sources
 }
 
-/** 推理引擎注册表提供的运行时钩子（Electron 版推理注册表尚未移植 → 可为空） */
+/** 推理引擎注册表提供的运行时钩子（由主进程入口注入；不注入则退化为只按 WMI/进程名判定） */
 export interface VramRuntimeHooks {
   /** 某框架当前子进程 PID（精确来源） */
   enginePid?: (frameworkId: string) => number | null
   /** 某框架 active 时的估算显存（MiB；引擎已卸载自动排除） */
   activeEngineVramMb?: (frameworkId: string) => number | null
+  /**
+   * 当前是否**有任意引擎常驻**（ASR/TTS 任一已加载）。
+   *
+   * 显存面板的 per-framework 明细只对「正在跑的引擎」有意义；空闲时查 WMI 纯浪费
+   * （一次 3.3s 的 PowerShell）。没有这个信号时退回旧行为（照查），保证不误丢数据。
+   */
+  anyActive?: () => boolean
 }
 
 let runtimeHooks: VramRuntimeHooks | null = null
@@ -371,7 +573,7 @@ export function setVramRuntimeHooks(hooks: VramRuntimeHooks | null): void {
  * WMI 计数器给的是驱动口径的 DedicatedUsage，无需管理员（本机实测与进程一一对应）。
  * 非 Windows 返回空表 → 调用方回退 nvidia-smi。
  */
-export function wmiGpuProcessRows(): Array<[number, string, number]> {
+export async function wmiGpuProcessRows(): Promise<Array<[number, string, number]>> {
   if (process.platform !== 'win32') return []
   // 一次 PowerShell 拿全部（逐行查 Win32_Process 太慢）；>50MB 才回传，行数很少
   const script = `
@@ -384,9 +586,24 @@ Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory 
     if ($procs.ContainsKey($p)) { '{0},{1},{2}' -f $p, $procs[$p], [int]($_.DedicatedUsage / 1MB) }
   }
 `
-  const out = runCommand('powershell', ['-NoProfile', '-NonInteractive', '-Command', script])
+  const out = await runCommand('powershell', ['-NoProfile', '-NonInteractive', '-Command', script])
   if (!out.ok) return []
   return parseWmiRows(out.stdout)
+}
+
+/**
+ * WMI 进程显存查询（带 TTL 缓存 + 单飞）。
+ *
+ * 这条查询实测 **3.3 秒**（PowerShell 冷启动 + 两次 CIM 查询，
+ * 其中 GPU 性能计数器首次访问还要建缓存，可能更久）。
+ * 渲染侧轮询间隔是 15s，TTL 取 20s（> 轮询间隔）⇒ 连续两次轮询最多只付一次代价；
+ * 并发调用共享同一个 in-flight Promise，不会把 PowerShell 进程堆起来。
+ */
+const wmiRowsCached = cachedAsync(() => wmiGpuProcessRows(), 20_000)
+
+/** WMI 进程显存查询（缓存版） */
+export function wmiGpuProcessRowsCached(): Promise<Array<[number, string, number]>> {
+  return wmiRowsCached()
 }
 
 /** 解析 WMI 输出行（`pid,name,MB`）——纯函数，便于单测 */
@@ -407,16 +624,16 @@ export function parseWmiRows(stdout: string): Array<[number, string, number]> {
  * 查询指定进程名的显存占用（MB）——按 PID 匹配 nvidia-smi
  * 无管理员权限时返回 null（前端显示「不可用」）
  */
-export function vramOfProcess(name: string): number | null {
+export async function vramOfProcess(name: string): Promise<number | null> {
   // 找进程 PID
   const psCmd = `Get-Process '${name}' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id`
-  const ps = runCommand('powershell', ['-NoProfile', '-Command', psCmd])
+  const ps = await runCommand('powershell', ['-NoProfile', '-Command', psCmd])
   if (!ps.ok) return null
   const pidRaw = ps.stdout.trim()
   if (!/^\d+$/.test(pidRaw)) return null
   const pid = Number(pidRaw)
   // nvidia-smi 按 PID 查
-  const smi = runCommand('nvidia-smi', [
+  const smi = await runCommand('nvidia-smi', [
     '--query-compute-apps=pid,used_memory',
     '--format=csv,noheader,nounits'
   ])
@@ -443,20 +660,28 @@ export interface VramStatus {
 }
 
 /**
- * 查询显存状态：总显存 + 已用 + 各推理框架占用（按 PID 过滤 nvidia-smi）。
+ * 查询显存状态：总显存 + 已用 + 各推理框架占用。
+ *
+ * 成本控制（这是「点按钮偶尔卡一下」的关键）：
+ *  - 总显存 / 已用显存走 TTL 缓存 + 单飞（nvidia-smi 每次仍是 CreateProcess）；
+ *  - **空闲（没有任何引擎常驻）时根本不查 WMI**：没有框架占用可报，却要付
+ *    一次 3.3s 的 PowerShell 和主线程 CreateProcess 开销；
+ *  - 只有引擎确实在跑、且 WMI 真值拿不到时，才退回 nvidia-smi 按进程名查
+ *    （它要额外起 2 个进程，不能每轮都跑）。
  *
  * 关键：引擎已卸载 / 进程已释放时绝不能回退到"模型目录大小"估算——
  * 那会在引擎死后假报占用。只有引擎 is_loaded()（子进程活着）却查不到
- * nvidia-smi 明细（无权限）时，才用目录大小近似。
+ * 驱动明细（无权限）时，才用注册表估算。
  */
-export function getVramStatus(): VramStatus {
-  const gpu = detectGpu()
-  const totalMb = gpu.memoryMB
-  // nvidia-smi 已用显存（总量，无需权限）。读不到按 0 处理（保持面板既有语义）。
-  const mem = gpuMemMb()
-  const usedMb = mem ? mem[1] : 0
+export async function getVramStatus(): Promise<VramStatus> {
+  // 静态信息与已用显存：都走缓存（60s / 3s），同一次刷新只起必要的命令
+  const gpu = await gpuInfoCached()
+  const usedMb = (await smiUsedCached()) ?? 0
 
-  const rows = wmiGpuProcessRows()
+  // 没有引擎常驻 ⇒ 不可能有框架占用明细，WMI 查询直接跳过
+  const anyActive = runtimeHooks?.anyActive ? runtimeHooks.anyActive() : true
+  // WMI 查询走 TTL(20s) 缓存 + 单飞（实测一次 3.3s）
+  const rows = anyActive ? await wmiGpuProcessRowsCached() : []
   const byPid = new Map<number, number>()
   const byName = new Map<string, number>()
   for (const [pid, name, mb] of rows) {
@@ -479,9 +704,10 @@ export function getVramStatus(): VramStatus {
       const mb = byName.get(fw.processName.toLowerCase())
       if (mb !== undefined) hit = { mb, source: 'wmi' }
     }
-    // 3) nvidia-smi 按进程名查
-    if (!hit && fw.processName) {
-      const mb = vramOfProcess(fw.processName)
+    // 3) nvidia-smi 按进程名查：仅 Windows 的 WMI 真值不可用（查询失败）时兜底，
+    //    且必须确有引擎常驻 —— 否则每轮多起 6 个进程，纯浪费
+    if (!hit && anyActive && rows.length === 0 && fw.processName) {
+      const mb = await vramOfProcess(fw.processName)
       if (mb !== null) hit = { mb, source: 'smi' }
     }
     // 4) 注册表估算（仅引擎 active 时）
@@ -502,7 +728,7 @@ export function getVramStatus(): VramStatus {
   return {
     available: gpu.available,
     gpu_name: gpu.gpuName,
-    total_mb: totalMb,
+    total_mb: gpu.memoryMB,
     used_mb: usedMb,
     frameworks
   }

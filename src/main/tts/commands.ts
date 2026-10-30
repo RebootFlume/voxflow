@@ -6,7 +6,8 @@
  * - `rust_synthesize` 按引擎返回的真实采样率写盘（不硬编码 24k）。
  */
 
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
+import { mkdir, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { emitSidecar } from '../core/events'
 import { setTtsBusy } from '../api-server'
@@ -233,7 +234,8 @@ export async function synthesize(
   }
   if (outcome.samples.length === 0) throw new Error('合成音频为空')
 
-  if (!existsSync(exportDir)) mkdirSync(exportDir, { recursive: true })
+  // 建目录改异步：Electron 主线程做同步 IO 会让窗口卡住（长文本合成时尤其明显）
+  if (!existsSync(exportDir)) await mkdir(exportDir, { recursive: true })
 
   const ts = localTimeStamp()
   const safeText = [...text]
@@ -243,9 +245,9 @@ export async function synthesize(
   const fileName = safeText.trim() ? `${safeText.trim()}_${ts}.wav` : `tts_${ts}.wav`
   const outPath = join(exportDir, fileName)
 
-  writeInt16Wav(outPath, outcome.samples, Math.max(outcome.sampleRate, 1))
+  await writeInt16Wav(outPath, outcome.samples, Math.max(outcome.sampleRate, 1))
 
-  const fileSize = statSync(outPath).size
+  const fileSize = (await stat(outPath)).size
   const sizeStr =
     fileSize > 1024 * 1024
       ? `${(fileSize / 1024 / 1024).toFixed(1)} MB`
@@ -262,8 +264,13 @@ export async function synthesize(
   }
 }
 
-/** 写 16bit 单声道 WAV（与 hound 的 WavSpec{channels:1, bits:16, int} 一致） */
-function writeInt16Wav(path: string, samples: Int16Array, sampleRate: number): void {
+/** 写 16bit 单声道 WAV（与 hound 的 WavSpec{channels:1, bits:16, int} 一致）
+ *
+ * 采样数据一次性转成 Buffer 再异步落盘：
+ * 逐样本 `writeInt16LE` 是 N 次 JS 调用，长文本合成时会把 Electron 主线程占住数秒
+ * （表现为整个窗口无响应）；`writeFile` 走线程池，不占主线程。
+ */
+async function writeInt16Wav(path: string, samples: Int16Array, sampleRate: number): Promise<void> {
   const dataBytes = samples.length * 2
   const header = Buffer.alloc(44)
   header.write('RIFF', 0, 'ascii')
@@ -280,11 +287,9 @@ function writeInt16Wav(path: string, samples: Int16Array, sampleRate: number): v
   header.write('data', 36, 'ascii')
   header.writeUInt32LE(dataBytes, 40)
 
-  const body = Buffer.alloc(dataBytes)
-  for (let i = 0; i < samples.length; i++) {
-    body.writeInt16LE(samples[i], i * 2)
-  }
-  writeFileSync(path, Buffer.concat([header, body]))
+  // Int16Array → 原始字节：一次 memcpy 取代逐样本写入（长度按字节算，避免尾字节错位）
+  const body = Buffer.from(new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength))
+  await writeFile(path, Buffer.concat([header, body]))
 }
 
 /** 取消正在进行的合成（段边界生效） */

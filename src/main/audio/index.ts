@@ -6,7 +6,7 @@
  * 上层只调 `decodeAny`，不感知格式。
  */
 
-import { readFileSync } from 'fs'
+import { readFile } from 'node:fs/promises'
 import { extname } from 'path'
 import { decodeWithFfmpeg, ffmpegAvailable } from './ffmpeg'
 import { decodeWav, toMono } from './wav'
@@ -18,7 +18,8 @@ export { decodeWithFfmpeg, ffmpegAvailable } from './ffmpeg'
 
 /** 多格式解码入口：读取文件并解码为 16kHz 单声道 float32 */
 export async function decodeAny(path: string): Promise<{ samples: Float32Array; sampleRate: number }> {
-  const data = readFileSync(path)
+  // 异步读：音频动辄几十 MB，同步读会把主线程（整个 UI）卡住一下
+  const data = await readFile(path)
 
   // WAV 快速路径：RIFF 头
   if (data.length >= 4 && data.toString('ascii', 0, 4) === 'RIFF') {
