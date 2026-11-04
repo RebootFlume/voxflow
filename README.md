@@ -4,8 +4,9 @@
 
 完全本地运行 · 隐私安全 · 多引擎架构 · 一键热键录音转文字
 
-> 本仓库是 Tauri 版的 **Electron 移植**。上游 Tauri 项目（`src-tauri/` + Rust 推理层）
-> 作为**只读参考**，本仓库不包含任何 Rust 代码。
+> 本仓库是 Tauri 版的 **Electron 移植**。上游 Tauri 项目（`src-tauri/` + Rust 推理层）见
+> [`RebootFlume/voxflow-tauri`](https://github.com/RebootFlume/voxflow-tauri)，作为**只读参考**，
+> 本仓库不包含任何 Rust 代码。
 
 ---
 
