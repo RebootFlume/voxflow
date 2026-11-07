@@ -16,6 +16,7 @@ import { rustCheckVram, sendToSidecar } from "@/lib/ipc";
 import { loadAsrModel } from "@/lib/modelLoader";
 import { alreadyConfirmedRemembered, rememberConfirmed } from "@/lib/vramGuard";
 import { VramGuardDialog, type VramGuardChoice } from "@/components/VramGuardDialog";
+import { VramMonitorCard } from "@/components/VramMonitorCard";
 import { TranscribePanel } from "./TranscribePanel";
 
 
@@ -68,23 +69,18 @@ function HotkeyRecorder({ value, onChange }: { value: string; onChange: (v: stri
   );
 }
 
-/** 显存监控卡片：总显存 + 已用 + 各框架占用 + 录音状态 */
-function VramMonitorCard() {
+/** 录音状态卡片：热键录音的实时状态 + 音量波形（属于「录音设置」的职责） */
+function RecordingStatusCard() {
   const locale = useAppStore((s) => s.locale);
   const asr = useAppStore((s) => s.asr);
-  // 读全局轮询结果（useVramPoller 每 3s 更新 store，不随本组件生命周期启停）
-  const vram = useAppStore((s) => s.vram);
-
-  const pct = vram && vram.total > 0 ? Math.round((vram.used / vram.total) * 100) : 0;
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">{t(locale, "asr.vram.title")}</CardTitle>
-        <CardDescription>{t(locale, "asr.vram.desc")}</CardDescription>
+        <CardTitle className="text-base">{t(locale, "asr.recording.title")}</CardTitle>
+        <CardDescription>{t(locale, "asr.recording.desc")}</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-3">
-        {/* 录音状态 */}
+      <CardContent>
         <div className="flex items-center gap-3">
           <span className="text-sm text-muted-foreground">{t(locale, "asr.status.current")}</span>
           <Badge variant={asr.status === "recording" ? "default" : asr.status === "error" ? "destructive" : "secondary"}>
@@ -92,44 +88,6 @@ function VramMonitorCard() {
           </Badge>
           <VolumeWave volume={asr.volume} active={asr.status === "recording"} />
         </div>
-
-        {/* 显存 */}
-        {vram && vram.total > 0 ? (
-          <>
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-muted-foreground">{t(locale, "asr.vram.usage")}</span>
-              <span className="tabular-nums">
-                {(vram.used / 1024).toFixed(1)} / {(vram.total / 1024).toFixed(1)} GB ({pct}%)
-              </span>
-            </div>
-            <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
-              <div
-                className={`h-full rounded-full transition-all ${pct > 90 ? "bg-red-500" : pct > 70 ? "bg-amber-500" : "bg-emerald-500"}`}
-                style={{ width: `${Math.min(100, pct)}%` }}
-              />
-            </div>
-            <div className="space-y-1 text-xs text-muted-foreground">
-              {/* 各框架占用：键由 Rust 下发；source=estimate 时标注「估算」，其余为驱动真值 */}
-              {Object.entries(vram.frameworks).map(([fw, v]) => (
-                <div key={fw} className="flex justify-between">
-                  <span>
-                    {fw}
-                    {v.source === "estimate" ? ` · ${t(locale, "asr.vram.estimated")}` : ""}
-                  </span>
-                  <span className="tabular-nums">
-                    {v.source === "estimate" ? "≈" : ""}
-                    {(v.mb / 1024).toFixed(2)} GB
-                  </span>
-                </div>
-              ))}
-              {Object.keys(vram.frameworks).length === 0 && (
-                <p className="text-xs text-muted-foreground/70">{t(locale, "asr.vram.noDetail")}</p>
-              )}
-            </div>
-          </>
-        ) : (
-          <p className="text-xs text-muted-foreground">{t(locale, "asr.vram.noGpu")}</p>
-        )}
       </CardContent>
     </Card>
   );
@@ -261,7 +219,7 @@ export function AsrPanel() {
           </CardContent>
         </Card>
 
-        <VramMonitorCard />
+        <RecordingStatusCard />
       </div>
     );
   }
@@ -314,6 +272,8 @@ export function AsrPanel() {
               </div>
             )}
             <InputDeviceDisplay />
+            {/* 显存占用内联在设备卡里：选 CUDA 时不用往下滚就能看到余量 */}
+            <VramMonitorCard variant="inline" />
           </CardContent>
         </Card>
 
