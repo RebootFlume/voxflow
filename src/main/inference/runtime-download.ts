@@ -36,6 +36,8 @@ export type SmokeProbe =
   | { type: 'httpHealth'; path: string }
   /** 无服务端点：等进程退出且 stderr 命中任一关键词（= exe+DLL 链完好） */
   | { type: 'stderrKeywords'; keywords: string[] }
+  /** 纯 DLL 包（没有可执行入口）：装完即视为可用，由引擎首次使用时验证 */
+  | { type: 'skip' }
 
 /** libs 压缩包发布信息（GitHub release 资产名 + 版本） */
 export interface RuntimePkg {
@@ -116,7 +118,7 @@ export const SHERPA_CUDA_AUX_FILES = [
  * - llama.cpp: b10622（cuda-12.4）
  *   注意：官方 cuda 版拆成两个 zip —— 主程序包 + cudart 运行库包（cudart64/cublas）。
  *   必须两个都下载，否则 CUDA 后端加载失败会【静默回退 CPU】。
- * - sherpa-onnx: v1.13.6（cuda-12.x-cudnn-9.x）
+ * - sherpa-onnx: v2.0.1（cuda-12.x-cudnn-9.x, onnxruntime 1.28.2）
  */
 export const RUNTIME_PACKAGES: RuntimePkg[] = [
   {
@@ -152,16 +154,16 @@ export const RUNTIME_PACKAGES: RuntimePkg[] = [
     supportsCpu: true,
     supportsCuda: true,
     name: 'sherpa-onnx',
-    version: 'v1.13.6',
+    version: 'v2.0.1',
     sha256: '',
     auxSha256: '',
     unpackedBytes: null,
     manifest: null,
-    url: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.6/sherpa-onnx-v1.13.6-cuda-12.x-cudnn-9.x-onnxruntime1.27.1-win-x64-cuda.tar.bz2',
+    url: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.1/sherpa-onnx-v2.0.1-cuda-12.x-cudnn-9.x-onnxruntime1.28.2-win-x64-cuda.tar.bz2',
     auxUrl: SHERPA_CUDA_AUX_URL,
     auxDir: 'bin',
     auxFiles: SHERPA_CUDA_AUX_FILES,
-    innerDir: 'sherpa-onnx-v1.13.6-cuda-12.x-cudnn-9.x-onnxruntime1.27.1-win-x64-cuda',
+    innerDir: 'sherpa-onnx-v2.0.1-cuda-12.x-cudnn-9.x-onnxruntime1.28.2-win-x64-cuda',
     targetDir: 'sherpa-onnx',
     marker: 'bin/sherpa-onnx-offline-websocket-server.exe',
     portBase: 50,
@@ -177,6 +179,30 @@ export const RUNTIME_PACKAGES: RuntimePkg[] = [
         'parse-options'
       ]
     }
+  },
+  {
+    framework: 'audiocpp',
+    engine: 'audiocpp',
+    variant: '',
+    supportsCpu: true,
+    supportsCuda: false,
+    name: 'audio.cpp',
+    version: 'v0.9.4',
+    sha256: '',
+    auxSha256: '',
+    unpackedBytes: null,
+    manifest: null,
+    // 官方只发布 lib 包（dll + 头文件 + MSVC 运行库，静态链接 ggml，无附属 dll）
+    url: 'https://github.com/0xShug0/audio.cpp/releases/download/v0.9.4/audio-v0.9.4-lib-windows-x64-cpu.zip',
+    auxUrl: null,
+    auxDir: '',
+    auxFiles: [],
+    innerDir: '',
+    targetDir: 'audio-cpp',
+    marker: 'libs/audiocpp.dll',
+    portBase: 0,
+    smokeArgs: [],
+    smokeProbe: { type: 'skip' }
   },
 ]
 
@@ -404,6 +430,8 @@ function placeExtracted(src: string, dest: string): void {
  * 目的：确认 exe + DLL 链能真正启动（文件在 ≠ 能跑；缺 DLL 会秒退/无法加载）。
  */
 export async function smokeTestRuntime(pkg: RuntimePkg): Promise<void> {
+  // 纯 DLL 包没有可执行入口，跳过试启动（DLL 链在引擎首次加载时自证）
+  if (pkg.smokeProbe.type === 'skip') return
   const dir = runtimeDirFor(pkg)
   const exe = join(dir, pkg.marker)
   if (!existsSync(exe)) {
@@ -647,13 +675,19 @@ export async function downloadRuntime(framework: string): Promise<void> {
     }
 
     // 试启动验证（marker 存在 ≠ 能跑；缺 DLL 时 spawn 即失败/秒退）
-    log.info('[framework] 完整性校验通过，试启动引擎验证 DLL 链...')
-    try {
-      await smokeTestRuntime(pkg)
-    } catch (e) {
-      throw new Error(`试启动验证失败（可能 DLL 缺失）：${e instanceof Error ? e.message : String(e)}`)
+    if (pkg.smokeProbe.type === 'skip') {
+      log.info('[framework] 纯 DLL 包，跳过试启动（由引擎首次加载验证）')
+    } else {
+      log.info('[framework] 完整性校验通过，试启动引擎验证 DLL 链...')
+      try {
+        await smokeTestRuntime(pkg)
+      } catch (e) {
+        throw new Error(
+          `试启动验证失败（可能 DLL 缺失）：${e instanceof Error ? e.message : String(e)}`
+        )
+      }
+      log.info(`[framework] ${pkg.name} 试启动通过`)
     }
-    log.info(`[framework] ${pkg.name} 试启动通过`)
 
     emitSidecar({ status: 'runtime_installed', framework: pkg.framework })
   } catch (e) {

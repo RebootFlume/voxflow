@@ -10,6 +10,7 @@
 import { join } from 'node:path'
 import { getModelRoot, mainModelFile, findSpec } from '../models/model-manager'
 import type { ModelSpec } from '../models/spec-data'
+import { AudiocppTtsEngine } from './engine-audiocpp'
 import { SherpaTtsEngine } from './engine-sherpa'
 import type { TtsEngine } from './traits'
 
@@ -20,6 +21,7 @@ export class TtsRegistry {
 
   constructor() {
     this.register('sherpa', new SherpaTtsEngine())
+    this.register('audiocpp', new AudiocppTtsEngine())
   }
 
   /** 注册一个引擎 */

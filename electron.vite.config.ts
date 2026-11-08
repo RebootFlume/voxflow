@@ -18,7 +18,8 @@ export default defineConfig({
           // 每种框架一个入口文件（worker 只服务一个引擎，互不牵连）。
           worker: resolve(__dirname, 'src/main/inference/llama-ffi/worker.ts'),
           'sherpa-asr-worker': resolve(__dirname, 'src/main/inference/sherpa-ffi/asr-worker.ts'),
-          'sherpa-tts-worker': resolve(__dirname, 'src/main/inference/sherpa-ffi/tts-worker.ts')
+          'sherpa-tts-worker': resolve(__dirname, 'src/main/inference/sherpa-ffi/tts-worker.ts'),
+          'audiocpp-tts-worker': resolve(__dirname, 'src/main/inference/audiocpp-ffi/tts-worker.ts')
         }
       }
     }

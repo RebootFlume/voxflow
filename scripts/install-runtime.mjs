@@ -79,7 +79,8 @@ console.log(`耗时 ${((Date.now() - t0) / 1000).toFixed(0)}s`)
 // 落盘结果
 const pkgDirs = {
   gguf: 'llama-cpp',
-  onnx: 'sherpa-onnx'
+  onnx: 'sherpa-onnx',
+  audiocpp: 'audio-cpp'
 }
 const dir = join(LIBS, pkgDirs[framework] ?? framework)
 if (existsSync(dir)) {

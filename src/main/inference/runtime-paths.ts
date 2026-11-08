@@ -29,6 +29,11 @@ export function sherpaRuntimeDir(): string {
   return join(libsDir(), 'sherpa-onnx')
 }
 
+/** audio.cpp 运行时目录（含 libs/audiocpp.dll） */
+export function audiocppRuntimeDir(): string {
+  return join(libsDir(), 'audio-cpp')
+}
+
 /**
  * sherpa-onnx 工具可执行文件的**规范位置**：`<sherpa_runtime_dir>/bin/<name>`。
  *

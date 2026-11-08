@@ -88,6 +88,17 @@ export type BackendSpec =
       cli: ArgSpec[]
       requiredFiles: string[]
     }
+  | {
+      /**
+       * audio.cpp TTS（进程内 FFI）：单一 .gguf 权重，族差异由 C 侧按 family 识别。
+       *
+       * 注意：首批只接**自带文本前端**的族（不依赖 eSpeak-ng 的那批），
+       * 这样运行时依赖面只有 audiocpp.dll 一个文件。
+       */
+      type: 'audiocpp'
+      /** audiocpp 的 family 名（如 "moss_tts_nano"） */
+      family: string
+    }
 
 export interface ModelSpec {
   id: string
@@ -258,7 +269,6 @@ export const SPECS: ModelSpec[] = [
                 { type: 'file', flag: "--kokoro-model", value: "model.onnx" },
                 { type: 'file', flag: "--kokoro-voices", value: "voices.bin" },
                 { type: 'file', flag: "--kokoro-tokens", value: "tokens.txt" },
-                { type: 'file', flag: "--kokoro-data-dir", value: "espeak-ng-data" },
                 { type: 'joinableFiles', flag: "--kokoro-lexicon", candidates: ["lexicon-us-en.txt", "lexicon-gb-en.txt", "lexicon-zh.txt"], sep: ',' },
                 { type: 'joinableFiles', flag: "--tts-rule-fsts", candidates: ["date-zh.fst", "phone-zh.fst", "number-zh.fst"], sep: ',' },
                 { type: 'runtimeVar', flag: "--sid", key: 'speakerId' },
@@ -293,7 +303,6 @@ export const SPECS: ModelSpec[] = [
                 { type: 'file', flag: "--kokoro-model", value: "model.onnx" },
                 { type: 'file', flag: "--kokoro-voices", value: "voices.bin" },
                 { type: 'file', flag: "--kokoro-tokens", value: "tokens.txt" },
-                { type: 'file', flag: "--kokoro-data-dir", value: "espeak-ng-data" },
                 { type: 'joinableFiles', flag: "--kokoro-lexicon", candidates: ["lexicon-us-en.txt", "lexicon-gb-en.txt", "lexicon-zh.txt"], sep: ',' },
                 { type: 'joinableFiles', flag: "--tts-rule-fsts", candidates: ["date-zh.fst", "phone-zh.fst", "number-zh.fst"], sep: ',' },
                 { type: 'runtimeVar', flag: "--sid", key: 'speakerId' },
@@ -328,7 +337,6 @@ export const SPECS: ModelSpec[] = [
                 { type: 'file', flag: "--kokoro-model", value: "model.onnx" },
                 { type: 'file', flag: "--kokoro-voices", value: "voices.bin" },
                 { type: 'file', flag: "--kokoro-tokens", value: "tokens.txt" },
-                { type: 'file', flag: "--kokoro-data-dir", value: "espeak-ng-data" },
                 
                 { type: 'joinableFiles', flag: "--kokoro-lexicon", candidates: ["lexicon-us-en.txt", "lexicon-gb-en.txt"], sep: ',' },
                 { type: 'runtimeVar', flag: "--sid", key: 'speakerId' },
@@ -402,7 +410,6 @@ export const SPECS: ModelSpec[] = [
                 { type: 'file', flag: "--zipvoice-decoder", value: "decoder.int8.onnx" },
                 { type: 'file', flag: "--zipvoice-lexicon", value: "lexicon.txt" },
                 { type: 'file', flag: "--zipvoice-tokens", value: "tokens.txt" },
-                { type: 'file', flag: "--zipvoice-data-dir", value: "espeak-ng-data" },
                 { type: 'modelsRootFile', flag: "--zipvoice-vocoder", value: "vocos_24khz.onnx" },
                 { type: 'runtimeVar', flag: "--reference-audio", key: 'referenceAudio' },
                 { type: 'runtimeVar', flag: "--reference-text", key: 'referenceText' },
@@ -441,7 +448,6 @@ export const SPECS: ModelSpec[] = [
                 { type: 'file', flag: "--pocket-encoder", value: "encoder.onnx" },
                 { type: 'file', flag: "--pocket-decoder", value: "decoder.onnx" },
                 { type: 'file', flag: "--pocket-tokens", value: "tokens.txt" },
-                { type: 'file', flag: "--pocket-data-dir", value: "espeak-ng-data" },
                 { type: 'runtimeVar', flag: "--provider", key: 'provider' },
                 { type: 'runtimeVar', flag: "--num-threads", key: 'numThreads' },
             ], requiredFiles: [
@@ -520,6 +526,35 @@ export const SPECS: ModelSpec[] = [
                 { type: 'runtimeVar', flag: "--num-threads", key: 'numThreads' },
             ], requiredFiles: ["model.onnx", "tokens.txt"] },
     },
-    
+    {
+        id: "audiocpp-moss-tts-nano-100m",
+        name: "MOSS-TTS-Nano",
+        kind: 'tts',
+        framework: "audiocpp",
+        sizeGb: 0.19,
+        descriptionZh: "MOSS TTS Nano 100M · 中英等多语 · 自带文本前端 · audio.cpp",
+        descriptionEn: "MOSS TTS Nano 100M · multilingual · built-in frontend · audio.cpp",
+        available: true,
+        cpu: "good",
+        // audio.cpp 的 GGUF 权重统一放在同一个 HF 仓库（<Model>-GGUF/<file>.gguf 子目录）
+        source: { type: 'huggingface', repo: "audio-cpp/audio.cpp-gguf", revision: "main" },
+        entries: [{
+            id: "moss-nano-q8_0",
+            labelZh: "Q8_0 · 193MB（推荐）",
+            labelEn: "Q8_0 · 193MB (recommended)",
+            files: [{
+                role: 'main',
+                name: "MOSS-TTS-Nano-100M-GGUF/moss-tts-nano-100m-q8_0.gguf",
+                sizeMb: 184.4,
+            }],
+            default: true,
+        }],
+        extraFiles: [],
+        quant: "q8_0",
+        languages: ["zh", "en", "ja", "ko", "de", "fr", "es", "ru"],
+        languageMode: 'auto',
+        voiceMode: { type: 'fixed' },
+        backend: { type: 'audiocpp', family: 'moss_tts_nano' },
+    },
 
 ]

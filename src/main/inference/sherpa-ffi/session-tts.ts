@@ -195,7 +195,8 @@ function emptyKokoro(): Record<string, unknown> {
 }
 
 function emptyKitten(): Record<string, unknown> {
-  return { model: '', voices: '', tokens: '', data_dir: '', length_scale: 0 }
+  // v2.0.1 在尾部新增 lexicon
+  return { model: '', voices: '', tokens: '', data_dir: '', length_scale: 0, lexicon: '' }
 }
 
 function emptyZipvoice(): Record<string, unknown> {

@@ -7,9 +7,10 @@
  *
  * 资源内容（打包进安装包的只有 `icon.png`）：
  * - `icon.png`：托盘图标（extraResources → 安装目录 resources/icon.png）
- * - `espeak-ng/` 已删除：TTS 的 G2P 词典是各模型自带 `espeak-ng-data`
- *   （sherpa CLI 用 `--kokoro-data-dir` / `--zipvoice-data-dir` 指向模型目录），
- *   与仓库级 espeak-ng 无关。
+ *
+ * 注意：项目**不再依赖 espeak-ng**。sherpa-onnx v2.0.1 起 `data_dir` 已被忽略，
+ * TTS 的中英音素化改由各模型自带的 lexicon（`--*-lexicon`）完成；
+ * audio.cpp 也只接自带文本前端的模型族。
  */
 
 import { app } from 'electron'

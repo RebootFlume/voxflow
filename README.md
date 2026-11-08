@@ -16,7 +16,7 @@
 |---|---|---|
 | 框架 | Tauri 2 + Rust 主进程 | **Electron 45 + TypeScript 主进程** |
 | 前端 | React 19 + Vite + Tailwind + shadcn/ui | **完全复用**（逐文件移植） |
-| 推理引擎 | Rust 内嵌 + 子进程 | **进程内 FFI worker**（llama.cpp / sherpa-onnx，各在独立子进程） |
+| 推理引擎 | Rust 内嵌 + 子进程 | **进程内 FFI worker**（llama.cpp / sherpa-onnx / audio.cpp，各在独立子进程） |
 | 内存占用 | ~30–50 MB | ~150 MB（自带 Chromium） |
 | 打包体积 | 10–20 MB | ~150 MB（不含模型与推理框架） |
 | 便携版形态 | 单文件 `portable.exe` | **zip 解压即用**（Electron 无法产出真单文件） |
@@ -27,7 +27,7 @@
 - ✅ **前端全量移植**：65 个源文件全部有对应物（63 个仅改 import 路径 `src/lib/tauri` → `src/lib/ipc`，`App.tsx` 逐字相同），`src/components/ui/*`（shadcn）13 个零改动
 - ✅ **IPC 桥接**：`src/lib/ipc.ts` 顶替原 `src/lib/tauri.ts`，**导出函数名与签名保持不变**
 - ✅ **主进程**：Tauri 的 45 个 `#[tauri::command]` 中 **44 个**已用 TypeScript 重写（仅缺 demo 用的 `greet`）；Electron 侧另加 1 个诊断命令 `get_instance_info`（单实例判定），共 **45 个**；前端实际调用的 36 个命令 **100% 已实现**
-- ✅ **推理层**：llama.cpp / sherpa-onnx 均走进程内 FFI worker（**独立子进程**，崩溃隔离不变）
+- ✅ **推理层**：llama.cpp / sherpa-onnx / audio.cpp 均走进程内 FFI worker（**独立子进程**，崩溃隔离不变）；不依赖 Python、不依赖 espeak-ng
 - ✅ **原生能力**：全局热键、模拟粘贴、托盘、对话框、剪贴板 → Electron 内置 API
 
 ### 关键实现替换
@@ -70,7 +70,8 @@
 └─────────────────────────────────────────────────────────┘
               │ 子进程（崩溃隔离）
               ├── llama.cpp FFI worker    GGUF / Qwen3-ASR
-              └── sherpa-onnx FFI worker  ONNX / SenseVoice / TTS
+              ├── sherpa-onnx FFI worker  ONNX / SenseVoice / TTS
+              └── audio.cpp FFI worker     GGUF / MOSS-TTS 等多族
 ```
 
 ---
@@ -171,6 +172,7 @@ const text = await window.voxflow.invoke<string>('rust_transcribe_llama', {
 | 三-b | 推理框架运行时下载（llama / sherpa 包） | ✅ **完成并验证**（真实下载 + 解压 + 落位 + 试启动通过） |
 | 三-d | OpenAI 兼容对外 API 服务 | ✅ **完成并验证**（16 项契约测试 + 真实模型转写通过） |
 | 三-e | sherpa-onnx ASR 引擎（SenseVoice / Paraformer） | ✅ **完成并验证**（真实模型转写通过） |
+| 三-f | audio.cpp TTS 引擎（MOSS-TTS-Nano 等 GGUF 族） | ✅ **完成并验证**（真实模型合成通过，48kHz） |
 | 四 | 打包与发版流程 | ✅ 脚本就绪，`build:unpack` 已验证 |
 
 前端调用的命令已 100% 实现；调用未注册的命令会抛出「未知命令: xxx」，不会静默失败。
@@ -195,6 +197,8 @@ const text = await window.voxflow.invoke<string>('rust_transcribe_llama', {
 | 代理链路 | 系统代理（HTTP_PROXY）自动接管，HTTP CONNECT 隧道可用 |
 | 对外 API | `npm run verify:api` —— 16 项全过（鉴权 / 路由 / 错误码 / multipart / WAV 编码） |
 | **真实推理闭环** | `npm run verify:real` —— **25 项全过**：Kokoro TTS 合成 → Qwen3-ASR(CUDA) 转写 → SenseVoice 转写 → 对外 API 转写，识别文本与原文一致 |
+| audio.cpp 端到端 | 真机：`MOSS-TTS-Nano`（q8_0，193MB，CPU）加载 + 中英合成通过，wav 48kHz / 峰值 27592（非静音） |
+| 无 Python / 无 eSpeak | 运行时只剩 `llama-cpp` / `sherpa-onnx` / `audio-cpp`，三者均 Apache-2.0；TTS 音素化由模型自带 lexicon 完成 |
 
 ### 真实推理验证（最有说服力的一条）
 

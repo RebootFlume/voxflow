@@ -2,7 +2,7 @@
  * sherpa-onnx ASR 会话：加载识别器 → 音频转文本。
  *
  * 这一层是「推理逻辑」本身，完全不认识 IPC：worker 调它，主进程不碰它。
- * 它复用随包运行时里的 sherpa-onnx-c-api.dll（v1.13.6）。
+ * 它复用随包运行时里的 sherpa-onnx-c-api.dll（v2.0.1）。
  */
 
 import { existsSync } from 'node:fs'
@@ -145,7 +145,9 @@ export class SherpaAsrSession {
       rule_fsts: '',
       rule_fars: '',
       blank_penalty: 0,
-      hr: { dict_dir: '', lexicon: '', rule_fsts: '' }
+      hr: { dict_dir: '', lexicon: '', rule_fsts: '' },
+      // v2.0.1 新增（尾部）：不使用 HLG/FST 解码，graph 置空
+      ctc_fst_decoder_config: { graph: '', max_active: 0 }
     }
 
     switch (opts.family) {

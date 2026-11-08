@@ -148,7 +148,19 @@ const homophoneReplacerConfig = koffi.struct('SherpaHomophoneReplacerConfig', {
   rule_fsts: C
 })
 
-/** 识别器配置 */
+/** HLG/FST 离线 CTC 解码配置（v2.0.1 起识别器配置的最后一个字段） */
+const ctcFstDecoderConfig = koffi.struct('SherpaCtcFstDecoderConfig', {
+  graph: C,
+  max_active: 'int32_t'
+})
+
+/**
+ * 识别器配置
+ *
+ * v2.0.1：尾部新增 `ctc_fst_decoder_config`。该结构体以指针形式传给 C，
+ * C 会按自己的 sizeof 读取全部字段 —— 少一个尾部字段就是越界读，
+ * 升级 sherpa 后必须同步这里的尾部字段（新字段一律追加在末尾）。
+ */
 const recognizerConfig = koffi.struct('SherpaRecognizerConfig', {
   feat_config: featureConfig,
   model_config: modelConfig,
@@ -160,7 +172,8 @@ const recognizerConfig = koffi.struct('SherpaRecognizerConfig', {
   rule_fsts: C,
   rule_fars: C,
   blank_penalty: 'float',
-  hr: homophoneReplacerConfig
+  hr: homophoneReplacerConfig,
+  ctc_fst_decoder_config: ctcFstDecoderConfig
 })
 
 /* ------------------------------------------------------------------ *
@@ -205,7 +218,9 @@ const kittenConfig = koffi.struct('SherpaKittenConfig', {
   voices: C,
   tokens: C,
   data_dir: C,
-  length_scale: 'float'
+  length_scale: 'float',
+  // v2.0.1 新增（尾部），与 C 头文件逐字段对齐
+  lexicon: C
 })
 
 const zipvoiceConfig = koffi.struct('SherpaZipvoiceConfig', {

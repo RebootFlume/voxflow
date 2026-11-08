@@ -28,7 +28,7 @@ files:
 asarUnpack:
   - '**/*.node'
 # 运行时资源：随包分发（不在 asar 内）
-# 只带托盘图标。推理运行时由运行时下载器落到 exe 同级 libs/，espeak-ng 由各模型自带。
+# 只带托盘图标。推理运行时由运行时下载器落到 exe 同级 libs/（项目不依赖 espeak-ng）。
 extraResources:
   - from: resources/icon.png
     to: icon.png

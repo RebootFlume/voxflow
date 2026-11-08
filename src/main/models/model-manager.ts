@@ -113,6 +113,16 @@ export const FRAMEWORKS: readonly FrameworkSpec[] = [
     // TTS 合成是一次性子进程：无常驻进程可探
     processName: null
   },
+  {
+    id: 'audiocpp',
+    engine: 'audiocpp',
+    runtimeKey: 'audiocpp',
+    mainExts: ['.gguf'],
+    filePolicy: 'largest',
+    usesMmproj: false,
+    // audio.cpp 跑在本软件的 FFI worker 进程里，按 PID 归因即可
+    processName: null
+  },
 ]
 
 // 显存诊断需要「框架 → 常驻进程名」的映射；注入给 vram 模块（避免两模块互相 import 成环）

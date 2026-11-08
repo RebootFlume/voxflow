@@ -112,6 +112,7 @@ export function FrameworkPanel() {
   const frameworkMeta: Record<string, { descKey: string }> = {
     gguf: { descKey: "framework.desc.llama" },
     onnx: { descKey: "framework.desc.sherpa" },
+    audiocpp: { descKey: "framework.desc.audiocpp" },
   };
 
 

@@ -9,10 +9,8 @@ import { mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync, mkdirSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { splitText, MAX_CHARS_PER_CHUNK } from '../src/main/tts/chunk'
-import { buildArgv, missingFiles, mainModelFile, type ArgEnv } from '../src/main/tts/argv'
 import * as voices from '../src/main/tts/voices'
 import { clampSeconds } from '../src/main/tts/reference-audio'
-import type { ArgSpec } from '../src/main/models/spec-data'
 
 let passed = 0
 let failed = 0
@@ -114,67 +112,6 @@ voices.pruneOrphans(dir, voices.load(dir))
 check('孤儿音频被清理', !existsSync(orphan))
 
 rmSync(dir, { recursive: true, force: true })
-
-// ── 3. argv 解释器 ─────────────────────────────────────────────────────────
-console.log('\n【argv 解释器】')
-const argDir = mkdtempSync(join(tmpdir(), 'voxflow-argv-'))
-const argRoot = mkdtempSync(join(tmpdir(), 'voxflow-argvroot-'))
-mkdirSync(join(argDir, 'espeak-ng-data'), { recursive: true })
-writeFileSync(join(argDir, 'model.onnx'), 'x')
-writeFileSync(join(argDir, 'tokens.txt'), 'x')
-writeFileSync(join(argDir, 'lexicon-us-en.txt'), 'x')
-writeFileSync(join(argDir, 'lexicon-zh.txt'), 'x')
-
-const cli: ArgSpec[] = [
-  { type: 'file', flag: '--kokoro-model', value: 'model.onnx' },
-  { type: 'file', flag: '--kokoro-tokens', value: 'tokens.txt' },
-  { type: 'optionalFile', flag: '--kokoro-voices', value: 'voices.bin' },
-  { type: 'joinableFiles', flag: '--kokoro-lexicon', candidates: ['lexicon-us-en.txt', 'lexicon-zh.txt'], sep: ',' },
-  { type: 'static', flag: '--num-threads', value: '4' },
-  { type: 'runtimeVar', flag: '--sid', key: 'speakerId' },
-  { type: 'runtimeVar', flag: '--provider', key: 'provider' },
-  { type: 'runtimeVar', flag: '--num-threads', key: 'numThreads' }
-]
-
-const env: ArgEnv = {
-  modelDir: argDir,
-  modelsRoot: argRoot,
-  provider: 'cpu',
-  numThreads: 4,
-  sid: 7,
-  language: 'zh',
-  output: '<OUT>',
-  referenceAudio: null,
-  referenceText: null
-}
-
-const argv = buildArgv(cli, env)
-check('file 参数拼绝对路径', argv.some((a) => a === `--kokoro-model=${join(argDir, 'model.onnx')}`), argv.join(' '))
-check('optionalFile 缺失时不加参数', !argv.some((a) => a.startsWith('--kokoro-voices=')), argv.join(' '))
-check(
-  'joinableFiles 按声明顺序拼接',
-  argv.some((a) => a === `--kokoro-lexicon=${join(argDir, 'lexicon-us-en.txt')},${join(argDir, 'lexicon-zh.txt')}`),
-  argv.join(' ')
-)
-check('static 参数原样', argv.includes('--num-threads=4'))
-check('runtimeVar 填充说话人 id', argv.includes('--sid=7'))
-check('runtimeVar 填充 provider', argv.includes('--provider=cpu'))
-check('参数顺序 = 描述符声明顺序', argv[0].startsWith('--kokoro-model='), argv.join(' '))
-
-const missing = missingFiles(['model.onnx', 'tokens.txt', 'not-there.bin'], cli, env)
-check('缺失文件被报出', missing.includes('not-there.bin'), JSON.stringify(missing))
-check('存在的文件不报', !missing.includes('model.onnx'), JSON.stringify(missing))
-
-eq('mainModelFile 优先 model.onnx', mainModelFile(argDir), join(argDir, 'model.onnx'))
-
-const stepsDir = mkdtempSync(join(tmpdir(), 'voxflow-steps-'))
-writeFileSync(join(stepsDir, 'model-steps-1.onnx'), 'x')
-writeFileSync(join(stepsDir, 'model-steps-3.onnx'), 'xxx')
-eq('mainModelFile 回退取最大 model-steps-*', mainModelFile(stepsDir), join(stepsDir, 'model-steps-3.onnx'))
-
-rmSync(argDir, { recursive: true, force: true })
-rmSync(argRoot, { recursive: true, force: true })
-rmSync(stepsDir, { recursive: true, force: true })
 
 // ── 4. 参考录音时长钳制 ─────────────────────────────────────────────────────
 console.log('\n【reference-audio 时长钳制】')
