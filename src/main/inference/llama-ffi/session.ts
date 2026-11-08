@@ -52,6 +52,29 @@ function sanitizeContext(context: string): string {
  * 生命周期：open() → 若干次 transcribe() → close()。
  * 每次 transcribe 前会清空 KV cache，因此会话可长期复用。
  */
+/**
+ * 读 CUDA 设备的空闲显存（MiB）。
+ *
+ * 用途：引擎自报显存占用（加载前后的空闲显存差值），
+ * 这样显存面板不用再去查"别的进程"（旧的 WMI/PowerShell 路线要 3.3s）。
+ *
+ * 没有 CUDA 设备（CPU 路线）或读不到 → null。
+ */
+function readDeviceFreeMb(ffi: LlamaFfi): number | null {
+  try {
+    const dev = ffi.ggml.backend_dev_by_name('CUDA0')
+    if (!dev) return null
+    const free = Buffer.alloc(8)
+    const total = Buffer.alloc(8)
+    ffi.ggml.backend_dev_memory(dev, free, total)
+    const bytes = free.readBigUInt64LE(0)
+    if (!Number.isFinite(Number(bytes))) return null
+    return Number(bytes) / (1024 * 1024)
+  } catch {
+    return null
+  }
+}
+
 export class LlamaSession {
   private constructor(
     private readonly ffi: LlamaFfi,
@@ -59,8 +82,15 @@ export class LlamaSession {
     private readonly ctx: Handle,
     private readonly vocab: Handle,
     private readonly mtmdCtx: Handle,
-    private readonly memory: Handle
+    private readonly memory: Handle,
+    /** 本引擎实际占用的设备显存（MiB）；读不到 → null */
+    private readonly deviceVramMb: number | null
   ) {}
+
+  /** 本引擎实际占用的设备显存（MiB）—— 加载前后的设备空闲显存差值 */
+  vramMb(): number | null {
+    return this.deviceVramMb
+  }
 
   /**
    * 加载模型并建立上下文。
@@ -75,6 +105,10 @@ export class LlamaSession {
     // 动态后端必须显式按路径加载：默认实现只在自己 exe 旁边找 ggml-cuda.dll
     ffi.ggml.backend_load_all_from_path(opts.libsDir)
     ffi.llama.backend_init()
+
+    // 设备显存基线（加载模型之前）：之后用差值算出"本引擎占了多少显存"。
+    // 这样就不必去查别的进程（WMI/PowerShell），引擎自己就能回答。
+    const baselineFreeMb = device === 'cuda' ? readDeviceFreeMb(ffi) : null
 
     onStage?.('loading')
     const modelParams = ffi.llama.model_default_params()
@@ -128,8 +162,14 @@ export class LlamaSession {
 
     const vocab = ffi.llama.model_get_vocab(model)
     const memory = ffi.llama.get_memory(ctx)
+    // 本引擎实际占用 = 加载前后的设备空闲显存差值
+    const afterFreeMb = device === 'cuda' ? readDeviceFreeMb(ffi) : null
+    const deviceVramMb =
+      baselineFreeMb !== null && afterFreeMb !== null
+        ? Math.max(0, baselineFreeMb - afterFreeMb)
+        : null
     onStage?.('ready')
-    return new LlamaSession(ffi, model, ctx, vocab, mtmdCtx, memory)
+    return new LlamaSession(ffi, model, ctx, vocab, mtmdCtx, memory, deviceVramMb)
   }
 
   /**

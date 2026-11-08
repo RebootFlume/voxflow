@@ -168,6 +168,12 @@ app.whenReady().then(async () => {
   // 这也顺带激活「按本进程 PID 取真值」这条精确来源（残留实例不会被算成我们的占用）。
   setVramRuntimeHooks({
     enginePid: (frameworkId) => registry().engine(frameworkId)?.pid() ?? null,
+    engineVramMb: (frameworkId) => {
+      // 引擎自报（进程内 FFI 引擎读设备显存差值）= 真值；拿不到再回退估算
+      const asr = registry().engine(frameworkId)
+      if (!asr || !asr.isLoaded()) return null
+      return asr.vramSelfReportedMb?.() ?? null
+    },
     activeEngineVramMb: (frameworkId) => {
       const asr = registry().engine(frameworkId)
       const asrMb = asr && asr.isLoaded() ? asr.vramEstimateMb() : null

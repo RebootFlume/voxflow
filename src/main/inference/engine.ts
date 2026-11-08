@@ -71,6 +71,15 @@ export interface AsrEngine {
   vramEstimateMb(): number | null
 
   /**
+   * 引擎**自报**的显存占用（MB）——真值来源。
+   *
+   * 进程内 FFI 引擎可以读设备显存的加载前后差值，直接回答"我占了多少"，
+   * 不必去查别的进程（旧的 WMI/PowerShell 路线一次要 3.3s，且 Windows 下受限）。
+   * 不支持自报 → 不实现此方法（调用方回退到估算值）。
+   */
+  vramSelfReportedMb?(): number | null
+
+  /**
    * 引擎当前**子进程** PID（未加载/无子进程 → null）。
    *
    * 显存监控用它按 PID 精确取真值：按进程名求和会被残留或同名实例顶高

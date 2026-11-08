@@ -213,6 +213,10 @@ export interface GgmlApi {
   backend_load_all_from_path: (path: string) => void
   backend_dev_count: () => number
   backend_dev_get: (index: number) => Handle
+  /** 按名字取设备（如 "CUDA0"）；不存在 → null */
+  backend_dev_by_name: (name: string) => Handle | null
+  /** 读设备显存（字节）：free / total 各写一个 8 字节缓冲 */
+  backend_dev_memory: (dev: Handle, free: Buffer, total: Buffer) => void
 }
 
 export interface LlamaFfi {
@@ -334,7 +338,13 @@ export function loadLlamaFfi(libsDir: string): LlamaFfi {
       'const char *'
     ]),
     backend_dev_count: ggmlLib.func('ggml_backend_dev_count', 'size_t', []),
-    backend_dev_get: ggmlLib.func('ggml_backend_dev_get', voidPtr, ['int32_t'])
+    backend_dev_get: ggmlLib.func('ggml_backend_dev_get', voidPtr, ['int32_t']),
+    backend_dev_by_name: ggmlLib.func('ggml_backend_dev_by_name', voidPtr, ['const char *']),
+    backend_dev_memory: ggmlBase.func('ggml_backend_dev_memory', 'void', [
+      voidPtr,
+      'void *',
+      'void *'
+    ])
   }
 
   return {

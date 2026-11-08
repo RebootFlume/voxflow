@@ -18,7 +18,6 @@
  * - 记账：下载完成写 `.voxflow-manifest.json`（条目 id + repo@revision + 文件与大小）
  */
 
-import { execFile } from 'node:child_process'
 import {
   closeSync,
   existsSync,
@@ -41,7 +40,6 @@ import { connect as netConnect, type Socket } from 'node:net'
 import { basename, dirname, isAbsolute, join, parse as parsePath } from 'node:path'
 import type { Duplex, Readable } from 'node:stream'
 import { connect as tlsConnect } from 'node:tls'
-import { promisify } from 'node:util'
 
 import { defaultModelRoot, getDataRoot } from '../core/data-root'
 import { extractArchiveAsync } from '../core/extract'
@@ -577,21 +575,17 @@ function driveRootOf(path: string): string {
 /**
  * 指定目录所在卷的可用字节（Windows；其他平台读不到 → null = 不做预检）。
  *
- * Rust 用 Win32 `GetDiskFreeSpaceExW`（freeBytesAvailableToCaller）；
- * Node 的 `fs.statfsSync` 在 Windows 上正是同一口径（bavail × bsize），优先用它；
- * 取不到再退回 PowerShell 的 `[System.IO.DriveInfo]`。
- *
- * 异步返回：PowerShell 兜底曾用 `spawnSync`，最长把 Electron 主线程占住 15s
- * （窗口无响应）；现改为异步执行，调用方 await 即可。
+ * 口径：Rust 用 Win32 `GetDiskFreeSpaceExW`（freeBytesAvailableToCaller）；
+ * Node 的 `fs.statfsSync` 在 Windows 上正是同一口径（bavail × bsize），且毫秒级、
+ * 不阻塞主线程。旧实现在 statfs 失败时回退 PowerShell 的 `[System.IO.DriveInfo]`
+ * （要起一个外部进程，Windows 上还可能占住主线程数秒）—— 现已去掉。
  */
 export async function freeBytesForDir(path: string): Promise<number | null> {
   const drive = driveRootOf(path)
-  const fast = freeBytesViaStatfs(drive)
-  if (fast !== null) return fast
-  return freeBytesViaPowerShell(drive)
+  return freeBytesViaStatfs(drive)
 }
 
-/** statfs 快路径：与 PowerShell 同口径（bavail × bsize），毫秒级，不阻塞主线程 */
+/** statfs 快路径：bavail × bsize，毫秒级，不阻塞主线程 */
 function freeBytesViaStatfs(drive: string): number | null {
   try {
     const st = statfsSync(drive)
@@ -620,44 +614,11 @@ function freeBytesForDirSync(path: string): number | null {
 /** 兜底结果的缓存 TTL：成功 30s，失败 5s（失败后尽快能重试） */
 const FREE_BYTES_TTL_MS = 30_000
 const FREE_BYTES_FAIL_TTL_MS = 5_000
-/** 兜底结果缓存：盘符 → { value, at }（避免连续触发时反复起 PowerShell） */
+/** 兜底结果缓存：盘符 → { value, at }（statfs 读不到时用兜底值，避免反复读盘） */
 const freeBytesCache = new Map<string, { value: number | null; at: number }>()
 
 function freeBytesTtlMs(value: number | null): number {
   return value === null ? FREE_BYTES_FAIL_TTL_MS : FREE_BYTES_TTL_MS
-}
-
-/** execFile 的 Promise 包装（显式标注类型，不用 any） */
-const execFileAsync = promisify(execFile) as (
-  file: string,
-  args: string[],
-  options: { encoding: 'utf-8'; windowsHide: boolean; timeout: number }
-) => Promise<{ stdout: string; stderr: string }>
-
-/**
- * PowerShell 兜底：可用空间（字节）。
- *
- * 异步执行：`spawnSync` 会把 Electron 主线程占住最长 15s（窗口无响应）；
- * 结果按 TTL 缓存，连续触发时不重复起进程。
- */
-async function freeBytesViaPowerShell(drive: string): Promise<number | null> {
-  const hit = freeBytesCache.get(drive)
-  if (hit && Date.now() - hit.at < freeBytesTtlMs(hit.value)) return hit.value
-  const script = `$d = [System.IO.DriveInfo]::new('${drive.replace(/'/g, "''")}'); [int64]$d.AvailableFreeSpace`
-  try {
-    const { stdout } = await execFileAsync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
-      encoding: 'utf-8',
-      windowsHide: true,
-      timeout: 15000
-    })
-    const raw = (stdout ?? '').trim()
-    const value = /^\d+$/.test(raw) ? Number(raw) : null
-    freeBytesCache.set(drive, { value, at: Date.now() })
-    return value
-  } catch {
-    freeBytesCache.set(drive, { value: null, at: Date.now() })
-    return null
-  }
 }
 
 /** 模型根所在卷的可用字节（异步） */

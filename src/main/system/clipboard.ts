@@ -11,62 +11,29 @@
  */
 
 import { clipboard } from 'electron'
-import { spawn } from 'child_process'
 import { loadUiohook, UIKEY } from './uiohook'
+import { sendCtrlV } from '../core/win32/send-input'
 
 /** 睡眠（毫秒） */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-/** 模拟 Ctrl+V（uIOhook 优先；失败时回退 PowerShell SendInput） */
+/**
+ * 模拟 Ctrl+V（uIOhook 优先；失败时回退 Win32 SendInput）。
+ *
+ * 回退方案走 koffi 直调 user32.dll（旧实现是 PowerShell 现场编译 C# 注入，
+ * 既依赖 Windows 命令行工具，又要付一次 PowerShell 冷启动）。
+ */
 function tapCtrlV(): void {
   const hook = loadUiohook()
   if (hook) {
     hook.keyTap(UIKEY.V, [UIKEY.Ctrl])
     return
   }
-  fallbackSendInputCtrlV()
-}
-
-/**
- * 回退方案：PowerShell 调 user32.dll SendInput 发送 Ctrl+V。
- * 仅在 uIOhook 不可用时使用（例如原生模块 ABI 不匹配）。
- */
-function fallbackSendInputCtrlV(): void {
-  const script = `
-$code = @'
-using System;
-using System.Runtime.InteropServices;
-public class Win {
-  [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
-  [StructLayout(LayoutKind.Explicit, Size=40)] public struct INPUT { [FieldOffset(0)] public uint type; [FieldOffset(8)] public KEYBDINPUT ki; }
-  [DllImport("user32.dll", SetLastError=true)] public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
-}
-'@
-Add-Type -TypeDefinition $code
-$ctrlDown = New-Object Win+KEYBDINPUT
-$ctrlDown.wVk = 0x11
-$vDown = New-Object Win+KEYBDINPUT
-$vDown.wVk = 0x56
-$vUp = New-Object Win+KEYBDINPUT
-$vUp.wVk = 0x56
-$vUp.dwFlags = 2
-$ctrlUp = New-Object Win+KEYBDINPUT
-$ctrlUp.wVk = 0x11
-$ctrlUp.dwFlags = 2
-$inputs = New-Object Win+INPUT[] 4
-$inputs[0].type = 1; $inputs[0].ki = $ctrlDown
-$inputs[1].type = 1; $inputs[1].ki = $vDown
-$inputs[2].type = 1; $inputs[2].ki = $vUp
-$inputs[3].type = 1; $inputs[3].ki = $ctrlUp
-[void][Win]::SendInput(4, $inputs, [Win+INPUT].GetType().SizeOf)
-`
-  const child = spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
-    windowsHide: true,
-    stdio: 'ignore'
-  })
-  child.on('error', (e) => console.warn('[clipboard] SendInput 回退失败:', e.message))
+  if (!sendCtrlV()) {
+    console.warn('[clipboard] SendInput 回退失败（平台不支持或 user32 不可用）')
+  }
 }
 
 /**

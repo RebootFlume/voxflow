@@ -4,15 +4,15 @@
  * 对齐 Rust 版 `src-tauri/src/inference/device.rs`：
  * 从 `inference/engine.rs` 与 `inference/llama_server.rs` 抽出，
  * 供所有引擎（llama.cpp FFI worker / sherpa / pytorch）共用。
+ *
+ * 依赖说明：进程相关操作全部走 Win32 FFI（`core/win32/process-table`）
+ * + Node 内置 `process.kill`，**不依赖 PowerShell / netstat / taskkill**。
  */
 
-import { execFile } from 'node:child_process'
 import { createServer, Socket } from 'node:net'
-import { promisify } from 'node:util'
 import { log } from '../core/logger'
+import { listProcesses, type ProcessEntry } from '../core/win32/process-table'
 import { libsDir } from './runtime-paths'
-
-const execFileAsync = promisify(execFile)
 
 /** 推理设备 */
 export type Device =
@@ -64,88 +64,64 @@ export function normPath(p: string): string {
  * 只清理"自己的引擎进程"（本实例启动或本软件历史会话残留），
  * 绝不杀用户/第三方自装的引擎 —— 即使它恰好监听同一端口。
  */
-function isOurEngineExe(exe: string): boolean {
+export function isOurEngineExe(exe: string): boolean {
   const libs = libsDir()
   return normPath(exe).startsWith(normPath(libs))
 }
 
-/** 取进程可执行文件路径（PowerShell；仅 Windows 有效） */
-async function processExePath(pid: number): Promise<string | null> {
-  let stdout: string
-  try {
-    const out = await execFileAsync(
-      'powershell',
-      ['-NoProfile', '-Command', `(Get-Process -Id ${pid} -ErrorAction SilentlyContinue).Path`],
-      { windowsHide: true, maxBuffer: 1024 * 1024 }
-    )
-    stdout = out.stdout
-  } catch {
-    return null
-  }
-  const s = stdout.trim()
-  if (s === '') return null
-  return s
+/** 引擎进程筛选条件 */
+export interface EngineProcessFilter {
+  /**
+   * 只保留这些**可执行文件名**（大小写不敏感）。
+   * 不传 = 本软件 libs 目录下的全部引擎进程。
+   *
+   * 用文件名而不是全路径：调用方知道引擎 exe 的名字，但不知道它被装在哪一版运行库里。
+   */
+  exeNames?: string[]
 }
 
 /**
- * **批量**取多个 PID 的可执行文件路径（一次 PowerShell 调用）。
+ * 列出本软件 libs 目录下的引擎进程。
  *
- * 为什么要批量：之前是"每个 PID 起一次 PowerShell"（冷启动 ~0.3~0.5s/次），
- * 端口上常有 1~2 个 PID，串起来就是 1 秒左右的等待 —— 每次加载模型都要付一次。
- * 合成一次调用后只剩一次冷启动（实测 Get-Process 批量查 2 个 PID ≈ 210ms，
- * 其中绝大部分就是 PowerShell 冷启动）。
- *
- * 输出格式：`PID|路径`，用单引号 + `-f` 格式化，避免命令里出现双引号
- * （Node 传参 + PowerShell 二次解析时双引号最容易被吃掉）。
+ * 判定 = **可执行文件路径归属**（在本软件 libs 目录下），不是进程名 ——
+ * 用户自己装的同名引擎绝不能被误杀。
  */
-export async function processExePaths(pids: number[]): Promise<Map<number, string>> {
-  const out = new Map<number, string>()
-  if (pids.length === 0) return out
-  if (process.platform !== 'win32') return out
+export function listOurEngineProcesses(filter: EngineProcessFilter = {}): ProcessEntry[] {
+  const wanted = filter.exeNames?.map((n) => n.toLowerCase())
+  return listProcesses().filter((p) => {
+    if (!isOurEngineExe(p.exePath)) return false
+    if (!wanted || wanted.length === 0) return true
+    const base = p.exePath.replace(/^.*[\\/]/, '').toLowerCase()
+    return wanted.includes(base)
+  })
+}
 
-  const idList = pids.join(',')
-  try {
-    const r = await execFileAsync(
-      'powershell',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        `Get-Process -Id ${idList} -ErrorAction SilentlyContinue | ForEach-Object { '{0}|{1}' -f $_.Id, $_.Path }`
-      ],
-      { windowsHide: true, maxBuffer: 4 * 1024 * 1024 }
-    )
-    for (const line of r.stdout.split(/\r?\n/)) {
-      const t = line.trim()
-      if (t === '') continue
-      const idx = t.indexOf('|')
-      if (idx <= 0) continue
-      const pid = Number.parseInt(t.slice(0, idx), 10)
-      const path = t.slice(idx + 1).trim()
-      if (Number.isFinite(pid) && path !== '') out.set(pid, path)
-    }
-    return out
-  } catch {
-    // 批量查询失败 → 退回逐个查询（慢，但不会漏判）
-  }
-
+/**
+ * 杀掉指定 PID（Node 内置 `process.kill`；Windows 下等价于 TerminateProcess）。
+ *
+ * @returns 实际发出终止信号的 PID 列表（进程可能已经自己退了）
+ */
+export function killPids(pids: number[]): number[] {
+  const killed: number[] = []
   for (const pid of pids) {
-    const p = await processExePath(pid)
-    if (p) out.set(pid, p)
+    try {
+      process.kill(pid, 'SIGKILL')
+      killed.push(pid)
+    } catch {
+      // 进程可能已经自己退了 —— 忽略
+    }
   }
-  return out
+  return killed
 }
 
 /**
  * 清理「本软件 libs 目录下的引擎残留进程」（崩溃 / 被强杀留下的孤儿）。
  *
- * 为什么需要：用户强杀应用时，子进程（sherpa / python worker）
- * 会变成孤儿继续占着端口和显存；下次启动时端口守卫要一个个查路径再杀，
- * 慢且容易留下"端口通 = 假就绪"的怪状态。这里在启动后扫一遍，
- * 一次性把不属于本次会话的引擎清掉。
+ * 为什么需要：用户强杀应用时，子进程（sherpa server / python worker）
+ * 会变成孤儿继续占着端口和显存；下次启动时一次性把不属于本次会话的引擎清掉。
  *
- * 判定规则与端口守卫一致：**按可执行文件路径归属**（在本软件 libs 目录下），
- * 不是按进程名 —— 用户自己装的同名引擎绝不能被误杀。
+ * 实现：Win32 FFI 进程表（~10ms，无外部命令）→ 按路径归属筛选 → Node 内置终止。
+ * 旧实现是 PowerShell 全量 `Get-Process`（冷启动 1~3s，启动期最贵的一笔）。
  *
  * @param exclude 需要跳过的 PID（本次会话自己起的引擎）。传函数是为了**杀之前**再取一次，
  *               避免扫描快照之后我们新起的引擎被误杀。
@@ -156,48 +132,17 @@ export async function killOrphanEngineProcesses(
 ): Promise<number[]> {
   if (process.platform !== 'win32') return []
 
-  let stdout: string
-  try {
-    const r = await execFileAsync(
-      'powershell',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        "Get-Process -ErrorAction SilentlyContinue | ForEach-Object { try { '{0}|{1}' -f $_.Id, $_.Path } catch { } }"
-      ],
-      { windowsHide: true, maxBuffer: 8 * 1024 * 1024 }
-    )
-    stdout = r.stdout
-  } catch (e) {
-    log.warn(`[orphan-clean] 进程清单查询失败: ${e instanceof Error ? e.message : String(e)}`)
-    return []
-  }
-
-  const candidates: number[] = []
-  for (const line of stdout.split(/\r?\n/)) {
-    const t = line.trim()
-    if (t === '') continue
-    const idx = t.indexOf('|')
-    if (idx <= 0) continue
-    const pid = Number.parseInt(t.slice(0, idx), 10)
-    const path = t.slice(idx + 1).trim()
-    if (!Number.isFinite(pid) || path === '') continue
-    if (pid === process.pid) continue
-    if (!isOurEngineExe(path)) continue
-    candidates.push(pid)
-  }
+  const candidates = listOurEngineProcesses()
+    .map((p) => p.pid)
+    .filter((pid) => pid !== process.pid)
 
   const killed: number[] = []
   for (const pid of candidates) {
     // 杀之前再取一次排除集：扫描快照之后我们可能刚起了新引擎
     if (exclude().has(pid)) continue
-    try {
-      await execFileAsync('taskkill', ['/PID', String(pid), '/F'], { windowsHide: true })
+    if (killPids([pid]).length > 0) {
       killed.push(pid)
       log.warn(`[orphan-clean] 清理残留引擎 PID=${pid}`)
-    } catch {
-      // 进程可能已经自己退了 —— 忽略
     }
   }
   if (killed.length > 0) {
@@ -207,58 +152,26 @@ export async function killOrphanEngineProcesses(
 }
 
 /**
- * 杀掉占用指定端口的「本软件引擎」进程（仅 Windows）。
- * 判定依据 = 进程可执行文件是否在本软件 libs 目录下（路径归属），不是图像名：
- * - 自己的引擎 / 历史会话残留 → 杀掉（防止死进程占着固定端口造成"端口通=假就绪"）
- * - 用户或第三方自装的引擎（路径不在本软件目录）→ 不杀
- * - 无法读取路径的进程 → 保守不杀（宁可让后续走"端口被占"逻辑，也不误伤）
+ * 定向清理本软件引擎（按可执行文件名）。
+ *
+ * 用途：某类引擎要重新启动前，先把"上一会话残留的同款引擎"清掉
+ * （它们会占着固定端口，造成"端口通 = 假就绪"）。
+ * 只清**本软件 libs 下、同名**的进程，外部引擎（路径不在本软件目录）一律不碰。
+ *
+ * @returns 被杀掉的 PID 列表
  */
-export async function killPortOwner(port: number): Promise<void> {
-  if (process.platform !== 'win32') return
+export async function killOurEngineProcesses(filter: EngineProcessFilter): Promise<number[]> {
+  if (process.platform !== 'win32') return []
 
-  let stdout: string
-  try {
-    const out = await execFileAsync('netstat', ['-ano', '-p', 'tcp'], {
-      windowsHide: true,
-      maxBuffer: 8 * 1024 * 1024
-    })
-    stdout = out.stdout
-  } catch {
-    return
+  const candidates = listOurEngineProcesses(filter)
+    .map((p) => p.pid)
+    .filter((pid) => pid !== process.pid)
+
+  const killed = killPids(candidates)
+  if (killed.length > 0) {
+    log.warn(`[engine-clean] 清理本软件引擎进程 ${killed.join(', ')}`)
   }
-
-  const text = stdout
-  const needle = `:${port}`
-  const pids: number[] = []
-  for (const line of text.split(/\r?\n/)) {
-    if (!line.includes(needle) || !line.includes('LISTENING')) continue
-    const parts = line.trim().split(/\s+/)
-    const pid = Number.parseInt(parts[parts.length - 1] ?? '', 10)
-    if (Number.isFinite(pid) && !pids.includes(pid)) pids.push(pid)
-  }
-
-  // 一次性查出所有占用进程的路径（一次 PowerShell 调用，而不是每个 PID 一次）
-  const exeMap = await processExePaths(pids)
-
-  for (const pid of pids) {
-    const exe = exeMap.get(pid)
-    if (!exe) {
-      log.warn(`[port-guard] 端口 ${port} 的 PID=${pid} 无法确认路径，保守跳过（不误杀）`)
-      continue
-    }
-    if (!isOurEngineExe(exe)) {
-      log.warn(
-        `[port-guard] 端口 ${port} 被外部进程占用（${exe}，非本软件引擎），不杀 —— 需要走换端口/报错逻辑`
-      )
-      continue
-    }
-    log.warn(`[port-guard] 清理本软件残留引擎 PID=${pid}（${exe}）`)
-    try {
-      await execFileAsync('taskkill', ['/PID', String(pid), '/F'], { windowsHide: true })
-    } catch {
-      // 进程可能已经自己退了 —— 忽略
-    }
-  }
+  return killed
 }
 
 /**

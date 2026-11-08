@@ -16,7 +16,14 @@ import WebSocket from 'ws'
 import { log } from '../core/logger'
 import { findSpec, mainModelFile, modelDir } from '../models/model-manager'
 import { sherpaExe } from './runtime-paths'
-import { findFreePort, killPortOwner, portServing, waitPortClosed, PROBE_TIMEOUT } from './device'
+import {
+  findFreePort,
+  killOurEngineProcesses,
+  portBindable,
+  portServing,
+  waitPortClosed,
+  PROBE_TIMEOUT
+} from './device'
 import type { AsrEngine, AsrStageCallback } from './engine'
 
 const SHERPA_WS_EXE = 'sherpa-onnx-offline-websocket-server.exe'
@@ -153,11 +160,12 @@ export class SherpaAsrEngine {
     }
 
     // 清端口残留：死会话留下的孤儿 sherpa 服务器占着 9002 会让"端口通=就绪"假命中。
-    await killPortOwner(DEFAULT_PORT)
+    // 只清"本软件 libs 下、同名"的 sherpa server（路径归属判定），外部引擎一律不碰。
+    await killOurEngineProcesses({ exeNames: [SHERPA_WS_EXE] })
     await waitPortClosed(DEFAULT_PORT, 3000)
-    // 外部进程（非本软件引擎，路径判定拒杀）仍占用 → 不杀，自动换空闲端口
+    // 端口仍被外部进程占用 → 不杀，自动换空闲端口（bind 探测，Node 原生）
     let port = DEFAULT_PORT
-    if (await portServing(DEFAULT_PORT, PROBE_TIMEOUT)) {
+    if (!(await portBindable(DEFAULT_PORT))) {
       const free = await findFreePort(DEFAULT_PORT + 1)
       if (free === null) {
         throw new Error(`端口 ${DEFAULT_PORT} 被外部进程占用且无空闲端口可用`)

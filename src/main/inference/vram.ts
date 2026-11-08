@@ -14,7 +14,8 @@
  * - **权重 / mmproj**：直接用文件字节数（量化权重驻留显存时就是文件大小）。
  * - **KV**：从 GGUF 元数据读几何（层数 / KV 头数 / head_dim）后精确计算，不猜。
  * - **固定开销**：CUDA 上下文 + cuBLAS 工作区 + 计算缓冲，取本机实测常数（见下）。
- * - 真值（驱动口径）由本模块的「按进程查询」（WMI 计数器）给出；本模块负责**可预测的预估值**。
+ * - 真值（驱动口径）由**引擎自报**给出（进程内 FFI 引擎读设备显存加载前后差值）；
+ *   本模块负责**可预测的预估值**，作为无法自报时的兜底。
  */
 
 import { spawn } from 'node:child_process'
@@ -542,17 +543,18 @@ export function setFrameworkGpuSources(sources: readonly FrameworkGpuSource[]): 
   frameworkSources = sources
 }
 
-/** 推理引擎注册表提供的运行时钩子（由主进程入口注入；不注入则退化为只按 WMI/进程名判定） */
+/** 推理引擎注册表提供的运行时钩子（由主进程入口注入；不注入则只有估算值） */
 export interface VramRuntimeHooks {
   /** 某框架当前子进程 PID（精确来源） */
   enginePid?: (frameworkId: string) => number | null
+  /** 某框架引擎**自报**的显存占用（MiB，真值来源） */
+  engineVramMb?: (frameworkId: string) => number | null
   /** 某框架 active 时的估算显存（MiB；引擎已卸载自动排除） */
   activeEngineVramMb?: (frameworkId: string) => number | null
   /**
    * 当前是否**有任意引擎常驻**（ASR/TTS 任一已加载）。
    *
-   * 显存面板的 per-framework 明细只对「正在跑的引擎」有意义；空闲时查 WMI 纯浪费
-   * （一次 3.3s 的 PowerShell）。没有这个信号时退回旧行为（照查），保证不误丢数据。
+   * 显存面板的 per-framework 明细只对「正在跑的引擎」有意义；空闲时查询纯属浪费。
    */
   anyActive?: () => boolean
 }
@@ -564,98 +566,13 @@ export function setVramRuntimeHooks(hooks: VramRuntimeHooks | null): void {
   runtimeHooks = hooks
 }
 
-/**
- * 按进程读 GPU 显存**真值**（Windows：WMI GPU Process Memory 计数器）。
- *
- * 为什么不用 nvidia-smi：Windows/WDDM 下 `--query-compute-apps` 的 used_memory 全是 N/A
- * （本机实测 `[Insufficient Permissions], [N/A]`），旧实现因此只能回退成「模型目录大小」
- * ——把文件体积当显存，系统性少算 KV + 固定开销（本机实测差 ~1.3 GiB）。
- * WMI 计数器给的是驱动口径的 DedicatedUsage，无需管理员（本机实测与进程一一对应）。
- * 非 Windows 返回空表 → 调用方回退 nvidia-smi。
- */
-export async function wmiGpuProcessRows(): Promise<Array<[number, string, number]>> {
-  if (process.platform !== 'win32') return []
-  // 一次 PowerShell 拿全部（逐行查 Win32_Process 太慢）；>50MB 才回传，行数很少
-  const script = `
-$procs = @{}
-Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | ForEach-Object { $procs[[int]$_.ProcessId] = $_.Name }
-Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory -ErrorAction SilentlyContinue |
-  Where-Object { $_.DedicatedUsage -gt 52428800 } |
-  ForEach-Object {
-    $p = [int]($_.Name -replace '^pid_(\d+)_.*$', '$1')
-    if ($procs.ContainsKey($p)) { '{0},{1},{2}' -f $p, $procs[$p], [int]($_.DedicatedUsage / 1MB) }
-  }
-`
-  const out = await runCommand('powershell', ['-NoProfile', '-NonInteractive', '-Command', script])
-  if (!out.ok) return []
-  return parseWmiRows(out.stdout)
-}
-
-/**
- * WMI 进程显存查询（带 TTL 缓存 + 单飞）。
- *
- * 这条查询实测 **3.3 秒**（PowerShell 冷启动 + 两次 CIM 查询，
- * 其中 GPU 性能计数器首次访问还要建缓存，可能更久）。
- * 渲染侧轮询间隔是 15s，TTL 取 20s（> 轮询间隔）⇒ 连续两次轮询最多只付一次代价；
- * 并发调用共享同一个 in-flight Promise，不会把 PowerShell 进程堆起来。
- */
-const wmiRowsCached = cachedAsync(() => wmiGpuProcessRows(), 20_000)
-
-/** WMI 进程显存查询（缓存版） */
-export function wmiGpuProcessRowsCached(): Promise<Array<[number, string, number]>> {
-  return wmiRowsCached()
-}
-
-/** 解析 WMI 输出行（`pid,name,MB`）——纯函数，便于单测 */
-export function parseWmiRows(stdout: string): Array<[number, string, number]> {
-  const rows: Array<[number, string, number]> = []
-  for (const line of stdout.split(/\r?\n/)) {
-    const it = line.trim().split(',')
-    const pid = Number((it[0] ?? '').trim())
-    const name = (it[1] ?? '').trim()
-    const mb = Number((it[2] ?? '').trim())
-    if (!Number.isFinite(pid) || !Number.isFinite(mb)) continue
-    rows.push([pid, name, mb])
-  }
-  return rows
-}
-
-/**
- * 查询指定进程名的显存占用（MB）——按 PID 匹配 nvidia-smi
- * 无管理员权限时返回 null（前端显示「不可用」）
- */
-export async function vramOfProcess(name: string): Promise<number | null> {
-  // 找进程 PID
-  const psCmd = `Get-Process '${name}' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id`
-  const ps = await runCommand('powershell', ['-NoProfile', '-Command', psCmd])
-  if (!ps.ok) return null
-  const pidRaw = ps.stdout.trim()
-  if (!/^\d+$/.test(pidRaw)) return null
-  const pid = Number(pidRaw)
-  // nvidia-smi 按 PID 查
-  const smi = await runCommand('nvidia-smi', [
-    '--query-compute-apps=pid,used_memory',
-    '--format=csv,noheader,nounits'
-  ])
-  if (!smi.ok) return null
-  for (const line of smi.stdout.split(/\r?\n/)) {
-    const parts = line.split(',')
-    const pidStr = (parts[0] ?? '').trim()
-    if (!/^\d+$/.test(pidStr) || Number(pidStr) !== pid) continue
-    const mbRaw = (parts[1] ?? '').trim()
-    if (!/^\d+$/.test(mbRaw)) return null
-    return Number(mbRaw)
-  }
-  return null
-}
-
 /** 显存状态（对应 Rust Tauri 命令 `get_vram_status` 的返回形状） */
 export interface VramStatus {
   available: boolean
   gpu_name: string
   total_mb: number
   used_mb: number
-  /** 框架 id → 占用（未加载不出现）。source：wmi=驱动真值 / smi=nvidia-smi / estimate=预估 / pid=本进程 */
+  /** 框架 id → 占用（未加载不出现）。source：engine=引擎自报真值 / estimate=预估 */
   frameworks: Record<string, { mb: number; source: string }>
 }
 
@@ -678,39 +595,14 @@ export async function getVramStatus(): Promise<VramStatus> {
   const gpu = await gpuInfoCached()
   const usedMb = (await smiUsedCached()) ?? 0
 
-  // 没有引擎常驻 ⇒ 不可能有框架占用明细，WMI 查询直接跳过
-  const anyActive = runtimeHooks?.anyActive ? runtimeHooks.anyActive() : true
-  // WMI 查询走 TTL(20s) 缓存 + 单飞（实测一次 3.3s）
-  const rows = anyActive ? await wmiGpuProcessRowsCached() : []
-  const byPid = new Map<number, number>()
-  const byName = new Map<string, number>()
-  for (const [pid, name, mb] of rows) {
-    byPid.set(pid, mb)
-    const key = name.toLowerCase()
-    byName.set(key, (byName.get(key) ?? 0) + mb)
-  }
-
   const byEngine = new Map<string, { mb: number; source: string }>()
   for (const fw of frameworkSources) {
     let hit: { mb: number; source: string } | undefined
-    // 1) 本引擎的子进程（精确；残留实例不会被算进来）
-    const ourPid = runtimeHooks?.enginePid?.(fw.id) ?? null
-    if (ourPid !== null) {
-      const mb = byPid.get(ourPid)
-      if (mb !== undefined) hit = { mb, source: 'pid' }
-    }
-    // 2) 按进程名求和（WMI 驱动真值）
-    if (!hit && fw.processName) {
-      const mb = byName.get(fw.processName.toLowerCase())
-      if (mb !== undefined) hit = { mb, source: 'wmi' }
-    }
-    // 3) nvidia-smi 按进程名查：仅 Windows 的 WMI 真值不可用（查询失败）时兜底，
-    //    且必须确有引擎常驻 —— 否则每轮多起 6 个进程，纯浪费
-    if (!hit && anyActive && rows.length === 0 && fw.processName) {
-      const mb = await vramOfProcess(fw.processName)
-      if (mb !== null) hit = { mb, source: 'smi' }
-    }
-    // 4) 注册表估算（仅引擎 active 时）
+    // 1) 引擎自报（真值）：进程内 FFI 引擎读设备显存的加载前后差值，
+    //    直接回答"我占了多少"—— 不必去查别的进程（旧的 WMI/PowerShell 路线一次 3.3s）
+    const self = runtimeHooks?.engineVramMb?.(fw.id) ?? null
+    if (self !== null) hit = { mb: self, source: 'engine' }
+    // 2) 注册表估算（引擎在跑、但无法自报时的兜底）
     if (!hit) {
       const mb = runtimeHooks?.activeEngineVramMb?.(fw.id) ?? null
       if (mb !== null) hit = { mb, source: 'estimate' }

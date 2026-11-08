@@ -104,6 +104,16 @@ export class LlamaFfiAdapter implements AsrEngine {
     }
   }
 
+  /**
+   * 引擎**自报**的显存占用（MiB）——真值来源。
+   *
+   * 优先于估算值：进程内 FFI 引擎能读设备显存的加载前后差值，直接回答
+   * "我占了多少显存"，不必去查别的进程。
+   */
+  vramSelfReportedMb(): number | null {
+    return this.host.vramMb()
+  }
+
   /** worker 进程 PID（显存监控按 PID 取真值） */
   pid(): number | null {
     return this.host.pid()
