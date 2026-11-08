@@ -109,10 +109,10 @@ export function rustCheckVram(name: string, device: string): Promise<{
 }
 
 // ============================================================
-// llama-server 子进程桥接（ASR 主力路线）
+// ASR 桥接（主力 ASR 入口，支持导出）
 // ============================================================
 
-/** 通过 llama-server 转写音频文件（主力 ASR 入口，支持导出） */
+/** 转写音频文件（主力 ASR 入口，支持导出） */
 export function rustTranscribeLlama(
   filePath: string,
   exportDir?: string,

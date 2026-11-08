@@ -12,7 +12,11 @@ export default defineConfig({
     build: {
       outDir: 'out/main',
       rollupOptions: {
-        input: { index: resolve(__dirname, 'src/main/index.ts') }
+        input: {
+          index: resolve(__dirname, 'src/main/index.ts'),
+          // 进程内 FFI 推理 worker：主进程 fork 它，把原生 DLL 的崩溃隔离在子进程里
+          worker: resolve(__dirname, 'src/main/inference/llama-ffi/worker.ts')
+        }
       }
     }
   },

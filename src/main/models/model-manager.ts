@@ -92,7 +92,9 @@ export const FRAMEWORKS: readonly FrameworkSpec[] = [
     mainExts: ['.gguf'],
     filePolicy: 'largest',
     usesMmproj: true,
-    processName: 'llama-server'
+    // gguf 引擎跑在本软件的 FFI worker 进程里（不是独立 exe），按 PID 归因即可，
+    // 没有可按名字匹配的外部进程
+    processName: null
   },
   {
     id: 'onnx',
@@ -170,7 +172,7 @@ function config(): RuntimeConfig {
 }
 
 /**
- * 回环永不走代理：所有本地 HTTP 客户端（llama-server 健康检查/转写/chat）都挂这条规则。
+ * 回环永不走代理：所有本地 HTTP 客户端（sherpa 健康检查/转写/chat）都挂这条规则。
  * 否则用户环境里的 `HTTP_PROXY` 会让 127.0.0.1 的请求绕一圈（实测：curl 走代理时仍返回 200，
  * 但代理一旦不可用，整个 ASR 就挂）。
  */
@@ -200,7 +202,7 @@ export function adoptProxyEnv(): string {
   // （删掉才能保证「代理只有一个来源」）。Node 内置 fetch / undici **不会**隐式读
   // HTTP_PROXY（除非显式开 NODE_USE_ENV_PROXY），因此本移植**保留**环境变量：
   // 删掉对"单一来源"没有收益，却会连带影响本进程拉起的子进程
-  // （llama-server / sherpa / python worker）与用户的其它期望。
+  // （sherpa / python worker）与用户的其它期望。
   // 代理仍然只经 `httpFetch(..., proxy)` 显式下发，行为与 Rust 版一致。
   return cfg.proxy
 }
@@ -312,7 +314,7 @@ export function resolveDownloadDir(root: string, name: string): string {
 
 /**
  * 引擎目录（= 描述符的 engine_id 目录名；未收录模型回退展示名）。
- * 引擎侧（llama-server / sherpa）查找模型目录时用这个。
+ * 引擎侧（llama.cpp FFI / sherpa）查找模型目录时用这个。
  */
 export function engineDir(name: string): string {
   const root = getModelRoot()
@@ -1783,7 +1785,7 @@ export function isDownloading(name: string): boolean {
   return ACTIVE.has(name)
 }
 
-/** llama-server 的默认 ctx（对齐 Rust `inference::llama_server::DEFAULT_CTX_SIZE`） */
+/** llama.cpp 推理的默认 ctx（与历史 llama-server 路线保持一致） */
 const DEFAULT_CTX_SIZE = 2048
 
 /**

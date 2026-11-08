@@ -244,7 +244,7 @@ export function frameworkOptionsOf(
  * 同一个引擎可能有多个包（PyTorch 的 cpu / cuda130），它们的 `name` **都是 "PyTorch"** ——
  * 直接 `map(p => p.name).join(" / ")` 会渲染成 "PyTorch / PyTorch"，用户看到的就是
  * "为什么 PyTorch 变成两个包"。所以重名时才补变体：`PyTorch (cpu)` / `PyTorch (cuda130)`；
- * 不重名则保持原名（llama-server、sherpa-onnx 不受影响）。
+ * 不重名则保持原名（llama.cpp、sherpa-onnx 不受影响）。
  */
 export function runtimePackageLabels(
   pkgs: { name: string; variant?: string | null }[],

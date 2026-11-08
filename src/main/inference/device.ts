@@ -3,7 +3,7 @@
  *
  * 对齐 Rust 版 `src-tauri/src/inference/device.rs`：
  * 从 `inference/engine.rs` 与 `inference/llama_server.rs` 抽出，
- * 供所有引擎（llama-server / sherpa / 未来 C-API worker / pytorch）共用。
+ * 供所有引擎（llama.cpp FFI worker / sherpa / pytorch）共用。
  */
 
 import { execFile } from 'node:child_process'
@@ -139,7 +139,7 @@ export async function processExePaths(pids: number[]): Promise<Map<number, strin
 /**
  * 清理「本软件 libs 目录下的引擎残留进程」（崩溃 / 被强杀留下的孤儿）。
  *
- * 为什么需要：用户强杀应用时，子进程（llama-server / sherpa / python worker）
+ * 为什么需要：用户强杀应用时，子进程（sherpa / python worker）
  * 会变成孤儿继续占着端口和显存；下次启动时端口守卫要一个个查路径再杀，
  * 慢且容易留下"端口通 = 假就绪"的怪状态。这里在启动后扫一遍，
  * 一次性把不属于本次会话的引擎清掉。

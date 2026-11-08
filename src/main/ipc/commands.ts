@@ -18,7 +18,7 @@ import { getDataDir, readDataFile, removeDataFile, writeDataFile } from '../core
 import { log } from '../core/logger'
 import { decodeAny } from '../audio'
 import { registry, findModelSpec } from '../inference/registry'
-import { llamaEngine } from '../inference/llama-server'
+import { llamaEngine } from '../inference/llama-ffi'
 import { transcribeFileWithProgress } from '../inference/transcribe-file'
 import { getGpuInfo, getVramStatus } from '../inference/vram'
 import {

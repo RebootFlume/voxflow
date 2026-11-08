@@ -19,7 +19,7 @@ export function libsDir(): string {
   return join(exeDir(), 'libs')
 }
 
-/** llama-cpp 运行时目录（含 llama-server.exe） */
+/** llama-cpp 运行时目录（含 llama.dll / mtmd.dll / ggml*.dll） */
 export function llamaRuntimeDir(): string {
   return join(libsDir(), 'llama-cpp')
 }

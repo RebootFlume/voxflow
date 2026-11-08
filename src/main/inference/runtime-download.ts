@@ -159,7 +159,7 @@ export const RUNTIME_PACKAGES: RuntimePkg[] = [
     variant: '',
     supportsCpu: true,
     supportsCuda: true,
-    name: 'llama-server',
+    name: 'llama.cpp',
     version: 'b10622',
     sha256: '',
     auxSha256: '',
@@ -172,6 +172,8 @@ export const RUNTIME_PACKAGES: RuntimePkg[] = [
     auxFiles: ['cudart64_12.dll', 'cublas64_12.dll', 'cublasLt64_12.dll'],
     innerDir: 'llama-b10622-bin-win-cuda-12.4-x64',
     targetDir: 'llama-cpp',
+    // marker 仍是 llama-server.exe：老版本已经用它判过「运行时已安装」，
+    // 换成 llama.dll 会让存量安装被判成缺失、重新下载 1GB。包里两者都有，marker 只是证据。
     marker: 'llama-server.exe',
     portBase: 0,
     smokeArgs: ['--port', '$PORT', '--no-webui'],

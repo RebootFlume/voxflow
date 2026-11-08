@@ -3,7 +3,7 @@
  * —— 对齐 Rust 版 `src-tauri/src/tts/engine/sherpa.rs`。
  *
  * 架构：调用 `libs/sherpa-onnx/bin/sherpa-onnx-offline-tts.exe` 子进程合成音频，
- * 与 ASR 的 llama-server 子进程一致 —— 推理框架与桌面应用进程隔离。
+ * 与 ASR 的 llama.cpp FFI worker 一致 —— 推理框架与桌面应用进程隔离。
  *
  * 要点：
  * - 模型差异全部收敛在 `ModelSpec` 描述符（spec-data.ts），本文件**无模型分支**。

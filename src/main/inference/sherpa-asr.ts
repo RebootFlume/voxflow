@@ -5,7 +5,7 @@
  * 架构：启动 `sherpa-onnx-offline-websocket-server.exe` 子进程，
  * 通过 websocket 送 PCM（二进制帧）取回识别文本。
  *
- * 与 llama-server 的差别只在"怎么送音频"：llama 走 HTTP multipart，
+ * 与 llama.cpp FFI 的差别只在"怎么送音频"：llama 走进程内 FFI，
  * sherpa 走 websocket 二进制帧（int32 sample_rate + int32 byte_size + float32 samples）。
  */
 

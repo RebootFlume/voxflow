@@ -2,7 +2,7 @@
  * ASR 引擎注册表：统一路由 + 互斥
  * —— 对齐 Rust 版 `src-tauri/src/inference/registry.rs`。
  *
- * 所有 ASR 框架（llama-server / sherpa-onnx / 未来 PyTorch）实现 `AsrEngine`
+ * 所有 ASR 框架（llama.cpp FFI / sherpa-onnx / 未来 PyTorch）实现 `AsrEngine`
  * 接口后注册到这里。上层（加载模型、热键录音转写、显存监控）只依赖本模块，
  * 不感知具体框架 —— 新增框架只需「实现接口 + 注册一行」。
  *
@@ -11,23 +11,21 @@
 
 import { log } from '../core/logger'
 import type { AsrEngine } from './engine'
-import { LlamaAsrAdapter, lastRequestedModel, recordLastRequested } from './llama-server'
+import { llamaFfiAdapter } from './llama-ffi'
+import { lastRequestedModel, recordLastRequested } from './asr-request'
 import { SherpaAsrAdapter } from './sherpa-asr'
 import { PyTorchAsrAdapter } from './pytorch-asr'
-import { SPECS, type ModelSpec } from '../models/spec-data'
+import type { ModelSpec } from '../models/spec-data'
+import { findAsrModelSpec } from './asr-target'
 
-/** 归一化：大小写不敏感 + 去掉 - 和 _（"Kokoro-v1_0" → "kokorov10"） */
-function norm(s: string): string {
-  return s.toLowerCase().replace(/[-_]/g, '')
-}
-
-/** 按别名查找模型描述符（精确 id > 归一化 id > 归一化目录名 > 归一化展示名） */
+/**
+ * 按别名查找模型描述符（精确 id > 归一化 id > 归一化展示名 > 族前缀兜底）。
+ *
+ * 实现放在 `asr-target.ts`（模型名 → 运行时文件的解析是引擎无关的），
+ * 这里只是保留旧名字给现有调用方。
+ */
 export function findModelSpec(input: string): ModelSpec | undefined {
-  for (const m of SPECS) if (m.id === input || m.name === input) return m
-  const ni = norm(input)
-  return SPECS.find(
-    (m) => norm(m.id) === ni || norm(m.name) === ni
-  )
+  return findAsrModelSpec(input)
 }
 
 /** 已注册的 ASR 引擎（顺序 = 加载优先级：gguf 主引擎在前） */
@@ -36,7 +34,8 @@ export class AsrRegistry {
   private activeFramework = ''
 
   constructor() {
-    this.register('gguf', new LlamaAsrAdapter())
+    // gguf → llama.cpp 进程内 FFI（llama.dll + mtmd.dll，worker 子进程隔离崩溃）
+    this.register('gguf', llamaFfiAdapter)
     // onnx → sherpa-onnx websocket server（低端设备引擎）
     this.register('onnx', new SherpaAsrAdapter())
     // pytorch → 独立 Python worker（按需下载运行时；模型适配器在运行时白名单里）

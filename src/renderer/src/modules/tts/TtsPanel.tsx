@@ -405,7 +405,7 @@ function useVoiceLibrary(): VoiceLibraryApi {
     }
   }
 
-  /** 自动转写参考文本（复用 llama-server ASR；首次会加载 ASR 模型，较慢；失败不阻断保存） */
+  /** 自动转写参考文本（复用 ASR 引擎；首次会加载 ASR 模型，较慢；失败不阻断保存） */
   async function transcribe() {
     if (transcribeBusy || !modal || modal.kind !== "add" || !modal.sourcePath) return;
     const sourcePath = modal.sourcePath;
