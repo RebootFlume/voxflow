@@ -33,6 +33,8 @@
     "verify:api": "node scripts/verify-api-server.mjs",
     "verify:real": "node scripts/verify-real-inference.mjs",
     "install:runtime": "node scripts/install-runtime.mjs",
+    "check:updates": "node scripts/check-runtime-updates.mjs",
+    "check:abi": "node scripts/check-runtime-abi.mjs",
     "test:tts": "node scripts/run-ts-tests.mjs scripts/tts-tests.ts",
     "screenshot": "node scripts/screenshot.mjs"
   },

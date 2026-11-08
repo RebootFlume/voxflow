@@ -295,7 +295,15 @@ const generationConfig = koffi.struct('SherpaGenerationConfig', {
   reference_sample_rate: 'int32_t',
   reference_text: C,
   num_steps: 'int32_t',
-  extra: C
+  extra: C,
+  /** v2.0.0 新增：预音素化输入（Unicode 码点）。本集成走 lexicon，恒为 null。 */
+  phoneme_codepoints: koffi.pointer('int32_t'),
+  phoneme_codepoints_lens: koffi.pointer('int32_t'),
+  phoneme_codepoints_num_sentences: 'int32_t',
+  /** v2.0.0 新增：预分词输入（如拼音）。本集成不使用，恒为 null。 */
+  tokens: koffi.pointer(C),
+  tokens_lens: koffi.pointer('int32_t'),
+  tokens_num_sentences: 'int32_t'
 })
 
 /** 构造合成参数时的入参（参考音频是浮点采样，不是路径） */
@@ -438,7 +446,13 @@ export function loadSherpaFfi(runtimeDir: string): SherpaFfi {
         reference_sample_rate: input.referenceSampleRate,
         reference_text: input.referenceText,
         num_steps: 0,
-        extra: ''
+        extra: '',
+        phoneme_codepoints: null,
+        phoneme_codepoints_lens: null,
+        phoneme_codepoints_num_sentences: 0,
+        tokens: null,
+        tokens_lens: null,
+        tokens_num_sentences: 0
       })
       // keepAlive 必须由调用方持有到调用结束，否则浮点缓冲会被 GC，指针悬空
       return { handle: buffer, keepAlive: audioBuf }

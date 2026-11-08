@@ -234,7 +234,14 @@ npm run test:tts          # TTS 单元测试（纯逻辑，无需运行时）
 npm run screenshot        # 截图到 %TEMP%
 
 npm run install:runtime 9222 gguf   # 真实安装运行时（数百 MB，人工验证用）
+
+npm run check:updates     # 查三个推理框架的官方最新版本（只报告，不下载）
+npm run check:abi         # 校验 koffi 绑定与官方头文件的结构体字段是否一致
 ```
+
+> 升级推理框架（llama.cpp / sherpa-onnx / audio.cpp）前先读 [docs/upgrade-runtime.md](docs/upgrade-runtime.md)：
+> 三个框架都把 C ABI 手工复述成 koffi 绑定，头文件结构体一变，绑定层不会报错、只会静默读错位，
+> 所以升级流程里 `npm run check:abi` 是必做步骤。
 
 ### 已知偏差（与 Tauri 版）
 

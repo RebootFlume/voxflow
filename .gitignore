@@ -12,6 +12,9 @@ dist-bundle
 # 推理框架运行时包（llama.cpp / sherpa-onnx / audio.cpp，用户在「推理框架」页下载解压到 exe 旁 libs/）
 /libs/
 
+# ABI 校验缓存（scripts/check-runtime-abi.mjs 拉下来的官方头文件）
+/.cache/
+
 # sherpa-onnx 服务端自己写的日志（落在工作目录）
 log.txt
 
