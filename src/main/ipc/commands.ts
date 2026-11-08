@@ -460,7 +460,7 @@ export const commands: Record<string, CommandHandler> = {
     // 双保险：即使 active 判定异常，也把两个引擎都停掉（对齐 Rust 版）
     await llamaEngine.unload()
     // 走注册表卸载：注册表里的 activeFramework 缓存会被一起清掉
-    // （直接调 globalSherpaEngine().unload() 会把缓存留在 'onnx'）。
+    // （直接调 sherpaFfiAdapter.unload() 会把缓存留在 'onnx'）。
     await registry().unload('onnx')
     return { ok: true, loaded: false }
   },
@@ -515,9 +515,9 @@ export const commands: Record<string, CommandHandler> = {
   }),
 
   rust_unload_sherpa_asr: async () => {
-    // 走注册表卸载：SherpaAsrAdapter 包的就是全局单例（sherpa-asr.ts:300-301），
+    // 走注册表卸载：SherpaFfiAdapter 就是注册表里的那个单例，
     // 效果一样，但注册表会顺手清掉 activeFramework 缓存 —— 之前这里直接调
-    // globalSherpaEngine().unload() 绕过了注册表，缓存停在 'onnx'，
+    // 绕过注册表直接 unload 会让缓存停在 'onnx'，
     // 上层以为引擎还在跑 → 跳过重载 → 报「sherpa ASR 未加载」。
     await registry().unload('onnx')
     return { status: 'unloaded' }

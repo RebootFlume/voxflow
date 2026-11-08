@@ -74,8 +74,20 @@ export type ArgSpec =
 
 export type BackendSpec =
   | { type: 'llama' }
-  | { type: 'sherpaWs'; flag: string }
-  | { type: 'sherpaTts'; cli: ArgSpec[]; requiredFiles: string[] }
+  | {
+      /** sherpa-onnx ASR（进程内 FFI）：family 决定模型路径放哪个 C 子结构体 */
+      type: 'sherpaAsr'
+      family: 'paraformer' | 'sense_voice' | 'whisper' | 'transducer' | 'nemo_ctc'
+      /** 该族支持指定语言时使用（空 = 自动） */
+      language?: string
+    }
+  | {
+      /** sherpa-onnx TTS（进程内 FFI）：family 决定 C 子结构体，cli 描述字段与文件 */
+      type: 'sherpaTts'
+      family: 'vits' | 'matcha' | 'kokoro' | 'kitten' | 'zipvoice' | 'pocket' | 'supertonic'
+      cli: ArgSpec[]
+      requiredFiles: string[]
+    }
   | { type: 'pytorch'; adapter: string; language: string; voice: string }
 
 export interface ModelSpec {
@@ -204,7 +216,7 @@ export const SPECS: ModelSpec[] = [
         languages: [],
         languageMode: 'fixed',
         voiceMode: { type: 'fixed' },
-        backend: { type: 'sherpaWs', flag: "--sense-voice-model" },
+        backend: { type: 'sherpaAsr', family: 'sense_voice' },
     },
     {
         id: "sherpa-onnx-paraformer-zh-small-2024-03-09",
@@ -223,7 +235,7 @@ export const SPECS: ModelSpec[] = [
         languages: [],
         languageMode: 'fixed',
         voiceMode: { type: 'fixed' },
-        backend: { type: 'sherpaWs', flag: "--paraformer" },
+        backend: { type: 'sherpaAsr', family: 'paraformer' },
     },
     
     {
@@ -243,7 +255,7 @@ export const SPECS: ModelSpec[] = [
         languages: ["zh", "en"],
         languageMode: 'auto',
         voiceMode: { type: 'preset', count: 103, speakersFile: "speakers.json", perLanguage: false },
-        backend: { type: 'sherpaTts', cli: [
+        backend: { type: 'sherpaTts', family: 'kokoro', cli: [
                 { type: 'file', flag: "--kokoro-model", value: "model.onnx" },
                 { type: 'file', flag: "--kokoro-voices", value: "voices.bin" },
                 { type: 'file', flag: "--kokoro-tokens", value: "tokens.txt" },
@@ -278,7 +290,7 @@ export const SPECS: ModelSpec[] = [
         languages: ["zh", "en"],
         languageMode: 'auto',
         voiceMode: { type: 'preset', count: 53, speakersFile: "speakers.json", perLanguage: false },
-        backend: { type: 'sherpaTts', cli: [
+        backend: { type: 'sherpaTts', family: 'kokoro', cli: [
                 { type: 'file', flag: "--kokoro-model", value: "model.onnx" },
                 { type: 'file', flag: "--kokoro-voices", value: "voices.bin" },
                 { type: 'file', flag: "--kokoro-tokens", value: "tokens.txt" },
@@ -313,7 +325,7 @@ export const SPECS: ModelSpec[] = [
         languages: ["en"],
         languageMode: 'fixed',
         voiceMode: { type: 'preset', count: 11, speakersFile: "speakers.json", perLanguage: false },
-        backend: { type: 'sherpaTts', cli: [
+        backend: { type: 'sherpaTts', family: 'kokoro', cli: [
                 { type: 'file', flag: "--kokoro-model", value: "model.onnx" },
                 { type: 'file', flag: "--kokoro-voices", value: "voices.bin" },
                 { type: 'file', flag: "--kokoro-tokens", value: "tokens.txt" },
@@ -349,7 +361,7 @@ export const SPECS: ModelSpec[] = [
         languages: ["zh"],
         languageMode: 'fixed',
         voiceMode: { type: 'fixed' },
-        backend: { type: 'sherpaTts', cli: [
+        backend: { type: 'sherpaTts', family: 'matcha', cli: [
                 { type: 'runtimeVar', flag: "--matcha-acoustic-model", key: 'mainModelFile' },
                 { type: 'modelsRootFile', flag: "--matcha-vocoder", value: "vocos-22khz-univ.onnx" },
                 { type: 'file', flag: "--matcha-tokens", value: "tokens.txt" },
@@ -386,7 +398,7 @@ export const SPECS: ModelSpec[] = [
         languages: ["zh", "en"],
         languageMode: 'cloning',
         voiceMode: { type: 'clone', requiresText: true, overridesPreset: true },
-        backend: { type: 'sherpaTts', cli: [
+        backend: { type: 'sherpaTts', family: 'zipvoice', cli: [
                 { type: 'file', flag: "--zipvoice-encoder", value: "encoder.int8.onnx" },
                 { type: 'file', flag: "--zipvoice-decoder", value: "decoder.int8.onnx" },
                 { type: 'file', flag: "--zipvoice-lexicon", value: "lexicon.txt" },
@@ -424,7 +436,7 @@ export const SPECS: ModelSpec[] = [
         languages: ["en"],
         languageMode: 'fixed',
         voiceMode: { type: 'fixed' },
-        backend: { type: 'sherpaTts', cli: [
+        backend: { type: 'sherpaTts', family: 'pocket', cli: [
                 { type: 'file', flag: "--pocket-lm-flow", value: "lm_flow.int8.onnx" },
                 { type: 'file', flag: "--pocket-lm-main", value: "lm_main.int8.onnx" },
                 { type: 'file', flag: "--pocket-encoder", value: "encoder.onnx" },
@@ -462,7 +474,7 @@ export const SPECS: ModelSpec[] = [
         ],
         languageMode: 'select',
         voiceMode: { type: 'preset', count: 10, speakersFile: null, perLanguage: true },
-        backend: { type: 'sherpaTts', cli: [
+        backend: { type: 'sherpaTts', family: 'supertonic', cli: [
                 { type: 'file', flag: "--supertonic-duration-predictor", value: "duration_predictor.int8.onnx" },
                 { type: 'file', flag: "--supertonic-text-encoder", value: "text_encoder.int8.onnx" },
                 { type: 'file', flag: "--supertonic-vector-estimator", value: "vector_estimator.int8.onnx" },
@@ -501,7 +513,7 @@ export const SPECS: ModelSpec[] = [
         languages: ["en"],
         languageMode: 'fixed',
         voiceMode: { type: 'fixed' },
-        backend: { type: 'sherpaTts', cli: [
+        backend: { type: 'sherpaTts', family: 'kitten', cli: [
                 { type: 'file', flag: "--kitten-model", value: "model.onnx" },
                 { type: 'file', flag: "--kitten-tokens", value: "tokens.txt" },
                 { type: 'runtimeVar', flag: "--sid", key: 'speakerId' },

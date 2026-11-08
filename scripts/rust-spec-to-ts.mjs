@@ -202,18 +202,34 @@ body = body.replace(
   /BackendSpec::Llama\(\s*AsrBackendSpec::Llama\s*,?\s*\)/g,
   `{ type: 'llama' }`
 )
+// sherpa ASR/TTS 现在都走进程内 FFI：描述符只声明「模型族 + 文件字段」，
+// 不再有 flag（argv 解释器已随子进程方案一起下线）。族从旧 flag 反推，保证生成的描述符可迁移。
+const ASR_FAMILY_BY_FLAG = {
+  '--paraformer': 'paraformer',
+  '--sense-voice-model': 'sense_voice',
+  '--whisper-encoder': 'whisper',
+  '--transducer': 'transducer',
+  '--nemo-ctc-model': 'nemo_ctc'
+}
+
 body = body.replace(
   /BackendSpec::SherpaWs\(\s*AsrBackendSpec::SherpaWs\s*\{([^}]*)\}\s*,?\s*\)/g,
   (_, inner) => {
     const f = parseFields(inner)
-    return `{ type: 'sherpaWs', flag: ${f.flag} }`
+    const flag = (f.flag || '').replace(/"/g, "'")
+    const family = ASR_FAMILY_BY_FLAG[flag]
+    if (!family) throw new Error(`未知 sherpa ASR flag，请补充族映射: ${flag}`)
+    return `{ type: 'sherpaAsr', family: '${family}' }`
   }
 )
 body = body.replace(
   /BackendSpec::SherpaTts\(\s*SherpaTtsSpec\s*\{([^}]*)\}\s*,?\s*\)/g,
   (_, inner) => {
     const f = parseFields(inner)
-    return `{ type: 'sherpaTts', cli: ${f.cli}, requiredFiles: ${f.required_files} }`
+    // TTS 族 = cli 里第一个 `--<family>-*` 前缀（与 C 子结构体名一致）
+    const m = /--(vits|matcha|kokoro|kitten|zipvoice|pocket|supertonic)-/.exec(f.cli || '')
+    if (!m) throw new Error(`无法从 TTS cli 推断模型族: ${f.cli}`)
+    return `{ type: 'sherpaTts', family: '${m[1]}', cli: ${f.cli}, requiredFiles: ${f.required_files} }`
   }
 )
 body = body.replace(
@@ -417,8 +433,19 @@ export type ArgSpec =
 
 export type BackendSpec =
   | { type: 'llama' }
-  | { type: 'sherpaWs'; flag: string }
-  | { type: 'sherpaTts'; cli: ArgSpec[]; requiredFiles: string[] }
+  | {
+      /** sherpa-onnx ASR（进程内 FFI）：family 决定模型路径放哪个 C 子结构体 */
+      type: 'sherpaAsr'
+      family: 'paraformer' | 'sense_voice' | 'whisper' | 'transducer' | 'nemo_ctc'
+      language?: string
+    }
+  | {
+      /** sherpa-onnx TTS（进程内 FFI）：family 决定 C 子结构体，cli 描述字段与文件 */
+      type: 'sherpaTts'
+      family: 'vits' | 'matcha' | 'kokoro' | 'kitten' | 'zipvoice' | 'pocket' | 'supertonic'
+      cli: ArgSpec[]
+      requiredFiles: string[]
+    }
   | { type: 'pytorch'; adapter: string; language: string; voice: string }
 
 export interface ModelSpec {

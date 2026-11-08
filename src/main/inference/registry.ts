@@ -13,7 +13,7 @@ import { log } from '../core/logger'
 import type { AsrEngine } from './engine'
 import { llamaFfiAdapter } from './llama-ffi'
 import { lastRequestedModel, recordLastRequested } from './asr-request'
-import { SherpaAsrAdapter } from './sherpa-asr'
+import { sherpaFfiAdapter } from './sherpa-ffi'
 import { PyTorchAsrAdapter } from './pytorch-asr'
 import type { ModelSpec } from '../models/spec-data'
 import { findAsrModelSpec } from './asr-target'
@@ -36,8 +36,8 @@ export class AsrRegistry {
   constructor() {
     // gguf → llama.cpp 进程内 FFI（llama.dll + mtmd.dll，worker 子进程隔离崩溃）
     this.register('gguf', llamaFfiAdapter)
-    // onnx → sherpa-onnx websocket server（低端设备引擎）
-    this.register('onnx', new SherpaAsrAdapter())
+    // onnx → sherpa-onnx 进程内 FFI（sherpa-onnx-c-api.dll，worker 子进程隔离崩溃）
+    this.register('onnx', sherpaFfiAdapter)
     // pytorch → 独立 Python worker（按需下载运行时；模型适配器在运行时白名单里）
     this.register('pytorch', new PyTorchAsrAdapter())
   }

@@ -117,6 +117,17 @@ export class TtsRegistry {
     return this.active()?.vramEstimateMb() ?? null
   }
 
+  /** 退出路径：同步终止所有引擎的子进程（异步 unload 在退出时等不及） */
+  killForExit(): void {
+    for (const engine of this.engines.values()) {
+      try {
+        engine.killForExit?.()
+      } catch {
+        /* 已退出 */
+      }
+    }
+  }
+
   /** 模型目录（供 speakers.json 等按 spec 读取） */
   modelDir(specId: string): string {
     return joinModelDir(specId)

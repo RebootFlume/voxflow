@@ -41,6 +41,14 @@ export interface TtsEngine {
 
   /** 估算当前模型显存占用（MB），用于显存监控；无权限时回退 null */
   vramEstimateMb(): number | null
+
+  /**
+   * 退出路径专用：同步终止引擎进程（不等它退出）。
+   *
+   * 可选：进程内引擎（FFI worker）实现它；纯内存引擎可不实现。
+   * 异步的 `unload()` 在退出路径上等不及，会在托盘退出时卡好几秒。
+   */
+  killForExit?(): void
 }
 
 /**

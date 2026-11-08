@@ -22,12 +22,11 @@ import { adoptProxyEnv, setModelRoot } from './models/model-manager'
 import { createTray, destroyTray, showMainWindow } from './tray'
 import { startHotkeyListener, stopHotkeyListener } from './system/hotkey'
 import { llamaEngine } from './inference/llama-ffi'
-import { globalSherpaEngine } from './inference/sherpa-asr'
+import { sherpaFfiAdapter } from './inference/sherpa-ffi'
 import { registry } from './inference/registry'
 import { setVramRuntimeHooks } from './inference/vram'
 import { killOrphanEngineProcesses } from './inference/device'
 import { ttsRegistry } from './tts/registry'
-import { killTtsChildrenForExit } from './tts/engine-sherpa'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -225,12 +224,12 @@ app.on('before-quit', () => {
   // 退出路径只终止子进程、不等它退出（对齐 Rust 的 kill_for_exit：
   // 等进程退出会让「点了关闭要等好几秒托盘图标才消失」）
   llamaEngine.killForExit()
-  globalSherpaEngine().killForExit()
+  sherpaFfiAdapter.killForExit()
   // python worker 同理：unload() 是异步的（要等 shutdown 协议应答），
   // 退出时等不及 → 直接杀子进程，避免留下孤儿进程占显存。
   registry().engine('pytorch')?.killForExit?.()
   // 合成中的 sherpa-tts 子进程同理（每次合成起一个，之前完全没跟踪）
-  killTtsChildrenForExit()
+  ttsRegistry().killForExit?.()
   void registry().unloadActive().catch(() => {})
   destroyTray()
   instanceHandle?.close()

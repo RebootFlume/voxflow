@@ -91,7 +91,7 @@ export interface AsrEngine {
    * 退出路径专用：**同步**杀掉引擎子进程（不等它退出、不做协议握手）。
    *
    * 可选方法：只有持有长驻子进程的引擎需要实现
-   * （llama.cpp FFI worker / sherpa-asr server / python worker）。
+   * （llama.cpp FFI worker / sherpa-onnx FFI worker / python worker）。
    * 退出时如果只走 `unload()`（异步、要等协议握手），进程可能来不及
    * 走完握手就被杀掉 → 子进程变成孤儿继续占显存/端口。
    */
