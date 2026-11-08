@@ -2,7 +2,7 @@
  * llama.cpp 进程内会话：加载模型 → 音频转文本。
  *
  * 这一层是「推理逻辑」本身，完全不认识 IPC：worker 调它，主进程不碰它。
- * 它复用随包运行时里的 llama.dll / mtmd.dll（llama.cpp tag b10622）。
+ * 它复用随包运行时里的 llama.dll / mtmd.dll（llama.cpp tag b12211）。
  */
 
 import { cpus } from 'node:os'

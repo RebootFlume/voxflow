@@ -193,7 +193,7 @@ const text = await window.voxflow.invoke<string>('rust_transcribe_llama', {
 | TTS 单元测试 | `npm run test:tts` —— 48 项全过（切分 / 音色库 / argv 解释器 / 时长钳制） |
 | TTS 端到端 | `npm run verify:tts` —— 24 项全过（音色库全流程 / 错误分支 / 索引格式） |
 | TTS 索引格式 | `voices.json` 用 snake_case，与 Tauri 版共用同一份文件可直接互换 |
-| 运行时下载 | `npm run verify:runtime` —— 16 项全过；**真实下载 llama-cpp b10622（250MB）→ 解压 → 落位 → 试启动 → state:ready** |
+| 运行时下载 | `npm run verify:runtime` —— 16 项全过；**真实下载 llama-cpp b12211（289MB）→ 解压 → 落位 → 试启动 → state:ready** |
 | 代理链路 | 系统代理（HTTP_PROXY）自动接管，HTTP CONNECT 隧道可用 |
 | 对外 API | `npm run verify:api` —— 16 项全过（鉴权 / 路由 / 错误码 / multipart / WAV 编码） |
 | **真实推理闭环** | `npm run verify:real` —— **25 项全过**：Kokoro TTS 合成 → Qwen3-ASR(CUDA) 转写 → SenseVoice 转写 → 对外 API 转写，识别文本与原文一致 |

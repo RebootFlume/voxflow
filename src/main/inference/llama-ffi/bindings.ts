@@ -5,7 +5,7 @@
  * 而「函数签名长什么样、参数怎么摆、结构体字段顺序」是纯粹的 ABI 细节。
  * 两者分开后，换 llama.cpp 版本时只需要改这一个文件。
  *
- * 结构体布局对应 llama.cpp **tag b10622**（随包 DLL 的版本号 `0.3.0-dev (build 10622)`）。
+ * 结构体布局对应 llama.cpp **tag b12211**（随包 DLL 的版本号 `b12211`）。
  * 字段顺序/类型必须与 `include/llama.h` 严格一致，否则会读到错位的值。
  */
 
@@ -15,13 +15,15 @@ import koffi from 'koffi'
 const voidPtr = 'void *'
 const voidPtrPtr = koffi.pointer(koffi.pointer('void'))
 
-/** llama_model_params（b10622） */
+/** llama_model_params（b12211） */
 export const llamaModelParams = koffi.struct('llama_model_params', {
   devices: voidPtrPtr,
   tensor_buft_overrides: voidPtrPtr,
   n_gpu_layers: 'int32_t',
   split_mode: 'int32_t',
   load_mode: 'int32_t',
+  /** b12211 新增：enum llama_lazy_mode（位置在 load_mode 之后，不是末尾） */
+  lazy_mode: 'int32_t',
   main_gpu: 'int32_t',
   tensor_split: koffi.pointer('float'),
   progress_callback: voidPtr,
@@ -35,7 +37,7 @@ export const llamaModelParams = koffi.struct('llama_model_params', {
   load_mtp: 'bool'
 })
 
-/** llama_context_params（b10622） */
+/** llama_context_params（b12211） */
 export const llamaContextParams = koffi.struct('llama_context_params', {
   n_ctx: 'uint32_t',
   n_batch: 'uint32_t',
@@ -63,6 +65,9 @@ export const llamaContextParams = koffi.struct('llama_context_params', {
   cb_eval_user_data: voidPtr,
   type_k: 'int32_t',
   type_v: 'int32_t',
+  /** b12211 新增：MoE 专家缓存（位置在 type_v 之后） */
+  moe_cache_size: 'size_t',
+  moe_cache_cpu_share: 'float',
   abort_callback: voidPtr,
   abort_callback_data: voidPtr,
   embeddings: 'bool',
@@ -122,7 +127,9 @@ export const mtmdInputText = koffi.struct('mtmd_input_text', {
 /** mtmd_caps */
 export const mtmdCaps = koffi.struct('mtmd_caps', {
   inp_vision: 'bool',
-  inp_audio: 'bool'
+  inp_audio: 'bool',
+  /** b12211 新增 */
+  gen_audio: 'bool'
 })
 
 /** mtmd_helper_bitmap_wrapper */

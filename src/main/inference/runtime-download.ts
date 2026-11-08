@@ -14,7 +14,16 @@
 
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from 'node:fs'
 import { join } from 'node:path'
 import { emitSidecar } from '../core/events'
 import { log } from '../core/logger'
@@ -115,7 +124,7 @@ export const SHERPA_CUDA_AUX_FILES = [
 
 /**
  * 当前发布包（官方版本，固定版本号）
- * - llama.cpp: b10622（cuda-12.4）
+ * - llama.cpp: b12211（cuda-12.4）
  *   注意：官方 cuda 版拆成两个 zip —— 主程序包 + cudart 运行库包（cudart64/cublas）。
  *   必须两个都下载，否则 CUDA 后端加载失败会【静默回退 CPU】。
  * - sherpa-onnx: v2.0.1（cuda-12.x-cudnn-9.x, onnxruntime 1.28.2）
@@ -128,17 +137,18 @@ export const RUNTIME_PACKAGES: RuntimePkg[] = [
     supportsCpu: true,
     supportsCuda: true,
     name: 'llama.cpp',
-    version: 'b10622',
+    version: 'b12211',
     sha256: '',
     auxSha256: '',
     unpackedBytes: null,
     manifest: null,
-    url: 'https://github.com/ggml-org/llama.cpp/releases/download/b10622/llama-b10622-bin-win-cuda-12.4-x64.zip',
+    url: 'https://github.com/ggml-org/llama.cpp/releases/download/b12211/llama-b12211-bin-win-cuda-12.4-x64.zip',
     auxUrl:
-      'https://github.com/ggml-org/llama.cpp/releases/download/b10622/cudart-llama-bin-win-cuda-12.4-x64.zip',
+      'https://github.com/ggml-org/llama.cpp/releases/download/b12211/cudart-llama-bin-win-cuda-12.4-x64.zip',
     auxDir: '',
     auxFiles: ['cudart64_12.dll', 'cublas64_12.dll', 'cublasLt64_12.dll'],
-    innerDir: 'llama-b10622-bin-win-cuda-12.4-x64',
+    // b12211 起官方 zip 改为平铺（不再有 llama-bXXXX-... 这层 wrapper 目录）
+    innerDir: '',
     targetDir: 'llama-cpp',
     // marker 仍是 llama-server.exe：老版本已经用它判过「运行时已安装」，
     // 换成 llama.dll 会让存量安装被判成缺失、重新下载 1GB。包里两者都有，marker 只是证据。
@@ -235,6 +245,24 @@ function runtimeManifestMatches(pkg: RuntimePkg, path: string): boolean {
 }
 
 /**
+ * 安装版本戳：解压完成后写入 pkg.version。
+ *
+ * 为什么需要它：绑定层（koffi 结构体布局）是**按某个具体版本**写的，
+ * 运行时 DLL 与绑定不匹配时会静默读出错位字段（甚至崩溃）。
+ * 只靠 marker 存在无法区分 b10622 / b12211，升级后会误用旧 DLL。
+ */
+const INSTALLED_VERSION_FILE = '.installed-version'
+
+/** 读取已安装版本戳（老安装没有这个文件 → null） */
+export function installedRuntimeVersion(pkg: RuntimePkg): string | null {
+  try {
+    return readFileSync(join(runtimeDirFor(pkg), INSTALLED_VERSION_FILE), 'utf-8').trim() || null
+  } catch {
+    return null
+  }
+}
+
+/**
  * 检测框架是否已安装（与推理启动共用同一路径解析：能找到启动 exe = 已下载）。
  * 同时校验 auxFiles（如 CUDA 运行库）完整 —— 主程序在但运行库缺失 = 未完成安装，
  * 前端据此显示"需要修复/重新下载"（否则 CUDA 会静默回退 CPU）。
@@ -242,6 +270,8 @@ function runtimeManifestMatches(pkg: RuntimePkg, path: string): boolean {
 export function isRuntimeInstalled(pkg: RuntimePkg): boolean {
   const dir = runtimeDirFor(pkg)
   if (!existsSync(join(dir, pkg.marker))) return false
+  // 版本戳不匹配 = 装的是旧版 DLL，与当前绑定层结构体不一致 → 视为未安装（提示重新下载）
+  if (installedRuntimeVersion(pkg) !== pkg.version) return false
   if (pkg.manifest && !runtimeManifestMatches(pkg, join(dir, pkg.manifest))) return false
   return pkg.auxFiles.every((f) => existsSync(join(dir, f)))
 }
@@ -253,6 +283,10 @@ export function runtimeDiagnose(pkg: RuntimePkg): { state: string; missing: stri
     return { state: 'missing', missing: [pkg.marker] }
   }
   const missing = pkg.auxFiles.filter((f) => !existsSync(join(dir, f)))
+  if (installedRuntimeVersion(pkg) !== pkg.version) {
+    // 版本不符时提示可读原因（与缺失文件列在同一处展示）
+    missing.push(`${INSTALLED_VERSION_FILE}（已装版本不符，需 ${pkg.version}）`)
+  }
   if (pkg.manifest && !runtimeManifestMatches(pkg, join(dir, pkg.manifest))) {
     missing.push(pkg.manifest)
   }
@@ -663,6 +697,9 @@ export async function downloadRuntime(framework: string): Promise<void> {
       placeExtracted(auxX, auxTarget)
     }
     rmSync(tmp, { recursive: true, force: true })
+
+    // 写入版本戳（必须在校验之前，校验会读它）
+    writeFileSync(join(dest, INSTALLED_VERSION_FILE), `${pkg.version}\n`, 'utf-8')
 
     // 完整性校验：marker + auxFiles 全部存在
     if (!isRuntimeInstalled(pkg)) {
