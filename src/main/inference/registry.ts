@@ -14,6 +14,7 @@ import type { AsrEngine } from './engine'
 import { llamaFfiAdapter } from './llama-ffi'
 import { lastRequestedModel, recordLastRequested } from './asr-request'
 import { sherpaFfiAdapter } from './sherpa-ffi'
+import { audiocppAsrAdapter } from './audiocpp-ffi/adapter-asr'
 import type { ModelSpec } from '../models/spec-data'
 import { findAsrModelSpec } from './asr-target'
 
@@ -37,6 +38,8 @@ export class AsrRegistry {
     this.register('gguf', llamaFfiAdapter)
     // onnx → sherpa-onnx 进程内 FFI（sherpa-onnx-c-api.dll，worker 子进程隔离崩溃）
     this.register('onnx', sherpaFfiAdapter)
+    // audiocpp → audio.cpp 进程内 FFI（ggml 运行时，TTS / ASR 共用同一套 C ABI）
+    this.register('audiocpp', audiocppAsrAdapter)
   }
 
   /** 注册一个引擎 */

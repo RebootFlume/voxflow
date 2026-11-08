@@ -461,6 +461,7 @@ export const commands: Record<string, CommandHandler> = {
     // 走注册表卸载：注册表里的 activeFramework 缓存会被一起清掉
     // （直接调 sherpaFfiAdapter.unload() 会把缓存留在 'onnx'）。
     await registry().unload('onnx')
+    await registry().unload('audiocpp')
     return { ok: true, loaded: false }
   },
 

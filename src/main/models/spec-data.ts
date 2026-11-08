@@ -208,7 +208,44 @@ export const SPECS: ModelSpec[] = [
         voiceMode: { type: 'fixed' },
         backend: { type: 'llama' },
     },
-    
+    {
+        id: "audiocpp-qwen3-asr-0.6b",
+        name: "Qwen3-ASR-0.6B (audio.cpp)",
+        kind: 'asr',
+        framework: "audiocpp",
+        source: { type: 'huggingface', repo: "audio-cpp/audio.cpp-gguf", revision: "main" },
+        entries: [
+            {
+                id: "q8_0",
+                labelZh: "Q8_0 · 单文件 · 推荐",
+                labelEn: "Q8_0 · single file · Recommended",
+                files: [
+                    { role: 'main', name: "Qwen3-ASR-0.6B-GGUF/qwen3-asr-0.6b-q8_0.gguf", sizeMb: 1098 },
+                ],
+                default: true,
+            },
+            {
+                id: "f16",
+                labelZh: "F16 · 单文件（更准、更大）",
+                labelEn: "F16 · single file (more accurate, larger)",
+                files: [
+                    { role: 'main', name: "Qwen3-ASR-0.6B-GGUF/qwen3-asr-0.6b-f16.gguf", sizeMb: 1793.5 },
+                ],
+                default: false,
+            },
+        ],
+        sizeGb: 1.10,
+        descriptionZh: "与上一条同源模型 · audio.cpp 运行时 · 自带文本前端",
+        descriptionEn: "Same model as above · audio.cpp runtime · self-contained frontend",
+        available: true,
+        cpu: "good",
+        extraFiles: [],
+        quant: "Q8_0",
+        languages: [],
+        languageMode: 'fixed',
+        voiceMode: { type: 'fixed' },
+        backend: { type: 'audiocpp', family: 'qwen3_asr' },
+    },
     {
         id: "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17",
         name: "SenseVoice-int8",

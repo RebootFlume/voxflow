@@ -113,6 +113,7 @@ export function FrameworkPanel() {
     gguf: { descKey: "framework.desc.llama" },
     onnx: { descKey: "framework.desc.sherpa" },
     audiocpp: { descKey: "framework.desc.audiocpp" },
+    "audiocpp-cuda": { descKey: "framework.desc.audiocpp-cuda" },
   };
 
 

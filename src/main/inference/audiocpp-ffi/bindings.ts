@@ -102,6 +102,14 @@ export interface AudiocppFfi {
   request_free(request: Handle): void
   /** 设置文本（language 可为 null） */
   request_set_text(request: Handle, text: string, language: string | null): void
+  /** 设置音频（交错 float PCM；frames = **每声道**帧数） */
+  request_set_audio(
+    request: Handle,
+    samples: Float32Array,
+    frames: number,
+    sampleRate: number,
+    channels: number
+  ): void
   /** 设置请求级选项（对应 CLI 的 --request-option） */
   request_set_option(request: Handle, key: string, value: string): void
 
@@ -144,6 +152,18 @@ export function loadAudiocppFfi(runtimeDir: string): AudiocppFfi {
 
   const lib = koffi.load(dllPath)
 
+  // 模块化 ggml 的变体（CUDA 包）必须显式注册后端：
+  // audiocpp 内部只调 ggml_backend_load_all()，它只在自己进程 exe 旁边找
+  // ggml-cuda.dll —— 我们是 electron.exe 进程，那里没有 → session_create 会报
+  // "CUDA backend requested but it is not registered in this build"。
+  // 与 llama-ffi/session.ts 同一做法：按路径加载后端目录。
+  const ggmlPath = join(libDir, 'ggml.dll')
+  if (existsSync(ggmlPath)) {
+    const ggml = koffi.load(ggmlPath)
+    const loadAllFromPath = ggml.func('ggml_backend_load_all_from_path', 'void', [C])
+    loadAllFromPath(libDir)
+  }
+
   const abiVersion = lib.func('audiocpp_abi_version', 'uint32_t', [])
   const buildVersion = lib.func('audiocpp_build_version', C, [])
   const lastError = lib.func('audiocpp_last_error', C, [])
@@ -185,6 +205,13 @@ export function loadAudiocppFfi(runtimeDir: string): AudiocppFfi {
   const requestCreate = lib.func('audiocpp_request_create', handle, [])
   const requestFree = lib.func('audiocpp_request_free', 'void', [handle])
   const requestSetText = lib.func('audiocpp_request_set_text', 'int32_t', [handle, C, C])
+  const requestSetAudio = lib.func('audiocpp_request_set_audio', 'int32_t', [
+    handle,
+    koffi.pointer('float'),
+    'size_t',
+    'int',
+    'int'
+  ])
   const requestSetOption = lib.func('audiocpp_request_set_option', 'int32_t', [handle, C, C])
 
   const sessionRun = lib.func('audiocpp_session_run', 'int32_t', [
@@ -276,6 +303,10 @@ export function loadAudiocppFfi(runtimeDir: string): AudiocppFfi {
     request_set_text: (request, text, language) => {
       const status = Number(requestSetText(request, text, language))
       if (status !== 0) fail(reader, status, '设置请求文本')
+    },
+    request_set_audio: (request, samples, frames, sampleRate, channels) => {
+      const status = Number(requestSetAudio(request, samples, frames, sampleRate, channels))
+      if (status !== 0) fail(reader, status, '设置请求音频')
     },
     request_set_option: (request, key, value) => {
       const status = Number(requestSetOption(request, key, value))

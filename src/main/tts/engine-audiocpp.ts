@@ -9,12 +9,13 @@
  * - 推理本身在 worker 的 `session-tts.ts`。
  */
 
-import { existsSync } from 'node:fs'
 import { basename, dirname } from 'node:path'
 import { findSpec } from '../models/model-manager'
 import type { ModelSpec } from '../models/spec-data'
 import { AudiocppTtsHost } from '../inference/audiocpp-ffi/host'
-import { audiocppRuntimeDir } from '../inference/runtime-paths'
+import { audiocppRuntimeForDevice } from '../inference/runtime-download'
+import { getGpuInfo } from '../inference/vram'
+import { log } from '../core/logger'
 import type { SynthAudio, TtsEngine } from './traits'
 
 /** 引擎可变状态 */
@@ -93,9 +94,14 @@ export class AudiocppTtsEngine implements TtsEngine {
       throw new Error(`${spec.name} 不是 audio.cpp 模型`)
     }
 
-    const runtimeDir = audiocppRuntimeDir()
-    if (!existsSync(runtimeDir)) {
-      throw new Error(`audio.cpp 推理框架未安装: ${runtimeDir}`)
+    // 选变体目录：cuda 需要 CUDA 包（含 ggml-cuda.dll），否则回退 CPU 包 / 报变体不匹配
+    const gpu = await getGpuInfo()
+    const choice = audiocppRuntimeForDevice(device, gpu.available)
+    const runtimeDir = choice.dir
+    if (choice.backend === 'cpu' && backendFor(device) === 'cuda') {
+      log.info(
+        `[audiocpp-tts] ${gpu.available ? 'CUDA 变体未安装' : '未检测到 NVIDIA GPU'}，回退 CPU 推理`
+      )
     }
 
     // 候选状态先写入再校验，校验失败必须回滚：否则 isLoaded()（= spec 非空）会谎报已加载
@@ -104,7 +110,7 @@ export class AudiocppTtsEngine implements TtsEngine {
     const prevBackend = this.inner.backend
     this.inner.spec = spec
     this.inner.family = spec.backend.family
-    this.inner.backend = backendFor(device)
+    this.inner.backend = choice.backend
 
     try {
       await this.host.load({

@@ -34,3 +34,29 @@ export interface SynthesizeReply {
   samples: Int16Array
   sampleRate: number
 }
+
+/** 加载 ASR 模型 */
+export interface LoadAsrRequest {
+  /** audio.cpp 运行时根目录（<libs>/audio-cpp 或 <libs>/audio-cpp-cuda） */
+  runtimeDir: string
+  /** 主模型文件绝对路径（.gguf） */
+  modelPath: string
+  /** 模型族名（如 "qwen3_asr"；空 = 按路径自动识别） */
+  familyHint: string
+  /** 后端（"cpu" / "cuda"） */
+  backend: string
+  /** 推理线程数 */
+  numThreads: number
+}
+
+/** 转写请求 */
+export interface TranscribeRequest {
+  /** 单声道 [-1,1] 浮点 PCM */
+  samples: Float32Array
+  sampleRate: number
+}
+
+/** 转写结果 */
+export interface TranscribeReply {
+  text: string
+}

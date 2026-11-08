@@ -19,7 +19,8 @@ export default defineConfig({
           worker: resolve(__dirname, 'src/main/inference/llama-ffi/worker.ts'),
           'sherpa-asr-worker': resolve(__dirname, 'src/main/inference/sherpa-ffi/asr-worker.ts'),
           'sherpa-tts-worker': resolve(__dirname, 'src/main/inference/sherpa-ffi/tts-worker.ts'),
-          'audiocpp-tts-worker': resolve(__dirname, 'src/main/inference/audiocpp-ffi/tts-worker.ts')
+          'audiocpp-tts-worker': resolve(__dirname, 'src/main/inference/audiocpp-ffi/tts-worker.ts'),
+          'audiocpp-asr-worker': resolve(__dirname, 'src/main/inference/audiocpp-ffi/asr-worker.ts')
         }
       }
     }

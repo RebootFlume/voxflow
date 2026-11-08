@@ -1,0 +1,75 @@
+/**
+ * audio.cpp FFI 引擎的主进程侧代理（ASR）。
+ *
+ * 通用部分在 `ffi-worker/host.ts`，这里只负责 audio.cpp 特有的命令与状态记账。
+ */
+
+import { FfiWorkerHost } from '../ffi-worker/host'
+import type { AsrStageCallback } from '../engine'
+import type { LoadAsrRequest, TranscribeReply, TranscribeRequest } from './protocol'
+
+/** ASR 代理：worker 里跑 audio.cpp 会话 */
+export class AudiocppAsrHost extends FfiWorkerHost {
+  private loaded = false
+  private model = ''
+  private loadedFamily = ''
+
+  constructor() {
+    super({ workerFile: 'audiocpp-asr-worker.js', label: 'audiocpp-asr' })
+  }
+
+  /** 加载模型（模型路径由调用方解析好） */
+  async load(req: LoadAsrRequest, onStage?: AsrStageCallback): Promise<void> {
+    if (onStage) this.setStageListener(onStage)
+    await this.request<void>('load', req)
+    this.loaded = true
+    this.model = req.modelPath
+    this.loadedFamily = req.familyHint
+  }
+
+  /** 卸载模型（保留 worker 进程） */
+  async unload(): Promise<void> {
+    if (!this.pid()) {
+      this.resetState()
+      return
+    }
+    try {
+      await this.request<void>('unload')
+    } catch {
+      // 卸载失败不阻断：worker 退出时会一并清干净
+    }
+    this.resetState()
+  }
+
+  /** 转写一段音频 */
+  async transcribe(samples: Float32Array, sampleRate: number): Promise<string> {
+    const reply = await this.request<TranscribeReply>('transcribe', {
+      samples,
+      sampleRate
+    } satisfies TranscribeRequest)
+    return reply.text
+  }
+
+  isLoaded(): boolean {
+    return this.loaded
+  }
+
+  modelName(): string | null {
+    return this.loaded ? this.model : null
+  }
+
+  family(): string {
+    return this.loadedFamily
+  }
+
+  override killForExit(): void {
+    super.killForExit()
+    this.resetState()
+  }
+
+  private resetState(): void {
+    this.loaded = false
+    this.model = ''
+    this.loadedFamily = ''
+  }
+}

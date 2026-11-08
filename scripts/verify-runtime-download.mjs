@@ -77,10 +77,10 @@ console.log('\n【推理框架运行时】')
 const status = await call('check_runtime')
 check('check_runtime 可调用', status.ok === true, JSON.stringify(status))
 const pkgs = status.ok ? status.r.packages : []
-check('返回 3 个运行时包', pkgs.length === 3, `实际 ${pkgs.length}`)
+check('返回 4 个运行时包', pkgs.length === 4, `实际 ${pkgs.length}`)
 check(
-  '包键正确（gguf / onnx / audiocpp）',
-  ['gguf', 'onnx', 'audiocpp'].every((k) => pkgs.some((p) => p.framework === k)),
+  '包键正确（gguf / onnx / audiocpp / audiocpp-cuda）',
+  ['gguf', 'onnx', 'audiocpp', 'audiocpp-cuda'].every((k) => pkgs.some((p) => p.framework === k)),
   JSON.stringify(pkgs.map((p) => p.framework))
 )
 check(

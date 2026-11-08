@@ -1058,7 +1058,10 @@ export function entryUnion(spec: ModelSpec): EntryFileSpec[] {
  */
 const RUNTIME_PACKAGE_KEYS: ReadonlyArray<{ engine: string; framework: string }> = [
   { engine: 'gguf', framework: 'gguf' },
-  { engine: 'onnx', framework: 'onnx' }
+  { engine: 'onnx', framework: 'onnx' },
+  // audio.cpp 拆成 CPU / CUDA 两个变体包，两个都算该引擎的运行时依赖
+  { engine: 'audiocpp', framework: 'audiocpp' },
+  { engine: 'audiocpp', framework: 'audiocpp-cuda' }
 ]
 
 /** 精选条目（payload 形状） */

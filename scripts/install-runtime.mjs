@@ -80,7 +80,8 @@ console.log(`耗时 ${((Date.now() - t0) / 1000).toFixed(0)}s`)
 const pkgDirs = {
   gguf: 'llama-cpp',
   onnx: 'sherpa-onnx',
-  audiocpp: 'audio-cpp'
+  audiocpp: 'audio-cpp',
+  'audiocpp-cuda': 'audio-cpp-cuda'
 }
 const dir = join(LIBS, pkgDirs[framework] ?? framework)
 if (existsSync(dir)) {
