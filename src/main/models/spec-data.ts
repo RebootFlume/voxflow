@@ -77,15 +77,9 @@ export type BackendSpec =
   | {
       /** sherpa-onnx ASR（进程内 FFI）：family 决定模型路径放哪个 C 子结构体 */
       type: 'sherpaAsr'
-      family: 'paraformer' | 'sense_voice' | 'whisper' | 'transducer' | 'nemo_ctc'
+      family: 'paraformer' | 'sense_voice' | 'transducer' | 'nemo_ctc'
       /** 该族支持指定语言时使用（空 = 自动） */
       language?: string
-      /** 主模型文件名覆盖（缺省走 model.onnx / 最大 model-steps-*.onnx 的通用规则） */
-      modelFile?: string
-      /** 第二模型文件（whisper 的 decoder；缺省 = 无） */
-      decoderFile?: string
-      /** tokens 文件名覆盖（缺省 tokens.txt） */
-      tokensFile?: string
     }
   | {
       /** sherpa-onnx TTS（进程内 FFI）：family 决定 C 子结构体，cli 描述字段与文件 */

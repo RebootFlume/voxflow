@@ -17,8 +17,6 @@ export interface LoadAsrRequest {
   family: SherpaAsrFamily
   /** 主模型文件绝对路径 */
   modelPath: string
-  /** 第二模型文件绝对路径（whisper 的 decoder；其他族为空串） */
-  decoderPath: string
   /** tokens.txt 绝对路径 */
   tokensPath: string
   /** "cpu" / "cuda" */

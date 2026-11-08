@@ -26,7 +26,6 @@ runFfiWorker({
         runtimeDir: req.runtimeDir,
         family: req.family,
         modelPath: req.modelPath,
-        decoderPath: req.decoderPath,
         tokensPath: req.tokensPath,
         provider: req.provider,
         numThreads: req.numThreads,

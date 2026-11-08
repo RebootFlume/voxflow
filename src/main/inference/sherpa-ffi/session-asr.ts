@@ -11,7 +11,7 @@ import { loadSherpaFfi, type Handle, type SherpaFfi } from './bindings'
 import type { AsrStage } from '../engine'
 
 /** 模型族（C API 用「哪个子结构体放路径」来区分模型类型，没有模型名嗅探） */
-export type SherpaAsrFamily = 'paraformer' | 'sense_voice' | 'whisper' | 'transducer' | 'nemo_ctc'
+export type SherpaAsrFamily = 'paraformer' | 'sense_voice' | 'transducer' | 'nemo_ctc'
 
 export interface SherpaAsrSessionOptions {
   /** sherpa-onnx 运行时根目录（含 bin/ include/ lib/） */
@@ -20,8 +20,6 @@ export interface SherpaAsrSessionOptions {
   family: SherpaAsrFamily
   /** 主模型文件绝对路径 */
   modelPath: string
-  /** 第二模型文件绝对路径（whisper 的 decoder；其他族传空串） */
-  decoderPath?: string
   /** tokens.txt 绝对路径 */
   tokensPath: string
   /** 推理提供者（"cpu" / "cuda"） */
@@ -80,6 +78,8 @@ export class SherpaAsrSession {
         transducer: { encoder: '', decoder: '', joiner: '' },
         paraformer: { model: '' },
         nemo_ctc: { model: '' },
+        // 未支持的族（whisper 等）只作结构体占位：koffi 的 SherpaModelConfig
+        // 布局必须与 C 头文件逐字段对齐，删字段会错位后面所有字段。
         whisper: {
           encoder: '',
           decoder: '',
@@ -157,20 +157,6 @@ export class SherpaAsrSession {
           model: modelPath,
           language: opts.language ?? '',
           use_itn: opts.useItn === false ? 0 : 1
-        }
-        break
-      case 'whisper':
-        // whisper 是 encoder/decoder 双模型，且文件名不含通用前缀（tiny-encoder.onnx 等），
-        // 两个路径都由描述符给出；language 为空时 sherpa 会从音频推断语种。
-        if (!opts.decoderPath) {
-          throw new Error(`whisper 模型缺少 decoder: ${opts.modelPath}`)
-        }
-        config.model_config.whisper = {
-          ...config.model_config.whisper,
-          encoder: modelPath,
-          decoder: opts.decoderPath,
-          language: opts.language ?? '',
-          task: 'transcribe'
         }
         break
       case 'transducer':
