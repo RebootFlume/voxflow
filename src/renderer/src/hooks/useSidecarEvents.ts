@@ -238,7 +238,7 @@ export function useSidecarEvents() {
               store.setTtsModelStatus("ready");
               // 框架标签：事件权威 framework（Rust 注册表决定），前端不猜。
               // 两个域都要对齐：engines.tts.framework（展示）+ tts.framework（模型页过滤/持久化），
-              // 否则加载了 PyTorch 模型、下拉框却还停在 sherpa —— 用户看到的"显示不对"。
+              // 否则加载了新框架的模型、下拉框却还停在旧框架 —— 用户看到的"显示不对"。
               applyTtsFrameworkFromRust(
                 typeof payload.framework === "string" ? payload.framework : "",
                 typeof payload.engine === "string" ? payload.engine : null,

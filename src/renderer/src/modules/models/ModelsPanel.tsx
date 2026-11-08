@@ -298,7 +298,7 @@ function ModelRow({ name }: { name: string }) {
   }
   async function doLoad() {
     if (anyLoading) return; // 加载中禁止再切换（全局门禁）
-    // 设备取该 kind 自己的偏好：TTS 支持 CUDA（sherpa provider / pytorch-cuda130 包）
+    // 设备取该 kind 自己的偏好：TTS 支持 CUDA（sherpa provider）
     const device = it.kind === "tts" ? ttsDevice : asrDevice;
     if (it.kind === "tts") {
       await loadTtsModel(it.name, device);

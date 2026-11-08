@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { Cpu, Download, Loader2, PackageOpen, RefreshCw, X } from "lucide-react";
+import { Download, Loader2, PackageOpen, RefreshCw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useAppStore } from "@/stores";
 import { t } from "@/lib/i18n";
-import { rustCancelRuntimeDownload, rustCheckRuntime, rustDownloadRuntime, rustPyTorchDeviceInfo, rustVerifyRuntime } from "@/lib/ipc";
+import { rustCancelRuntimeDownload, rustCheckRuntime, rustDownloadRuntime, rustVerifyRuntime } from "@/lib/ipc";
 
 interface RuntimePkg {
   framework: string;
@@ -27,7 +27,7 @@ interface RuntimePkg {
  */
 const FRAMEWORK_CHIP = "shrink-0 font-mono text-[10px] uppercase";
 
-/** 推理框架（运行时 libs）管理页：下载/校验/修复 llama、sherpa、PyTorch */
+/** 推理框架（运行时 libs）管理页：下载/校验/修复 llama、sherpa */
 export function FrameworkPanel() {
   const locale = useAppStore((s) => s.locale);
   const [packages, setPackages] = useState<RuntimePkg[] | null>(null);
@@ -39,8 +39,6 @@ export function FrameworkPanel() {
   const setRuntimeDownload = useAppStore((s) => s.setRuntimeDownload);
   // 正在请求取消的框架（仅用于按钮 loading/防连点；终态清理由 store 事件驱动）
   const [cancelling, setCancelling] = useState<string | null>(null);
-  // PyTorch 设备探测结果（装了 CUDA 包 ≠ GPU 能用，必须问 worker 才算数）
-  const [deviceInfo, setDeviceInfo] = useState<Record<string, { ok: boolean; msg: string } | null>>({});
 
   const refresh = () => {
     rustCheckRuntime()
@@ -110,35 +108,10 @@ export function FrameworkPanel() {
     }
   };
 
-  // PyTorch 设备探测：起 worker 问 runtime_info（真实判据，不是看包在不在）
-  const doProbeDevice = async (fw: string) => {
-    const device: "cpu" | "cuda" = fw === "pytorch-cuda130" ? "cuda" : "cpu";
-    setDeviceInfo((v) => ({ ...v, [fw]: null }));
-    try {
-      const r = await rustPyTorchDeviceInfo(device);
-      if (!r.ok || !r.info) {
-        setDeviceInfo((v) => ({ ...v, [fw]: { ok: false, msg: r.error || t(locale, "framework.probeFail") } }));
-        return;
-      }
-      const i = r.info;
-      const msg =
-        device === "cuda"
-          ? i.cuda_available
-            ? `${i.torch} · CUDA ${i.cuda_version ?? "?"} · ${i.device_count} device(s)`
-            : `${i.torch} · ${t(locale, "framework.cudaUnavailable")}`
-          : `${i.torch} · Python ${i.python}`;
-      setDeviceInfo((v) => ({ ...v, [fw]: { ok: device !== "cuda" || i.cuda_available, msg } }));
-    } catch (e) {
-      setDeviceInfo((v) => ({ ...v, [fw]: { ok: false, msg: String(e) } }));
-    }
-  };
-
   // 框架描述文案查表；CPU/CUDA 变体由 Rust RuntimePkg 下发
   const frameworkMeta: Record<string, { descKey: string }> = {
     gguf: { descKey: "framework.desc.llama" },
     onnx: { descKey: "framework.desc.sherpa" },
-    "pytorch-cpu": { descKey: "framework.desc.pytorch" },
-    "pytorch-cuda130": { descKey: "framework.desc.pytorch" },
   };
 
 
@@ -198,8 +171,7 @@ export function FrameworkPanel() {
                         避免内联长文本画到右侧按钮底下。 */}
                     <div className="flex min-w-0 items-center gap-2 overflow-hidden">
                       <span className="shrink-0 text-sm font-medium">{pkg.name}</span>
-                      {/* 版本号：PyTorch 的版本串自带变体（2.14.0-py311-cpu / -cuda130），
-                          所以不再另挂变体标签、名称也不带后缀 —— 同一信息只出现一次； */}
+                      {/* 版本号：与名称分离展示，避免同一信息重复（变体已在上方副标题里） */}
                       {pkg.version ? (
                         <span
                           className="shrink-0 font-mono text-[11px] text-muted-foreground"
@@ -265,17 +237,6 @@ export function FrameworkPanel() {
                         {verifyResult[pkg.framework]!.msg}
                       </p>
                     )}
-                    {deviceInfo[pkg.framework] && (
-                      <p
-                        className={`mt-1 text-[11px] ${
-                          deviceInfo[pkg.framework]!.ok
-                            ? "text-emerald-600 dark:text-emerald-400"
-                            : "text-destructive"
-                        }`}
-                      >
-                        {deviceInfo[pkg.framework]!.msg}
-                      </p>
-                    )}
                     {dl.framework === pkg.framework && (
                       <div className="mt-2 space-y-1">
                         <div className="h-1.5 overflow-hidden rounded-full bg-muted">
@@ -299,17 +260,6 @@ export function FrameworkPanel() {
                           <RefreshCw className="mr-1 h-3.5 w-3.5" />
                           {t(locale, "framework.verify")}
                         </Button>
-                        {pkg.engine === "pytorch" && (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => void doProbeDevice(pkg.framework)}
-                            disabled={deviceInfo[pkg.framework] === null}
-                          >
-                            <Cpu className="mr-1 h-3.5 w-3.5" />
-                            {t(locale, "framework.probeDevice")}
-                          </Button>
-                        )}
                         <Button
                           size="sm"
                           variant="outline"

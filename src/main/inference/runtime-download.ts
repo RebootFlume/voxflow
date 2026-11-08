@@ -36,18 +36,16 @@ export type SmokeProbe =
   | { type: 'httpHealth'; path: string }
   /** 无服务端点：等进程退出且 stderr 命中任一关键词（= exe+DLL 链完好） */
   | { type: 'stderrKeywords'; keywords: string[] }
-  /** 启动 Python worker 的一次性 smoke test，stdout 必须返回成功 JSON */
-  | { type: 'pythonWorker' }
 
 /** libs 压缩包发布信息（GitHub release 资产名 + 版本） */
 export interface RuntimePkg {
-  /** 运行时包下载键（必须唯一；例如 pytorch-cpu / pytorch-cuda130） */
+  /** 运行时包下载键（必须唯一；例如 onnx / gguf） */
   framework: string
-  /** 引擎注册键（PyTorch 的 CPU/CUDA 包都映射到 pytorch） */
+  /** 引擎注册键（同一引擎可有多套运行时包，按设备选择） */
   engine: string
   /** 展示名 */
   name: string
-  /** 运行时变体（PyTorch 使用；既有框架为空字符串） */
+  /** 运行时变体（同一引擎的多个包用；缺省空字符串） */
   variant: string
   /** 是否支持 CPU 推理 */
   supportsCpu: boolean
@@ -112,38 +110,6 @@ export const SHERPA_CUDA_AUX_FILES = [
   'bin/sherpa-onnx-offline-tts.exe'
 ]
 
-/** PyTorch CUDA 13.0 运行库辅包内容（29 个 DLL） */
-export const CUDA130_AUX_FILES = [
-  'Lib/site-packages/torch/lib/c10_cuda.dll',
-  'Lib/site-packages/torch/lib/caffe2_nvrtc.dll',
-  'Lib/site-packages/torch/lib/cublas64_13.dll',
-  'Lib/site-packages/torch/lib/cublasLt64_13.dll',
-  'Lib/site-packages/torch/lib/cudart64_13.dll',
-  'Lib/site-packages/torch/lib/cudnn64_9.dll',
-  'Lib/site-packages/torch/lib/cudnn_adv64_9.dll',
-  'Lib/site-packages/torch/lib/cudnn_cnn64_9.dll',
-  'Lib/site-packages/torch/lib/cudnn_engines_precompiled64_9.dll',
-  'Lib/site-packages/torch/lib/cudnn_engines_runtime_compiled64_9.dll',
-  'Lib/site-packages/torch/lib/cudnn_engines_tensor_ir64_9.dll',
-  'Lib/site-packages/torch/lib/cudnn_ext64_9.dll',
-  'Lib/site-packages/torch/lib/cudnn_graph64_9.dll',
-  'Lib/site-packages/torch/lib/cudnn_heuristic64_9.dll',
-  'Lib/site-packages/torch/lib/cudnn_ops64_9.dll',
-  'Lib/site-packages/torch/lib/cufft64_12.dll',
-  'Lib/site-packages/torch/lib/cufftw64_12.dll',
-  'Lib/site-packages/torch/lib/cupti64_2025.3.0.dll',
-  'Lib/site-packages/torch/lib/curand64_10.dll',
-  'Lib/site-packages/torch/lib/cusolver64_12.dll',
-  'Lib/site-packages/torch/lib/cusolverMg64_12.dll',
-  'Lib/site-packages/torch/lib/cusparse64_12.dll',
-  'Lib/site-packages/torch/lib/nvJitLink_130_0.dll',
-  'Lib/site-packages/torch/lib/nvToolsExt64_1.dll',
-  'Lib/site-packages/torch/lib/nvperf_host.dll',
-  'Lib/site-packages/torch/lib/nvrtc-builtins64_130.dll',
-  'Lib/site-packages/torch/lib/nvrtc64_130_0.alt.dll',
-  'Lib/site-packages/torch/lib/nvrtc64_130_0.dll',
-  'Lib/site-packages/torch/lib/torch_cuda.dll'
-]
 
 /**
  * 当前发布包（官方版本，固定版本号）
@@ -212,55 +178,6 @@ export const RUNTIME_PACKAGES: RuntimePkg[] = [
       ]
     }
   },
-  {
-    framework: 'pytorch-cpu',
-    engine: 'pytorch',
-    variant: 'cpu',
-    supportsCpu: true,
-    supportsCuda: false,
-    name: 'PyTorch',
-    version: '2.14.0-py311-cpu',
-    sha256: '07d82e345023e838ad3a052ac33ac6e7954ea892c982f31e16c1dae2bf2685e7',
-    auxSha256: '',
-    unpackedBytes: 808768572,
-    manifest: 'runtime-manifest.json',
-    url: 'https://github.com/RebootFlume/voxflow/releases/download/runtime-assets/voxflow-pytorch-cpu-py311-torch2.14.0-win-x64.zip',
-    auxUrl: null,
-    auxDir: '',
-    auxFiles: ['worker.py', 'runtime-manifest.json', 'Lib/site-packages/torch/__init__.py'],
-    innerDir: '',
-    targetDir: 'pytorch-cpu',
-    marker: 'python.exe',
-    portBase: 0,
-    smokeArgs: ['worker.py', '--smoke-test'],
-    smokeProbe: { type: 'pythonWorker' }
-  },
-  {
-    framework: 'pytorch-cuda130',
-    engine: 'pytorch',
-    variant: 'cuda130',
-    supportsCpu: true,
-    supportsCuda: true,
-    name: 'PyTorch',
-    version: '2.14.0-py311-cuda130',
-    sha256: 'd1c50052830fe2b596377b5644d6093a282b0ae910662ea30479a802d2dbf545',
-    auxSha256: '42d42881e826b160e858899c2ce38d820f4db573524098088af29da9b2e71f91',
-    unpackedBytes: 3352022021,
-    manifest: 'runtime-manifest.json',
-    url: 'https://github.com/RebootFlume/voxflow/releases/download/runtime-assets/voxflow-pytorch-cuda130-py311-torch2.14.0-win-x64.zip',
-    // CUDA 运行库单独成包：torch 在 import 时会预加载 torch/lib 下全部 DLL，
-    // 缺任何一个被引用的都会让 import torch 失败 → 辅包必须与主包一起装。
-    auxUrl:
-      'https://github.com/RebootFlume/voxflow/releases/download/runtime-assets/voxflow-pytorch-cuda130-cuda13-libs.zip',
-    auxDir: 'Lib/site-packages/torch/lib',
-    auxFiles: CUDA130_AUX_FILES,
-    innerDir: '',
-    targetDir: 'pytorch-cuda130',
-    marker: 'python.exe',
-    portBase: 0,
-    smokeArgs: ['worker.py', '--smoke-test'],
-    smokeProbe: { type: 'pythonWorker' }
-  }
 ]
 
 /** libs 根目录（exe 旁 libs/，便携与安装共用） */
@@ -378,12 +295,6 @@ export function installedRuntimeForDevice(engine: string, device: string): Runti
       (wantsCuda ? p.supportsCuda : p.supportsCpu) &&
       isRuntimeInstalled(p)
   )
-  // CPU 请求优先复用 CUDA 版 PyTorch（CUDA wheel 同时包含 CPU kernel）
-  candidates.sort((a, b) => {
-    const ka = !wantsCuda && a.variant === 'cuda130' ? 0 : 1
-    const kb = !wantsCuda && b.variant === 'cuda130' ? 0 : 1
-    return ka - kb
-  })
   return candidates[0] ?? null
 }
 
@@ -393,12 +304,8 @@ export function preferredRuntimeForDevice(engine: string, device: string): Runti
   if (installed) return installed
   const wantsCuda = ['cuda', 'gpu'].includes(device.trim().toLowerCase())
   return (
-    RUNTIME_PACKAGES.find((p) =>
-      p.engine === engine
-        ? wantsCuda
-          ? p.supportsCuda
-          : p.variant === 'cpu' && p.supportsCpu
-        : false
+    RUNTIME_PACKAGES.find(
+      (p) => p.engine === engine && (wantsCuda ? p.supportsCuda : p.supportsCpu)
     ) ?? null
   )
 }
@@ -501,49 +408,6 @@ export async function smokeTestRuntime(pkg: RuntimePkg): Promise<void> {
   const exe = join(dir, pkg.marker)
   if (!existsSync(exe)) {
     throw new Error(`${exe} 不存在`)
-  }
-
-  if (pkg.smokeProbe.type === 'pythonWorker') {
-    // 异步起进程：Python worker 冷启动 1–3s，用 spawnSync 会把主线程整个占住
-    // （「点验证按钮卡一下」就是这么来的）。
-    const res = await new Promise<{ status: number | null; stdout: string; stderr: string }>(
-      (resolve) => {
-        const child = spawn(exe, pkg.smokeArgs, {
-          cwd: dir,
-          windowsHide: true,
-          stdio: ['ignore', 'pipe', 'pipe']
-        })
-        const out: Buffer[] = []
-        const err: Buffer[] = []
-        child.stdout?.on('data', (c: Buffer) => out.push(c))
-        child.stderr?.on('data', (c: Buffer) => err.push(c))
-        const timer = setTimeout(() => {
-          try {
-            child.kill()
-          } catch {
-            /* 已退出 */
-          }
-        }, 60_000)
-        child.on('error', () => {
-          clearTimeout(timer)
-          resolve({ status: null, stdout: '', stderr: '启动失败' })
-        })
-        child.on('close', (code) => {
-          clearTimeout(timer)
-          resolve({
-            status: code,
-            stdout: Buffer.concat(out).toString('utf-8'),
-            stderr: Buffer.concat(err).toString('utf-8')
-          })
-        })
-      }
-    )
-    const stdout = res.stdout
-    const stderr = res.stderr
-    if (res.status === 0 && stdout.includes('"ok": true')) return
-    throw new Error(
-      `Python worker smoke test 失败：退出=${res.status}，stdout=${stdout.trim()}，stderr=${stderr.trim()}`
-    )
   }
 
   // 随机端口（避开默认 8931/9002 与已运行实例冲突；基线来自数据表的 portBase）

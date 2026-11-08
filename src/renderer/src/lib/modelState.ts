@@ -64,7 +64,7 @@ export function runtimeKeyOf(
 /**
  * 该模型可用的全部运行时包 key（Rust 下发 runtime_keys）。
  *
- * PyTorch 有 cpu / cuda130 两个包，任一就绪即可加载 —— 单靠 runtime_key 会误判为缺框架。
+ * 同一引擎可能有多个包（如 CPU / CUDA 变体），任一就绪即可加载 —— 单靠 runtime_key 会误判为缺框架。
  * 未下发时回退单 key，保持既有行为。
  */
 export function runtimeKeysOf(
@@ -163,11 +163,9 @@ export function syncAsrFrameworkFromLoaded(): void {
  * - 运行时包 key → `tts.framework`（模型页过滤 / 持久化域）
  * - 引擎展示名 → `engines.tts.framework`（展示域）
  *
- * 事件的 framework 是 Rust 注册表的框架 id（`sherpa` / `pytorch`），而归一化目标是
- * 模型清单里的**主运行时包 key**（`onnx` / `pytorch-cpu`）——这正是下拉框选项的来源，
+ * 事件的 framework 是引擎注册表的框架 id（`gguf` / `sherpa`），而归一化目标是
+ * 模型清单里的**主运行时包 key**（`gguf` / `onnx`）——这正是下拉框选项的来源，
  * 两边必须同一套取值，否则选中值对不上选项、下拉框会显示空白或凭空多一项。
- * cuda 设备实际用的是 `pytorch-cuda130` 包，但过滤按 runtime_keys 成员判定（见 ModelSelector），
- * 所以框架标签仍归一到主 key，不随设备抖动。
  */
 export function applyTtsFrameworkFromRust(
   fw: string,
@@ -202,8 +200,7 @@ export function syncTtsFrameworkFromLoaded(): void {
 /**
  * 框架下拉选项：按模型清单推导（去重，顺序 = 清单顺序），并**把 `onnx` 固定排到最后**。
  *
- * 为什么 onnx 垫底：它是历史默认运行时，此前只有它一个；接入 PyTorch 后下拉顶部若仍是
- * onnx，看起来像"新框架没进来"。固定垫底后，新框架自然浮到前面，且与清单顺序无关。
+ * 为什么 onnx 垫底：它是历史默认运行时；固定垫底后其余框架自然浮到前面，且与清单顺序无关。
  * 其余框架保持清单顺序（清单顺序 = 优先级，由 Rust 的 SPECS 决定）。
  *
  * `current`（当前选中值）不在清单里时（清单未到 / 模型已下架）补到最前面，避免选择框空白。
@@ -241,9 +238,9 @@ export function frameworkOptionsOf(
 /**
  * 运行时包的展示名（多处共用：全局横幅 / 模型卡片 / 门禁提示）。
  *
- * 同一个引擎可能有多个包（PyTorch 的 cpu / cuda130），它们的 `name` **都是 "PyTorch"** ——
- * 直接 `map(p => p.name).join(" / ")` 会渲染成 "PyTorch / PyTorch"，用户看到的就是
- * "为什么 PyTorch 变成两个包"。所以重名时才补变体：`PyTorch (cpu)` / `PyTorch (cuda130)`；
+ * 同一个引擎可能有多个包（如 CPU / CUDA 变体），它们的 `name` 相同 ——
+ * 直接 `map(p => p.name).join(" / ")` 会渲染成重复名字，用户看到的就是
+ * "为什么同一个框架变成两个包"。所以重名时才补变体后缀：`名称 (cpu)` / `名称 (cuda)`；
  * 不重名则保持原名（llama.cpp、sherpa-onnx 不受影响）。
  */
 export function runtimePackageLabels(
@@ -258,7 +255,7 @@ export function runtimePackageLabels(
 /**
  * 「当前」行里框架的展示名：取运行时包名（与框架下拉、框架页一致），取不到再回退引擎注册键。
  *
- * 为什么这行要带框架：模型名不保证全局唯一 —— 同一个名字在 llama 与 pytorch 下都可能有，
+ * 为什么这行要带框架：模型名不保证全局唯一 —— 同一个名字在 llama 与 sherpa 下都可能有，
  * 而两个引擎互斥、只会有一个在跑，不带框架就看不出"现在起作用的是哪一个"。
  */
 export function loadedFrameworkLabel(kind: ModelKind): string {

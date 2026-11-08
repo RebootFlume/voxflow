@@ -69,15 +69,24 @@ export class SherpaFfiAdapter implements AsrEngine {
     }
     const dir = modelDir(name)
     if (!existsSync(dir)) throw new Error(`模型 ${name} 目录不存在: ${dir}`)
-    const modelPath = mainModelFile(spec, dir)
-    if (!modelPath) throw new Error(`模型 ${name} 缺少 ONNX 文件`)
-    const tokensPath = join(dir, 'tokens.txt')
+    // 文件名覆盖（whisper 这类文件名不含通用前缀的族）优先于通用规则
+    const modelPath = spec.backend.modelFile
+      ? join(dir, spec.backend.modelFile)
+      : mainModelFile(spec, dir)
+    if (!modelPath || !existsSync(modelPath)) throw new Error(`模型 ${name} 缺少 ONNX 文件`)
+    let decoderPath = ''
+    if (spec.backend.decoderFile) {
+      decoderPath = join(dir, spec.backend.decoderFile)
+      if (!existsSync(decoderPath)) throw new Error(`模型 ${name} 缺少 ${spec.backend.decoderFile}`)
+    }
+    const tokensPath = join(dir, spec.backend.tokensFile ?? 'tokens.txt')
     if (!existsSync(tokensPath)) throw new Error(`模型 ${name} 缺少 tokens.txt`)
 
     return {
       runtimeDir: sherpaRuntimeDir(),
       family: spec.backend.family as SherpaAsrFamily,
       modelPath,
+      decoderPath,
       tokensPath,
       provider: device.trim().toLowerCase() === 'cpu' ? 'cpu' : 'cuda',
       numThreads: defaultThreads(),

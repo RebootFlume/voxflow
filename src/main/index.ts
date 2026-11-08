@@ -48,7 +48,7 @@ function revealMainWindow(): void {
 /** 本次会话当前持有的引擎子进程 PID（孤儿清理时不能杀） */
 function currentEnginePids(): Set<number> {
   const pids = new Set<number>()
-  for (const fw of ['gguf', 'onnx', 'pytorch']) {
+  for (const fw of ['gguf', 'onnx']) {
     const pid = registry().engine(fw)?.pid()
     if (pid) pids.add(pid)
   }
@@ -225,9 +225,6 @@ app.on('before-quit', () => {
   // 等进程退出会让「点了关闭要等好几秒托盘图标才消失」）
   llamaEngine.killForExit()
   sherpaFfiAdapter.killForExit()
-  // python worker 同理：unload() 是异步的（要等 shutdown 协议应答），
-  // 退出时等不及 → 直接杀子进程，避免留下孤儿进程占显存。
-  registry().engine('pytorch')?.killForExit?.()
   // 合成中的 sherpa-tts 子进程同理（每次合成起一个，之前完全没跟踪）
   ttsRegistry().killForExit?.()
   void registry().unloadActive().catch(() => {})

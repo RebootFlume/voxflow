@@ -3,7 +3,7 @@
  *
  * 对齐 Rust 版 `src-tauri/src/inference/device.rs`：
  * 从 `inference/engine.rs` 与 `inference/llama_server.rs` 抽出，
- * 供所有引擎（llama.cpp FFI worker / sherpa / pytorch）共用。
+ * 供所有引擎（llama.cpp FFI worker / sherpa）共用。
  *
  * 依赖说明：进程相关操作全部走 Win32 FFI（`core/win32/process-table`）
  * + Node 内置 `process.kill`，**不依赖 PowerShell / netstat / taskkill**。
@@ -117,7 +117,7 @@ export function killPids(pids: number[]): number[] {
 /**
  * 清理「本软件 libs 目录下的引擎残留进程」（崩溃 / 被强杀留下的孤儿）。
  *
- * 为什么需要：用户强杀应用时，子进程（sherpa server / python worker）
+ * 为什么需要：用户强杀应用时，子进程（llama.cpp / sherpa-onnx FFI worker）
  * 会变成孤儿继续占着端口和显存；下次启动时一次性把不属于本次会话的引擎清掉。
  *
  * 实现：Win32 FFI 进程表（~10ms，无外部命令）→ 按路径归属筛选 → Node 内置终止。

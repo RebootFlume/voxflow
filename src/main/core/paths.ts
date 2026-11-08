@@ -7,9 +7,6 @@
  *
  * 资源内容（打包进安装包的只有 `icon.png`）：
  * - `icon.png`：托盘图标（extraResources → 安装目录 resources/icon.png）
- * - `pytorch/worker.py` + `runtime-manifest.json`：PyTorch 推理 worker 的**源码模板**，
- *   运行时并不读取它（推理用的是 libs 下对应运行时目录里的 worker.py，来自下载的运行时包），
- *   保留在仓库里是为了重建运行时包时有据可查。
  * - `espeak-ng/` 已删除：TTS 的 G2P 词典是各模型自带 `espeak-ng-data`
  *   （sherpa CLI 用 `--kokoro-data-dir` / `--zipvoice-data-dir` 指向模型目录），
  *   与仓库级 espeak-ng 无关。

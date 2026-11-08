@@ -77,10 +77,10 @@ console.log('\n【推理框架运行时】')
 const status = await call('check_runtime')
 check('check_runtime 可调用', status.ok === true, JSON.stringify(status))
 const pkgs = status.ok ? status.r.packages : []
-check('返回 4 个运行时包', pkgs.length === 4, `实际 ${pkgs.length}`)
+check('返回 2 个运行时包', pkgs.length === 2, `实际 ${pkgs.length}`)
 check(
-  '包键正确（gguf / onnx / pytorch-cpu / pytorch-cuda130）',
-  ['gguf', 'onnx', 'pytorch-cpu', 'pytorch-cuda130'].every((k) => pkgs.some((p) => p.framework === k)),
+  '包键正确（gguf / onnx）',
+  ['gguf', 'onnx'].every((k) => pkgs.some((p) => p.framework === k)),
   JSON.stringify(pkgs.map((p) => p.framework))
 )
 check(
@@ -102,7 +102,7 @@ check(
 check('libs 根目录指向 exe 旁', String(status.r.root).replace(/\\/g, '/').endsWith('/libs'), String(status.r.root))
 
 // 2. 验证命令：未安装的包 → missing；已安装的包 → ready
-const verify = await call('rust_verify_runtime', { framework: 'pytorch-cuda130' })
+const verify = await call('rust_verify_runtime', { framework: 'onnx' })
 check('rust_verify_runtime 可调用', verify.ok === true, JSON.stringify(verify))
 check(
   '未安装时返回 missing 且带缺失清单',
@@ -128,7 +128,7 @@ check(
 
 // 3. 真实下载 + 取消
 // 选一个**当前未安装**的包（已安装的会直接跳过下载 ⇒ 没有进度事件）。
-// 优先用 onnx；都装了就用 pytorch-cpu（取消早，只拉几 MB）。
+// 优先用 onnx；都装了就用第一个未安装的包。
 const notInstalled = pkgs.filter((p) => !p.installed).map((p) => p.framework)
 const DL = notInstalled.includes('onnx') ? 'onnx' : notInstalled[0] ?? 'onnx'
 console.log(`  … 启动真实下载（${DL}），稍后取消`)
@@ -165,27 +165,6 @@ check(
   JSON.stringify(seen.map((e) => e.status))
 )
 
-// 4. PyTorch 设备探测（未安装运行时 ⇒ 明确错误，不是崩溃）
-const probe = await call('rust_pytorch_device_info', { device: 'cpu' })
-check('rust_pytorch_device_info 可调用', probe.ok === true, JSON.stringify(probe))
-check(
-  '返回 { ok, device, info|error } 契约',
-  probe.ok && probe.r.device === 'cpu' && ('info' in probe.r || 'error' in probe.r),
-  JSON.stringify(probe)
-)
-if (probe.ok && probe.r.info) {
-  check(
-    'info 带齐前端契约字段',
-    ['python', 'torch', 'cuda_available', 'cuda_version', 'device_count'].every((k) => k in probe.r.info),
-    JSON.stringify(probe.r.info)
-  )
-} else {
-  check(
-    '未安装运行时时给出可读错误',
-    typeof probe.r.error === 'string' && probe.r.error.length > 0,
-    JSON.stringify(probe)
-  )
-}
 
 // 5. 取消后的临时目录：Rust 版语义 = **保留 .part**（下次可断点续传），
 //    目录本身不清理（取消路径上 Rust 也没做清理）。这里断言同样语义。

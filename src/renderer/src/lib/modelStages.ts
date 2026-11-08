@@ -1,7 +1,7 @@
 /**
  * 引擎加载阶段（框架无关）—— 启动遮罩与全局加载遮罩共用同一套阶段 / 进度 / 文案。
  *
- * 阶段由主进程 onStage 上报（llama.cpp FFI / pytorch-asr / registry）：
+ * 阶段由主进程 onStage 上报（llama.cpp FFI / sherpa-ffi / registry）：
  *   unload → loading → initializing → ready
  * `unload:<模型名>` 是带模型名的卸载变体，归到 unload。
  *

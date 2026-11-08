@@ -55,7 +55,7 @@ import {
   type VoiceModeSpec
 } from './spec-data'
 
-// ── 注册表（对策 python-backend/voxflow/registry.py） ──
+// ── 注册表（对齐原 Rust 版 registry） ──
 
 /** 主模型文件挑选策略 */
 export type FilePolicy = 'largest' | 'preferUnquantized'
@@ -113,17 +113,6 @@ export const FRAMEWORKS: readonly FrameworkSpec[] = [
     // TTS 合成是一次性子进程：无常驻进程可探
     processName: null
   },
-  {
-    id: 'pytorch',
-    engine: 'torch',
-    // 名义上的运行时包 key（展示/过滤用）；实际按设备选用 pytorch-cpu 或 pytorch-cuda130，
-    // 前端门禁读 models JSON 的 runtime_keys（全部可用包），不靠这一个字段判定。
-    runtimeKey: 'pytorch-cpu',
-    mainExts: ['.safetensors', '.pth'],
-    filePolicy: 'largest',
-    usesMmproj: false,
-    processName: 'python'
-  }
 ]
 
 // 显存诊断需要「框架 → 常驻进程名」的映射；注入给 vram 模块（避免两模块互相 import 成环）
@@ -200,7 +189,7 @@ export function adoptProxyEnv(): string {
   // （删掉才能保证「代理只有一个来源」）。Node 内置 fetch / undici **不会**隐式读
   // HTTP_PROXY（除非显式开 NODE_USE_ENV_PROXY），因此本移植**保留**环境变量：
   // 删掉对"单一来源"没有收益，却会连带影响本进程拉起的子进程
-  // （sherpa / python worker）与用户的其它期望。
+  // （sherpa）与用户的其它期望。
   // 代理仍然只经 `httpFetch(..., proxy)` 显式下发，行为与 Rust 版一致。
   return cfg.proxy
 }
@@ -463,7 +452,7 @@ function discoveredMainFiles(
 /** 检查模型目录是否已下载完成 */
 export function isComplete(dir: string): boolean {
   if (!isDir(dir)) return false
-  // 检测 1：config.json 存在（PyTorch / GGUF 转换仓库常保留）
+  // 检测 1：config.json 存在（GGUF 转换仓库常保留）
   if (existsSync(join(dir, 'config.json'))) return true
   // 检测 2：递归查找模型文件（扩展名来自框架描述符表）
   if (FRAMEWORKS.some((f) => findModelFiles(dir, 0, f.mainExts).length > 0)) return true
@@ -1059,9 +1048,7 @@ export function entryUnion(spec: ModelSpec): EntryFileSpec[] {
  */
 const RUNTIME_PACKAGE_KEYS: ReadonlyArray<{ engine: string; framework: string }> = [
   { engine: 'gguf', framework: 'gguf' },
-  { engine: 'onnx', framework: 'onnx' },
-  { engine: 'pytorch', framework: 'pytorch-cpu' },
-  { engine: 'pytorch', framework: 'pytorch-cuda130' }
+  { engine: 'onnx', framework: 'onnx' }
 ]
 
 /** 精选条目（payload 形状） */

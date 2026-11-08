@@ -232,14 +232,6 @@ body = body.replace(
     return `{ type: 'sherpaTts', family: '${m[1]}', cli: ${f.cli}, requiredFiles: ${f.required_files} }`
   }
 )
-body = body.replace(
-  /BackendSpec::PyTorch\(\s*PyTorchSpec\s*\{([^}]*)\}\s*,?\s*\)/g,
-  (_, inner) => {
-    const f = parseFields(inner)
-    return `{ type: 'pytorch', adapter: ${f.adapter}, language: ${f.language}, voice: ${f.voice} }`
-  }
-)
-
 // ArgSpec
 body = body.replace(
   /ArgSpec::Static\(\s*("(?:[^"\\]|\\.)*")\s*,\s*("(?:[^"\\]|\\.)*")\s*,?\s*\)/g,
@@ -348,7 +340,7 @@ function parseFields(inner) {
 if (process.env.SPEC_DEBUG) {
   writeFileSync(process.env.SPEC_DEBUG, body, 'utf8')
 }
-const leftovers = body.match(/\b(?:ModelKind|LanguageMode|VoiceMode|DownloadSource|FileRole|BackendSpec|ArgSpec|RuntimeKey|AsrBackendSpec|SherpaTtsSpec|PyTorchSpec|PresetSpec|CloneSpec|ModelSpec|DownloadEntry|EntryFile|ExtraFile)::/g)
+const leftovers = body.match(/\b(?:ModelKind|LanguageMode|VoiceMode|DownloadSource|FileRole|BackendSpec|ArgSpec|RuntimeKey|AsrBackendSpec|SherpaTtsSpec|PresetSpec|CloneSpec|ModelSpec|DownloadEntry|EntryFile|ExtraFile)::/g)
 if (leftovers) {
   throw new Error(`仍有未转换的 Rust 枚举引用: ${[...new Set(leftovers)].join(', ')}`)
 }
@@ -446,7 +438,6 @@ export type BackendSpec =
       cli: ArgSpec[]
       requiredFiles: string[]
     }
-  | { type: 'pytorch'; adapter: string; language: string; voice: string }
 
 export interface ModelSpec {
   id: string

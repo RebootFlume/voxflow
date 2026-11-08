@@ -80,6 +80,12 @@ export type BackendSpec =
       family: 'paraformer' | 'sense_voice' | 'whisper' | 'transducer' | 'nemo_ctc'
       /** 该族支持指定语言时使用（空 = 自动） */
       language?: string
+      /** 主模型文件名覆盖（缺省走 model.onnx / 最大 model-steps-*.onnx 的通用规则） */
+      modelFile?: string
+      /** 第二模型文件（whisper 的 decoder；缺省 = 无） */
+      decoderFile?: string
+      /** tokens 文件名覆盖（缺省 tokens.txt） */
+      tokensFile?: string
     }
   | {
       /** sherpa-onnx TTS（进程内 FFI）：family 决定 C 子结构体，cli 描述字段与文件 */
@@ -88,7 +94,6 @@ export type BackendSpec =
       cli: ArgSpec[]
       requiredFiles: string[]
     }
-  | { type: 'pytorch'; adapter: string; language: string; voice: string }
 
 export interface ModelSpec {
   id: string
@@ -522,72 +527,5 @@ export const SPECS: ModelSpec[] = [
             ], requiredFiles: ["model.onnx", "tokens.txt"] },
     },
     
-    {
-        id: "whisper-tiny-pt",
-        name: "Whisper-tiny-PT",
-        kind: 'asr',
-        framework: "pytorch",
-        
-        source: { type: 'huggingface', repo: "openai/whisper-tiny", revision: "169d4a4341b33bc18d8881c4b69c2e104e1cc0af" },
-        entries: [{
-            id: "fp32",
-            labelZh: "FP32（多语，含中文）",
-            labelEn: "FP32 (multilingual)",
-            default: true,
-            files: [
-                { role: 'main', name: "model.safetensors", sizeMb: 145 },
-                { role: 'extra', name: "config.json", sizeMb: 1 },
-                { role: 'extra', name: "generation_config.json", sizeMb: 1 },
-                { role: 'extra', name: "preprocessor_config.json", sizeMb: 1 },
-                { role: 'extra', name: "tokenizer.json", sizeMb: 3 },
-                { role: 'extra', name: "tokenizer_config.json", sizeMb: 1 },
-                { role: 'extra', name: "special_tokens_map.json", sizeMb: 1 },
-                { role: 'extra', name: "normalizer.json", sizeMb: 1 },
-            ],
-        }],
-        sizeGb: 0.15,
-        descriptionZh: "Whisper tiny · 多语 ASR · PyTorch 运行时 · 首个 PyTorch 适配模型（效果弱于 Qwen3-ASR）",
-        descriptionEn: "Whisper tiny · multilingual ASR · PyTorch runtime · first PyTorch adapter model",
-        available: true,
-        cpu: "good",
-        extraFiles: [],
-        quant: null,
-        
-        languages: [],
-        languageMode: 'fixed',
-        voiceMode: { type: 'fixed' },
-        backend: { type: 'pytorch', adapter: "whisper", language: "zh", voice: "" },
-    },
-    
-    {
-        id: "kokoro-82m-pt",
-        name: "Kokoro-82M-PT",
-        kind: 'tts',
-        framework: "pytorch",
-        source: { type: 'huggingface', repo: "hexgrad/Kokoro-82M", revision: "f3ff3571791e39611d31c381e3a41a3af07b4987" },
-        entries: [{
-            id: "v1_0-zh",
-            labelZh: "v1.0 + 中文音色（女/男各一）",
-            labelEn: "v1.0 + zh voices (female/male)",
-            default: true,
-            files: [
-                { role: 'main', name: "kokoro-v1_0.pth", sizeMb: 313 },
-                { role: 'extra', name: "config.json", sizeMb: 1 },
-                { role: 'extra', name: "voices/zf_xiaobei.pt", sizeMb: 1 },
-                { role: 'extra', name: "voices/zm_yunxi.pt", sizeMb: 1 },
-            ],
-        }],
-        sizeGb: 0.32,
-        descriptionZh: "Kokoro-82M · 中文 TTS · PyTorch 运行时（vendor 推理代码 + misaki 中文 G2P）",
-        descriptionEn: "Kokoro-82M · Chinese TTS · PyTorch runtime (vendored inference + misaki zh G2P)",
-        available: true,
-        cpu: "good",
-        extraFiles: [],
-        quant: null,
-        languages: ["zh"],
-        languageMode: 'fixed',
-        voiceMode: { type: 'fixed' },
-        backend: { type: 'pytorch', adapter: "kokoro", language: "zh", voice: "zf_xiaobei" },
-    },
 
 ]

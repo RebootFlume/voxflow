@@ -20,6 +20,8 @@ export interface SherpaAsrSessionOptions {
   family: SherpaAsrFamily
   /** 主模型文件绝对路径 */
   modelPath: string
+  /** 第二模型文件绝对路径（whisper 的 decoder；其他族传空串） */
+  decoderPath?: string
   /** tokens.txt 绝对路径 */
   tokensPath: string
   /** 推理提供者（"cpu" / "cuda"） */
@@ -158,11 +160,17 @@ export class SherpaAsrSession {
         }
         break
       case 'whisper':
-        // whisper 是 encoder/decoder 双模型，调用方把 encoder 传到 modelPath，
-        // decoder 由 tokens 同目录的同名文件推导（本项目的 whisper 模型是单文件导出）
+        // whisper 是 encoder/decoder 双模型，且文件名不含通用前缀（tiny-encoder.onnx 等），
+        // 两个路径都由描述符给出；language 为空时 sherpa 会从音频推断语种。
+        if (!opts.decoderPath) {
+          throw new Error(`whisper 模型缺少 decoder: ${opts.modelPath}`)
+        }
         config.model_config.whisper = {
           ...config.model_config.whisper,
-          encoder: modelPath
+          encoder: modelPath,
+          decoder: opts.decoderPath,
+          language: opts.language ?? '',
+          task: 'transcribe'
         }
         break
       case 'transducer':

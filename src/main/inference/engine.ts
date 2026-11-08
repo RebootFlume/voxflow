@@ -16,14 +16,14 @@ export type AsrStage = 'unload' | 'loading' | 'initializing' | 'ready'
 export type AsrStageCallback = (stage: string) => void
 
 /**
- * ASR 引擎统一抽象：所有 ASR 框架（llama.cpp FFI / sherpa-onnx / 未来 PyTorch）
+ * ASR 引擎统一抽象：所有 ASR 框架（llama.cpp FFI / sherpa-onnx）
  * 实现此接口，注册到 registry 后即可被统一路由（加载/卸载/转写/显存估算）。
  *
  * 设计目标（横向扩展）：新增一个 ASR 框架 = 新建一个文件实现此接口 +
  * 在 `registry::register` 注册一行。调用方只依赖此接口 + registry，不感知具体框架。
  */
 export interface AsrEngine {
-  /** 引擎框架标识（gguf / onnx / pytorch） */
+  /** 引擎框架标识（gguf / onnx） */
   framework(): string
 
   /** 加载模型（按名称从注册表动态解析路径） */
@@ -91,7 +91,7 @@ export interface AsrEngine {
    * 退出路径专用：**同步**杀掉引擎子进程（不等它退出、不做协议握手）。
    *
    * 可选方法：只有持有长驻子进程的引擎需要实现
-   * （llama.cpp FFI worker / sherpa-onnx FFI worker / python worker）。
+   * （llama.cpp FFI worker / sherpa-onnx FFI worker）。
    * 退出时如果只走 `unload()`（异步、要等协议握手），进程可能来不及
    * 走完握手就被杀掉 → 子进程变成孤儿继续占显存/端口。
    */

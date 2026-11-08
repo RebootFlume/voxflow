@@ -522,7 +522,7 @@ export function readGgufKvGeometryCached(filePath: string): GgufKvGeometry | nul
 
 /** 框架 → 显存占用来源（进程名）；由 `model_manager` 注入（避免两个模块互相 import 成环） */
 export interface FrameworkGpuSource {
-  /** 引擎注册键（"gguf" | "onnx" | "sherpa" | "pytorch"） */
+  /** 引擎注册键（"gguf" | "onnx" | "sherpa"） */
   id: string
   /** 前端展示名（分组 / 标签 / 显存 JSON key）："llama" | "sherpa" | "torch" */
   engine: string

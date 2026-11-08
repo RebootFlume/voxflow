@@ -27,7 +27,7 @@ function runtimeGate(kind: "asr" | "tts", name: string): boolean {
   if (keys.length === 0 && kind === "asr" && s.asr.framework) keys.push(s.asr.framework);
   const pkgs = s.runtime.packages;
   if (!pkgs || keys.length === 0) return true; // 未检测到 / 无可判定的 key → 不拦（交给 Rust 报错）
-  // 任一包就绪即放行：PyTorch 的 cpu / cuda130 两个包共用同一个引擎
+  // 任一包就绪即放行：同一引擎的多个运行时包（如 CPU / CUDA 变体）共用同一个引擎
   const candidates = keys.map((k) => pkgs.find((p) => p.framework === k)).filter(Boolean);
   if (candidates.length === 0 || candidates.some((p) => p!.state === "ready")) return true;
   const blocked = candidates.find((p) => p!.state !== "ready")!;
@@ -125,7 +125,7 @@ export function loadTtsModel(name: string, device: string): Promise<void> {
   if (!runtimeGate("tts", name)) return Promise.resolve();
   // 乐观阶段先把框架偏好切到这个模型的框架：否则过滤后的列表会把刚点中的模型自己藏起来
   // （框架≠模型所属框架），点完瞬间卡片消失、加载完成又冒出来。最终以 model_ready 事件为准
-  // （cuda 设备会纠正到 pytorch-cuda130 所在的那个框架标签）。
+  // （cuda 设备会纠正到对应 CUDA 运行时包所在的框架标签）。
   const item = s.models.items.find((i) => i.name === name);
   const fwKey = runtimeKeyOf(item);
   s.setEngineStatus("tts", { model: name, status: "loading", error: null });
@@ -168,8 +168,8 @@ export function unloadTtsModel(): Promise<void> {
  * 切换 TTS 推理框架 —— **只改选中，绝不碰引擎**。
  *
  * 加载/卸载只由"点模型卡片""点激活""点应用并重载"触发（见方案：统一加载策略）。
- * 之前这里会直接加载新框架下"第一个已下载"的模型：用户只是想看看 PyTorch 下有什么模型，
- * 就会被起一个 worker（PyTorch 首次 3–8s、吃内存/显存）。
+ * 之前这里会直接加载新框架下"第一个已下载"的模型：用户只是想看看另一个框架下有什么模型，
+ * 就会被起一个 worker（首次加载 3–8s、吃内存/显存）。
  *
  * 选中项 = 该框架下**你上次选过的那个**（`lastModelByFramework`）；从没选过则谁都不选，
  * 也不替用户挑第一个。

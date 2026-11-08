@@ -216,7 +216,6 @@ const DICTS: Record<Locale, Dict> = {
     "framework.desc": "推理引擎二进制（libs）；存放目录:",
     "framework.desc.llama": "llama.cpp · Qwen3-ASR GGUF 推理引擎（进程内 FFI，CUDA/CPU）",
     "framework.desc.sherpa": "sherpa-onnx · SenseVoice/Paraformer ASR + TTS 引擎",
-    "framework.desc.pytorch": "PyTorch · 独立 Python 运行时（CPU / CUDA 13.0 两个包）",
     "framework.comingSoon": "即将推出",
     "framework.probeDevice": "检测设备",
     "framework.cap.cpu": "该运行时支持 CPU 推理",
@@ -262,7 +261,7 @@ const DICTS: Record<Locale, Dict> = {
     "models.group.tts": "语音合成 · 文字转语音",
     "models.comingSoon": "即将支持",
     "models.filter.all": "全部",
-    "models.sidecarLost": "未收到模型服务的响应。Python 端（Sidecar）随应用启动，不会热更新 —— 请完全重启应用后重试",
+    "models.sidecarLost": "未收到模型服务的响应。模型服务随应用启动，不会热更新 —— 请完全重启应用后重试",
     "models.title": "模型管理",
     "models.desc": "下载、切换与删除本地语音模型；下载代理与存放目录均可配置",
     // Storage card
@@ -507,7 +506,6 @@ const DICTS: Record<Locale, Dict> = {
     "framework.desc": "Engine binaries (libs); stored in:",
     "framework.desc.llama": "llama.cpp · Qwen3-ASR GGUF engine (in-process FFI, CUDA/CPU)",
     "framework.desc.sherpa": "sherpa-onnx · SenseVoice/Paraformer ASR + TTS engine",
-    "framework.desc.pytorch": "PyTorch · standalone Python runtime (CPU / CUDA 13.0 packages)",
     "framework.comingSoon": "Coming soon",
     "framework.probeDevice": "Probe device",
     "framework.cap.cpu": "This runtime supports CPU inference",
@@ -723,7 +721,7 @@ const DICTS: Record<Locale, Dict> = {
     "models.group.tts": "Speech Synthesis · text to speech",
     "models.comingSoon": "Coming soon",
     "models.filter.all": "All",
-    "models.sidecarLost": "No response from the model service. The Python sidecar starts with the app and does not hot-reload — please fully restart the app and retry",
+    "models.sidecarLost": "No response from the model service. It starts with the app and does not hot-reload — please fully restart the app and retry",
     "models.title": "Model Manager",
     "models.desc": "Download, switch and remove local voice models; download proxy and storage folder are configurable",
     // Storage card

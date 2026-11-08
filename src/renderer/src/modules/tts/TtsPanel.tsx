@@ -155,7 +155,7 @@ function ModelDevicePage() {
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <span>{t(locale, "tts.current")}: </span>
             {/* 读引擎状态而不是选中项：切框架/换选中都不该让这行"忘记"正在起作用的模型。
-                带框架名是因为模型名不保证跨框架唯一（llama / pytorch 可能重名）。 */}
+                带框架名是因为模型名不保证跨框架唯一（llama / sherpa 可能重名）。 */}
             <ModelStatusBadge status={engine.status} modelName={engine.model ?? ""} />
             {engine.status === "ready" && loadedFw && (
               <span className="text-muted-foreground">({loadedFw})</span>
@@ -1182,7 +1182,7 @@ function VoiceSettingsPage() {
             </div>
 
             {/* 能力门控：**只占一行**（下面的音色平铺才是主体，别让提示吃掉高度）。
-                不列"可切到哪些克隆模型"：用哪个模型由用户自己决定（后续接入 PyTorch 等更多引擎后
+                不列"可切到哪些克隆模型"：用哪个模型由用户自己决定（后续接入更多引擎后
                 更不该由这里替他选），这里只给状态 + 一个去模型页的入口。 */}
             {noModel ? (
               <div className="flex shrink-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">

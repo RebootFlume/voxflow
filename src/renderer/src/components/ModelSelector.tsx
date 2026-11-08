@@ -15,7 +15,7 @@ const ENGINE_BADGE_CLASSES: Record<string, string> = {
 };
 
 /**
- * 徽章文案：运行时包 key 去掉设备变体后缀（`pytorch-cpu` / `pytorch-cuda130` → `PYTORCH`）。
+ * 徽章文案：运行时包 key 去掉设备变体后缀（`llama-cpp` → `LLAMA`）。
  *
  * 理由：徽章回答的是"这个模型跑在哪个框架上"，而 cpu / cuda 是同一引擎的两个包 —— 具体用哪个包
  * 由上方的框架下拉与设备选择决定。键名原样显示还会撑爆 200px 的卡片列，把模型名挤成 "Kokoro-…"。
@@ -110,7 +110,7 @@ export function ModelSelector({ kind, selected, onSelect, formatFilter, download
                   : t(locale, "common.modelNotLoaded")
             : "";
         // 该模型所需框架未就绪 → 标注（用户不必先点一次才知道）
-        // 同一框架可能有多个运行时包（PyTorch: cpu / cuda130），任一就绪即不算缺
+        // 同一框架可能有多个运行时包（CPU / CUDA 变体），任一就绪即不算缺
         const fwPkgs = runtimeKeysOf(m)
           .map((k) => runtimePackages?.find((p) => p.framework === k))
           .filter((p): p is NonNullable<typeof p> => Boolean(p));

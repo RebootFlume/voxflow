@@ -79,9 +79,7 @@ console.log(`耗时 ${((Date.now() - t0) / 1000).toFixed(0)}s`)
 // 落盘结果
 const pkgDirs = {
   gguf: 'llama-cpp',
-  onnx: 'sherpa-onnx',
-  'pytorch-cpu': 'pytorch-cpu',
-  'pytorch-cuda130': 'pytorch-cuda130'
+  onnx: 'sherpa-onnx'
 }
 const dir = join(LIBS, pkgDirs[framework] ?? framework)
 if (existsSync(dir)) {

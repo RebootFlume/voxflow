@@ -2,7 +2,7 @@
  * ASR 引擎注册表：统一路由 + 互斥
  * —— 对齐 Rust 版 `src-tauri/src/inference/registry.rs`。
  *
- * 所有 ASR 框架（llama.cpp FFI / sherpa-onnx / 未来 PyTorch）实现 `AsrEngine`
+ * 所有 ASR 框架（llama.cpp FFI / sherpa-onnx）实现 `AsrEngine`
  * 接口后注册到这里。上层（加载模型、热键录音转写、显存监控）只依赖本模块，
  * 不感知具体框架 —— 新增框架只需「实现接口 + 注册一行」。
  *
@@ -14,7 +14,6 @@ import type { AsrEngine } from './engine'
 import { llamaFfiAdapter } from './llama-ffi'
 import { lastRequestedModel, recordLastRequested } from './asr-request'
 import { sherpaFfiAdapter } from './sherpa-ffi'
-import { PyTorchAsrAdapter } from './pytorch-asr'
 import type { ModelSpec } from '../models/spec-data'
 import { findAsrModelSpec } from './asr-target'
 
@@ -38,8 +37,6 @@ export class AsrRegistry {
     this.register('gguf', llamaFfiAdapter)
     // onnx → sherpa-onnx 进程内 FFI（sherpa-onnx-c-api.dll，worker 子进程隔离崩溃）
     this.register('onnx', sherpaFfiAdapter)
-    // pytorch → 独立 Python worker（按需下载运行时；模型适配器在运行时白名单里）
-    this.register('pytorch', new PyTorchAsrAdapter())
   }
 
   /** 注册一个引擎 */

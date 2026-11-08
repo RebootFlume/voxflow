@@ -3,7 +3,7 @@
  * —— 对齐 Rust 版 `src-tauri/src/tts/registry.rs`。
  *
  * - 持有引擎槽：按描述符 framework 路由，互斥（同一时间一个引擎）。
- * - 命令层只调本注册表，不感知具体框架（sherpa / 未来 pytorch）。
+ * - 命令层只调本注册表，不感知具体框架（sherpa）。
  * - 加引擎 = 在构造函数注册一行（接口 + 引擎实现，无 if/else）。
  */
 
@@ -11,7 +11,6 @@ import { join } from 'node:path'
 import { getModelRoot, mainModelFile, findSpec } from '../models/model-manager'
 import type { ModelSpec } from '../models/spec-data'
 import { SherpaTtsEngine } from './engine-sherpa'
-import { PyTorchTtsEngine } from './engine-pytorch'
 import type { TtsEngine } from './traits'
 
 /** TTS 引擎注册表 */
@@ -21,8 +20,6 @@ export class TtsRegistry {
 
   constructor() {
     this.register('sherpa', new SherpaTtsEngine())
-    // PyTorch Python worker（Kokoro 等）
-    this.register('pytorch', new PyTorchTtsEngine())
   }
 
   /** 注册一个引擎 */

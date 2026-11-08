@@ -10,7 +10,7 @@ files:
   - '!src/*'
   - '!scripts/*'
   - '!resources/**'
-  # 推理运行时（llama-cpp / sherpa-onnx / pytorch）不入包：
+  # 推理运行时（llama-cpp / sherpa-onnx）不入包：
   # 运行时由 runtime-download 下载到 exe 同级 libs/（见 runtime-paths.ts libsDir），
   # 打进 asar 会让安装包膨胀到 1.8GB，且 libs/sherpa-onnx 是 junction（asar 会跟随展开）。
   - '!libs/**'
@@ -28,7 +28,7 @@ files:
 asarUnpack:
   - '**/*.node'
 # 运行时资源：随包分发（不在 asar 内）
-# 只带托盘图标。PyTorch worker.py 是源码模板、espeak-ng 已确认未被引用 —— 都不再打进安装包。
+# 只带托盘图标。推理运行时由运行时下载器落到 exe 同级 libs/，espeak-ng 由各模型自带。
 extraResources:
   - from: resources/icon.png
     to: icon.png
