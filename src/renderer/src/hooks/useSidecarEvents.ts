@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { onSidecarEvent, rustListTtsSpeakers, rustTtsVoicesList, rustTtsVoiceUse, sendToSidecar } from "@/lib/ipc";
-import { applyEngineStatus, applyAsrFrameworkFromRust, applyTtsFrameworkFromRust, syncAsrFrameworkFromLoaded, syncTtsFrameworkFromLoaded, resolveModelKind, runtimeKeyOf, ttsSupportsClone } from "@/lib/modelState";
+import { applyEngineStatus, applyAsrFrameworkFromRust, applyTtsFrameworkFromRust, syncAsrFrameworkFromLoaded, syncTtsFrameworkFromLoaded, resolveModelKind, runtimeKeyOf, ttsSupportsClone, LOAD_REQ_PENDING } from "@/lib/modelState";
 import { useAppStore, type EngineState } from "@/stores";
 import { t } from "@/lib/i18n";
 
@@ -30,8 +30,10 @@ export function useSidecarEvents() {
       const model = typeof payload.model === "string" ? payload.model : "";
 
       // 旧请求的迟到事件（reqId 不匹配当前最新请求）→ 丢弃，避免旧终态覆盖新状态
+      // 例外：loadReqId === LOAD_REQ_PENDING（请求已发出、reqId 还没回来）→ 事件必属于本次加载
       const reqId = typeof payload.reqId === "number" ? payload.reqId : null;
-      if (reqId !== null && reqId !== useAppStore.getState().asr.loadReqId) {
+      const knownReqId = useAppStore.getState().asr.loadReqId;
+      if (reqId !== null && reqId !== knownReqId && knownReqId !== LOAD_REQ_PENDING) {
         return;
       }
 

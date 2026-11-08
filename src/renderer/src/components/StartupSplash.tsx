@@ -1,22 +1,36 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, AudioWaveform, Loader2, Sparkles, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Progress } from "@/components/ui/progress";
 import { useAppStore } from "@/stores";
 import { t } from "@/lib/i18n";
+import { stageLabelKey, stageProgress } from "@/lib/modelStages";
 
 /**
  * 启动 Splash（Voicebox 式启动界面）。
  *
  * 显示条件：startupPhase === "booting"
+ *
  * 消失条件（满足任一）：
- *   1. ASR 引擎就绪（ready）或加载失败（error）→ 淡出
- *   2. 用户点击「跳过」（10s 后按钮出现）
- *   3. 空启动：2s 内 ASR 仍 idle（无模型要加载）→ 显示「未检测到模型」并淡出，引导去模型页
+ *   1. ASR 引擎就绪（ready）→ 淡出
+ *   2. 启动失败（error）→ 不静默淡出，就地给出原因与出口（见下方 error 面板）
+ *   3. 本次没有模型要加载（autoLoadState = none）→ 一闪而过（~0.3s）
+ *   4. 开了自动加载但选中的模型没下载（autoLoadState = skipped）→ 显示「未检测到模型」1.5s 后淡出
+ *   5. 10s 兜底：清单始终没到（sidecar 异常）或引擎仍在 idle → 放行，不挂死启动页
+ *   6. 用户点「跳过」（10s 后按钮出现）
+ *
+ * 判定为什么不用固定死线：以前是"2s 内引擎还 idle 就当空启动"，那是在和自动加载赛跑 ——
+ * 自动加载开关关着时必然误报「未检测到模型」（模型其实已下载且已选中），还要多等 3.5s 才进主界面。
+ * 现在改成状态驱动：判定结论由 autoLoadFromManifest 写进 store（models.autoLoadState），
+ * 启动页只读这个结论，不用自己猜"加载到底发生没有"。
+ *
+ * 加载过程可见：阶段文案与进度条与全局加载遮罩共用同一套四段（unload → loading → initializing → ready），
+ * 启动期 ModelLoadingOverlay 不再同时显示（启动页已展示同一套进度，避免启动页淡出瞬间闪黑块）。
  *
  * 设计：
- *  - 全屏 fixed，z-[110]（盖在 ModelLoadingOverlay 之上）
- *  - 紫色主题品牌画面：logo + 转圈 + 阶段文案 + 版本
- *  - 淡出动画 400ms 后 unmount
+ *  - 全屏 fixed，z-[110]
+ *  - 紫色主题品牌画面：logo + 转圈 + 阶段文案 + 进度条
+ *  - 淡出动画 300ms 后 unmount
  */
 export function StartupSplash() {
   const locale = useAppStore((s) => s.locale);
@@ -25,6 +39,18 @@ export function StartupSplash() {
   const asrModel = useAppStore((s) => s.engines.asr.model);
   const asrStage = useAppStore((s) => s.engines.asr.stage);
   const asrError = useAppStore((s) => s.engines.asr.error);
+  const autoLoadState = useAppStore((s) => s.autoLoadState);
+  // 配置恢复后才知道"本次到底要不要加载模型"
+  const configLoaded = useAppStore((s) => s.configLoaded);
+  const asrAutoLoad = useAppStore((s) => s.asr.autoLoad);
+  const ttsAutoLoad = useAppStore((s) => s.tts.autoLoad);
+  // 注意：这里要的是"配置里选中的模型"（asr.model / tts.model），不是引擎状态里的模型（engines.asr.model）——
+  // 后者要等引擎真的起来才有值，启动那一刻恒为空；拿它判断会把"要加载"误判成"没东西可加载"，启动页就一闪而过了。
+  const selectedAsrModel = useAppStore((s) => s.asr.model);
+  const selectedTtsModel = useAppStore((s) => s.tts.model);
+  // 本次启动到底要不要加载模型：任一引擎"开了自动加载且选了模型"才算要加载
+  const nothingToLoad =
+    configLoaded && !(asrAutoLoad && selectedAsrModel) && !(ttsAutoLoad && selectedTtsModel);
   const setActiveModule = useAppStore((s) => s.setActiveModule);
   const setActiveSubMenu = useAppStore((s) => s.setActiveSubMenu);
 
@@ -34,6 +60,20 @@ export function StartupSplash() {
   const [emptyBoot, setEmptyBoot] = useState(false);
   const skipTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fadeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /** 延迟 delayMs 后淡出 → 300ms 淡出动画结束后卸载并切到主界面 */
+  const fadeOut = useCallback((delayMs = 0) => {
+    if (fadeTimer.current) clearTimeout(fadeTimer.current);
+    fadeTimer.current = setTimeout(() => {
+      setFading(true);
+      if (hideTimer.current) clearTimeout(hideTimer.current);
+      hideTimer.current = setTimeout(() => {
+        setVisible(false);
+        useAppStore.getState().setStartupPhase("ready");
+      }, 300);
+    }, delayMs);
+  }, []);
 
   // 10s 后显示「跳过」按钮
   useEffect(() => {
@@ -43,79 +83,58 @@ export function StartupSplash() {
     };
   }, []);
 
-  // 空启动检测：2s 后若 ASR 仍未进入 loading，且**清单已到**（确认真的没得加载）→ 视为空启动。
-  // 为什么要等清单：自动加载现在挂在清单事件上（要先校验模型还在不在），
-  // 不等它就会出现"启动页说没模型 → 界面出来后模型才开始加载"的错位。
-  // 兜底：清单始终没到（sidecar 异常）时也不能把启动页挂死 —— 6s 后无条件按空启动处理。
+  // 启动判定（状态驱动）：读 autoLoadState 的结论，不自己猜"加载有没有发生"
   useEffect(() => {
-    const softCheck = setTimeout(() => {
-      const st = useAppStore.getState();
-      if (st.engines.asr.status === "idle" && st.models.manifestAt !== null) {
-        setEmptyBoot(true);
-      }
-    }, 2_000);
-    const hardCheck = setTimeout(() => {
-      const st = useAppStore.getState();
-      if (st.engines.asr.status === "idle") {
-        setEmptyBoot(true);
-      }
-    }, 6_000);
-    return () => {
-      clearTimeout(softCheck);
-      clearTimeout(hardCheck);
-    };
-  }, []);
+    if (autoLoadState === "none") {
+      // 本次没有模型要加载（自动加载开关关 / 没选模型）→ 一闪而过，不让启动页拖住用户
+      fadeOut(0);
+      return;
+    }
+    if (autoLoadState === "skipped") {
+      // 开了自动加载但选中的模型没下载（被删/换机）→ 这才是真的"未检测到模型"
+      setEmptyBoot(true);
+      return;
+    }
+    // 配置已恢复且确认"本次没有任何模型要加载" → 不用等清单，直接一闪而过
+    if (nothingToLoad) fadeOut(0);
+  }, [autoLoadState, nothingToLoad, fadeOut]);
 
   // 空启动：显示「未检测到模型」1.5s 后自动淡出进主界面
   useEffect(() => {
     if (!emptyBoot) return;
-    fadeTimer.current = setTimeout(() => {
-      setVisible(false);
-      useAppStore.getState().setStartupPhase("ready");
-    }, 1_500);
-    return () => {
-      if (fadeTimer.current) clearTimeout(fadeTimer.current);
-    };
-  }, [emptyBoot]);
+    fadeOut(1_500);
+  }, [emptyBoot, fadeOut]);
 
   // 消失条件：ASR ready → 淡出；ASR error → 不静默消失，改为就地解释（见下方 error 面板）
   useEffect(() => {
-    if (asrStatus === "ready") {
-      setFading(true);
-      fadeTimer.current = setTimeout(() => {
-        setVisible(false);
-        useAppStore.getState().setStartupPhase("ready");
-      }, 400);
-    }
-    return () => {
-      if (fadeTimer.current) clearTimeout(fadeTimer.current);
-    };
-  }, [asrStatus]);
+    if (asrStatus === "ready") fadeOut(0);
+  }, [asrStatus, fadeOut]);
+
+  // 兜底：10s 还没拿到清单（sidecar 异常），或引擎仍在 idle（自动加载没发生）→ 放行，不挂死启动页
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const st = useAppStore.getState();
+      if (st.models.manifestAt === null) fadeOut(0);
+      else if (st.engines.asr.status === "idle") fadeOut(0);
+    }, 10_000);
+    return () => clearTimeout(timer);
+  }, [fadeOut]);
 
   // 用户跳过：直接淡出
-  const handleSkip = () => {
-    setFading(true);
-    fadeTimer.current = setTimeout(() => {
-      setVisible(false);
-      useAppStore.getState().setStartupPhase("ready");
-    }, 300);
-  };
+  const handleSkip = () => fadeOut(0);
 
   if (phase !== "booting" || !visible) return null;
 
-  // 阶段文案：初始化 → 加载中（细粒度阶段） / 空启动
+  // 阶段文案：初始化 → 加载中（细粒度阶段） / 已就绪（淡出前别倒退成"正在初始化…"） / 空启动
   const isAsrLoading = asrStatus === "loading";
-  // 细粒度阶段 → 文案（框架无关，与 ModelLoadingOverlay 一致）
-  const stageText: Record<string, string> = {
-    unload: t(locale, "overlay.stage.unload"),
-    loading: t(locale, "overlay.stage.loading"),
-    initializing: t(locale, "overlay.stage.initializing"),
-  };
   const stageLabel = isAsrLoading
     ? asrModel
-      ? `${asrModel} · ${stageText[asrStage ?? "loading"] ?? stageText.loading}`
+      ? `${asrModel} · ${t(locale, stageLabelKey(asrStage))}`
       : t(locale, "splash.loading")
-    : t(locale, "splash.init");
+    : asrStatus === "ready" && asrModel
+      ? `${asrModel} · ${t(locale, "overlay.stage.ready")}`
+      : t(locale, "splash.init");
+  const stageValue = stageProgress(asrStage);
 
   return (
     <div
@@ -186,6 +205,11 @@ export function StartupSplash() {
           <p className="max-w-[260px] truncate text-center text-sm text-muted-foreground">
             {stageLabel}
           </p>
+          {isAsrLoading && (
+            <div className="w-[260px]">
+              <Progress value={stageValue} className="h-1.5" />
+            </div>
+          )}
         </div>
       )}
 

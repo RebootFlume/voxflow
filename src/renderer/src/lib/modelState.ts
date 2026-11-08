@@ -12,6 +12,16 @@ import { useAppStore, type ModelItemState } from "@/stores";
 
 export type ModelKind = "asr" | "tts";
 
+/**
+ * 「加载请求已发出、reqId 还没回来」的哨兵值（暂存在 asr.loadReqId 里）。
+ *
+ * 主进程在 invoke 的**应答**里才带 reqId，而首个 model_loading 事件可能先于应答到达；
+ * 此时 store 里的 loadReqId 还是上一次的值，那个事件会被事件过滤当成"旧请求的迟到事件"丢掉
+ * （现象：日志里缺「⏳ 正在加载…」那一行，四段进度也少一格）。
+ * 发起加载时先写本哨兵，事件过滤据此放行"在途"事件。
+ */
+export const LOAD_REQ_PENDING = -1;
+
 /** 清单里按展示名 / 引擎目录名归一化找模型（与 Rust `spec::find` 的别名集合一致） */
 export function ttsModelInfoOf(
   items: ModelItemState[],

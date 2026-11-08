@@ -58,7 +58,11 @@ export async function loadConfig() {
       },
       useRustEngine: parsed.useRustEngine ?? false,
     });
-  } catch {}
+  } catch {} finally {
+    // 配置已尝试恢复（文件缺失/解析失败也算完成）→ 启动自动加载可以按当前选中的模型继续，
+    // 不必无限期等待（autoLoadFromManifest 靠这个标记判断"配置到位了"）
+    useAppStore.getState().setConfigLoaded(true);
+  }
 }
 
 /** 保存当前配置到文件 */
@@ -154,11 +158,15 @@ export async function loadAllHistory() {
     if (dates.length === 0) return;
 
     const allRecords: HistoryRecord[] = [];
-    for (const date of dates) {
-      const data = await loadData(historyFile(date));
-      if (data) {
+    // 并行读取各日期文件：串行 await 会把启动关键路径拉长 N 个 IPC 往返
+    const files = await Promise.all(dates.map((date) => loadData(historyFile(date))));
+    for (const data of files) {
+      if (!data) continue;
+      try {
         const records = JSON.parse(data);
         if (Array.isArray(records)) allRecords.push(...records);
+      } catch {
+        // 单个日期文件损坏不影响其余日期
       }
     }
     allRecords.sort((a, b) => b.id - a.id); // 最新的在前
@@ -195,9 +203,23 @@ async function updateHistoryIndex(currentDate: string) {
 // ---- 初始化：启动时加载 + 监听变化 ----
 
 export async function initPersistence() {
+  // 配置必须先恢复：它决定"启动时加载哪个模型"，自动加载要按用户选中的模型来（见 main.tsx 的启动顺序）
   await loadConfig();
-  await loadAllHistory();
-  await loadRuntimeLogs();
+
+  // 历史/运行日志不挡启动：模型自动加载要尽快拿到清单（清单往返 + 3s 模型装载都在关键路径上）。
+  // 完成后才打开"变化即写盘"的监听 —— 否则首次回填本身会被当成"新增记录"写回磁盘。
+  let historyReady = false;
+  let logsReady = false;
+  void loadAllHistory()
+    .catch(() => {})
+    .then(() => {
+      historyReady = true;
+    });
+  void loadRuntimeLogs()
+    .catch(() => {})
+    .then(() => {
+      logsReady = true;
+    });
 
   // 监听配置变化 → 防抖保存
   let configTimer: ReturnType<typeof setTimeout> | null = null;
@@ -212,6 +234,7 @@ export async function initPersistence() {
 
   // 监听历史变化 → 按天写文件
   useAppStore.subscribe((state, prev) => {
+    if (!historyReady) return; // 首次回填不算"变化"
     if (state.history.records !== prev.history.records) {
       saveHistoryForToday(state.history.records);
     }
@@ -219,6 +242,7 @@ export async function initPersistence() {
 
   // 监听运行日志变化 → 写文件
   useAppStore.subscribe((state, prev) => {
+    if (!logsReady) return; // 首次回填不算"变化"
     if (state.runtimeLogs !== prev.runtimeLogs) {
       saveRuntimeLogs(state.runtimeLogs);
     }

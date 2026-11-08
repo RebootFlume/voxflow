@@ -11,7 +11,7 @@
  */
 import { useAppStore } from "@/stores";
 import { rustLoadAsr, rustUnloadAsr, rustLoadTtsModel, rustUnloadTtsModel } from "@/lib/ipc";
-import { engineOf, runtimeKeyOf, runtimeKeysOf } from "@/lib/modelState";
+import { engineOf, runtimeKeyOf, runtimeKeysOf, LOAD_REQ_PENDING } from "@/lib/modelState";
 import { t } from "@/lib/i18n";
 
 /**
@@ -80,6 +80,9 @@ export function loadAsrModel(name: string, device: string): Promise<void> {
   });
   // rust_load_asr：立即返回 reqId（fire-and-forget，终态必达），
   // 状态由 model_loading/progress/ready/error 事件驱动（带 reqId 丢弃迟到事件）
+  // 先写"在途"哨兵：model_loading 事件可能比 invoke 应答先到，那时 store 里还没有真实 reqId，
+  // 不打这个标记首个事件会被事件过滤丢掉（阶段进度少一格、日志缺「⏳ 正在加载…」）。
+  s.updateAsr({ loadReqId: LOAD_REQ_PENDING });
   return rustLoadAsr(name, device).then(
     (r) => {
       const st = useAppStore.getState();
@@ -186,6 +189,9 @@ export function selectAsrFramework(framework: string): void {
 
 /** 启动自动加载只允许发生一次（清单可能在启动期到多次，重复加载无意义） */
 let autoLoaded = false;
+/** 配置未就绪时的重试定时器与次数（清单可能早于配置到达） */
+let autoLoadRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let autoLoadRetries = 0;
 
 /**
  * 启动时按开关自动加载"上次用过的模型" —— 由 `models_state`（清单落地）驱动调用。
@@ -193,12 +199,28 @@ let autoLoaded = false;
  * 为什么挂在清单事件上：持久化的模型可能已被删除/换机，无脑加载会让启动遮罩弹错误；
  * 拿到清单才能确认"它还在且已下载"。校验不过就清空选中 + 记一行日志，不加载。
  *
- * 只在启动阶段（`startupPhase === "booting"`）生效：之后的清单刷新（切页、3s 轮询、
- * 窗口聚焦）不该再次触发加载。ASR 默认自动加载（热键要求常驻），TTS 默认不加载。
+ * 整次运行只尝试一次（`autoLoaded`）：之后的清单刷新（切页、3s 轮询、窗口聚焦）不再触发加载。
+ * ASR 默认自动加载（热键要求常驻），TTS 默认不加载。
+ *
+ * 前置条件：配置必须已恢复（`configLoaded`）—— 用户选的模型在 config.json 里，
+ * 配置没读到时只能用默认值，那会把错的模型拉起来。
  */
 export function autoLoadFromManifest(): void {
   if (autoLoaded) return;
   const s = useAppStore.getState();
+  // 配置还没恢复 → 不能用默认模型去加载（用户选的模型在 config.json 里）。
+  // 这里**不**消耗 autoLoaded：清单可能早于配置到达（主进程会自己推 models_state），
+  // 所以稍后重试；正常路径是 main.tsx"先等配置、再请求清单"，第一次就能命中。
+  if (!s.configLoaded) {
+    if (autoLoadRetryTimer === null && autoLoadRetries < 40) {
+      autoLoadRetries += 1;
+      autoLoadRetryTimer = setTimeout(() => {
+        autoLoadRetryTimer = null;
+        autoLoadFromManifest();
+      }, 150);
+    }
+    return;
+  }
   // 只认"启动后第一份清单"：任一引擎已经不在 idle，说明用户已经动手（或上一份清单已处理过），
   // 此时再自动加载就是替用户做决定。`autoLoaded` 保证整次运行只尝试一次。
   if (s.engines.asr.status !== "idle" || s.engines.tts.status !== "idle") return;
@@ -207,12 +229,19 @@ export function autoLoadFromManifest(): void {
   const targets: { kind: "asr" | "tts"; model: string; device: string }[] = [];
   if (s.asr.autoLoad && s.asr.model) targets.push({ kind: "asr", model: s.asr.model, device: s.asr.device });
   if (s.tts.autoLoad && s.tts.model) targets.push({ kind: "tts", model: s.tts.model, device: s.tts.device });
-  if (targets.length === 0) return;
+  if (targets.length === 0) {
+    // 本次没有模型要加载（自动加载开关关 / 没选模型）→ 告诉启动页"一闪而过"，别让它干等
+    s.setAutoLoadState("none");
+    return;
+  }
 
+  let started = false;
+  let skipped = false;
   for (const t of targets) {
     const st = useAppStore.getState();
     const item = st.models.items.find((i) => i.name === t.model);
     if (!item || item.state !== "downloaded") {
+      skipped = true;
       st.addLog(`[model] 启动自动加载已跳过：${t.model} 不在已下载模型中（已清空选中）`, "warn");
       if (t.kind === "asr") {
         st.updateAsr({ model: "" });
@@ -224,7 +253,10 @@ export function autoLoadFromManifest(): void {
       }
       continue;
     }
+    started = true;
     if (t.kind === "asr") void loadAsrModel(t.model, t.device).catch(() => {});
     else void loadTtsModel(t.model, t.device).catch(() => {});
   }
+  // 判定结论交给启动页：started = 等引擎终态；skipped = 提示"未检测到模型"；都没有 = 一闪而过
+  useAppStore.getState().setAutoLoadState(started ? "loading" : skipped ? "skipped" : "none");
 }

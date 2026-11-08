@@ -3,6 +3,7 @@ import { Loader2 } from "lucide-react";
 import { Progress } from "@/components/ui/progress";
 import { useAppStore } from "@/stores";
 import { t } from "@/lib/i18n";
+import { stageLabelKey, stageProgress } from "@/lib/modelStages";
 
 /** 显示延迟：加载快于此值 → 全程不显示遮罩（TTS 选择模型属瞬时校验，避免闪黑） */
 const SHOW_DELAY_MS = 300;
@@ -28,6 +29,9 @@ export function ModelLoadingOverlay() {
   const locale = useAppStore((s) => s.locale);
   const asr = useAppStore((s) => s.engines.asr);
   const tts = useAppStore((s) => s.engines.tts);
+  // 启动期（startupPhase === "booting"）由启动遮罩展示同一套阶段进度，
+  // 这里再铺一层黑罩只会在启动页淡出瞬间闪一下黑块 → 启动期不显示
+  const booting = useAppStore((s) => s.startupPhase === "booting");
 
   // 任一引擎加载中 → 遮罩；TTS 加载同样拦截（加载期间不应操作）
   const loading = asr.status === "loading" || tts.status === "loading";
@@ -56,16 +60,11 @@ export function ModelLoadingOverlay() {
   const model = active.model || "";
   const stage = active.stage;
 
-  if (!visible) return null;
+  if (!visible || booting) return null;
 
-  // 阶段 → 进度 + 文案（框架无关的通用阶段集合）
-  const stageInfo: Record<string, { value: number; labelKey: string }> = {
-    unload: { value: 15, labelKey: "overlay.stage.unload" },
-    loading: { value: 45, labelKey: "overlay.stage.loading" },
-    initializing: { value: 80, labelKey: "overlay.stage.initializing" },
-    ready: { value: 100, labelKey: "overlay.stage.ready" },
-  };
-  const info = stageInfo[stage ?? "loading"] ?? stageInfo.loading;
+  // 阶段 → 进度 + 文案（与启动遮罩共用同一套阶段定义，见 lib/modelStages）
+  const stageValue = stageProgress(stage);
+  const stageText = t(locale, stageLabelKey(stage));
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm">
@@ -77,11 +76,11 @@ export function ModelLoadingOverlay() {
               {t(locale, "overlay.title", { model })}
             </p>
             <p className="mt-0.5 text-xs text-muted-foreground">
-              {t(locale, info.labelKey)}
+              {stageText}
             </p>
           </div>
         </div>
-        <Progress value={info.value} className="h-1.5" />
+        <Progress value={stageValue} className="h-1.5" />
       </div>
     </div>
   );

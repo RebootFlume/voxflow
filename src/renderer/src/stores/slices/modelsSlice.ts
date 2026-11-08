@@ -49,6 +49,14 @@ function pickEntries(v: unknown): ModelEntryState[] {
 export interface ModelsSlice {
   /** 启动阶段：booting = 显示启动 Splash，ready = 主界面 */
   startupPhase: "booting" | "ready";
+  /**
+   * 启动自动加载的判定结果（启动页据此决定"等加载 / 一闪而过 / 提示没模型"）：
+   * - pending：还没判（配置或清单没到）
+   * - none：本次不需要加载（自动加载开关关 / 没选模型）
+   * - loading：已发起加载，等引擎终态
+   * - skipped：开了自动加载，但选中的模型没下载（已清空选中并记日志）
+   */
+  autoLoadState: "pending" | "none" | "loading" | "skipped";
   models: {
     modelRoot: string;
     proxy: string;
@@ -75,10 +83,13 @@ export interface ModelsSlice {
   resetEngine: (kind: "asr" | "tts") => void;
   /** 启动阶段控制 */
   setStartupPhase: (phase: "booting" | "ready") => void;
+  /** 启动自动加载判定结果（启动页读它决定"等 / 闪 / 提示没模型"） */
+  setAutoLoadState: (state: "pending" | "none" | "loading" | "skipped") => void;
 }
 
 export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: ModelsSlice) => Partial<ModelsSlice>)) => void): ModelsSlice => ({
   startupPhase: "booting",
+  autoLoadState: "pending",
   models: { modelRoot: "", proxy: "", huggingfaceToken: "", hasHfToken: false, diskFreeGb: null, items: [], manifestAt: null },
   engines: { asr: idleEngine(), tts: idleEngine() },
   setModelRootLocal: (modelRoot) => set((s) => ({ models: { ...s.models, modelRoot } })),
@@ -206,4 +217,5 @@ export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: Mod
   resetEngine: (kind) =>
     set((s) => ({ engines: { ...s.engines, [kind]: idleEngine() } })),
   setStartupPhase: (startupPhase) => set({ startupPhase }),
+  setAutoLoadState: (autoLoadState) => set({ autoLoadState }),
 });
