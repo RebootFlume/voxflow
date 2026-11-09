@@ -9,8 +9,8 @@ import { existsSync } from 'node:fs'
 import { loadSherpaFfi, type Handle, type SherpaFfi } from './bindings'
 import type { TtsModelPayload } from './protocol'
 
-// TTS 模型族（= C API 的 7 个子结构体）词表在 models/framework-ids.ts
-import type { SherpaTtsFamily } from '../../models/framework-ids'
+// TTS 模型族（= C API 的 7 个子结构体）词表在 shared/framework-ids.ts
+import type { SherpaTtsFamily } from '../../../shared/framework-ids'
 
 export type { SherpaTtsFamily }
 

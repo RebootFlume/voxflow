@@ -40,7 +40,10 @@ export default defineConfig({
     base: './',
     resolve: {
       alias: {
-        '@': resolve(__dirname, 'src/renderer/src')
+        '@': resolve(__dirname, 'src/renderer/src'),
+        // 与主进程共用 src/shared：跨端类型词表（引擎名 / 框架层 / 运行时包键）
+        // 只有一份定义，加新引擎时前端漏改会被 tsc 直接拦下
+        '@shared': resolve(__dirname, 'src/shared')
       }
     },
     define: {

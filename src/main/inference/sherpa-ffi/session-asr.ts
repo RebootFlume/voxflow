@@ -10,9 +10,9 @@ import koffi from 'koffi'
 import { loadSherpaFfi, type Handle, type SherpaFfi } from './bindings'
 import type { AsrStage } from '../engine'
 
-// 模型族词表在 models/framework-ids.ts（全仓库唯一一份：spec 声明、C 结构体、
+// 模型族词表在 shared/framework-ids.ts（全仓库唯一一份：spec 声明、C 结构体、
 // NUMERIC_DEFAULTS 三处共用）。这里 re-export 保持既有 import 路径可用。
-import type { SherpaAsrFamily } from '../../models/framework-ids'
+import type { SherpaAsrFamily } from '../../../shared/framework-ids'
 
 export type { SherpaAsrFamily }
 

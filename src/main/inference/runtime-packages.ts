@@ -5,7 +5,7 @@
  * 需要 `libsDir()` —— 放在同一文件会形成循环 import。数据表零依赖，谁都能引。
  */
 
-import type { RuntimeKey } from '../models/framework-ids'
+import type { RuntimeKey } from '../../shared/framework-ids'
 
 /** 试启动就绪判定方式（数据驱动：新增框架只加一条数据行 + 一个变体值，不改函数） */
 export type SmokeProbe =

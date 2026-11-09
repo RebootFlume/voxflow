@@ -1,4 +1,5 @@
 import type { EngineName, EngineState, ModelEntryState, ModelItemState } from "../types";
+import { ENGINE_NAMES as ENGINE_NAME_LIST } from "@shared/framework-ids";
 
 /** 引擎集中管理：每个功能（asr/tts）一个引擎状态 */
 export interface EngineRegistry {
@@ -12,7 +13,9 @@ function idleEngine(): EngineState {
 
 // ── 能力字段归一化（models_state 事件 → ModelItemState）──
 // 形状不合法 / 缺失一律保持 undefined：不塞默认值，避免掩盖上游缺字段（UI 侧各自兜底）。
-const ENGINE_NAMES: EngineName[] = ["llama", "sherpa", "audiocpp"];
+// 引擎名白名单直接取共享词表：此前手抄一份，加新引擎漏改这里时，
+// 引擎名会被当成未知值丢掉 → 徽章落进灰色兜底，且没有任何报错。
+const ENGINE_NAMES = ENGINE_NAME_LIST as readonly EngineName[];
 const LANGUAGE_MODES: NonNullable<ModelItemState["language_mode"]>[] = ["auto", "fixed", "select", "cloning"];
 const VOICE_MODES: NonNullable<ModelItemState["voice_mode"]>["type"][] = ["fixed", "preset", "clone", "preset_and_clone"];
 

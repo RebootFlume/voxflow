@@ -54,7 +54,7 @@ import {
   type ModelSpec,
   type VoiceModeSpec
 } from './spec-data'
-import type { ModelLayer, RuntimeKey } from './framework-ids'
+import type { EngineName, ModelLayer, RuntimeKey } from '../../shared/framework-ids'
 
 // ── 注册表（对齐原 Rust 版 registry） ──
 
@@ -72,8 +72,13 @@ export type FilePolicy = 'largest' | 'preferUnquantized'
  * 为什么层按「引擎」分：层是引擎（与运行时包解耦）——同一引擎的全部模型共享一份权重，
  * 设备（CPU/CUDA）只影响运行时后端，不影响模型放在哪一层。
  */
-/** 引擎展示名（= 前端徽章/分组键；与框架层 id 是两套命名，前者给人看） */
-export type EngineName = 'llama' | 'sherpa' | 'audiocpp'
+/**
+ * 引擎展示名（= 前端徽章/分组键；与框架层 id 是两套命名，前者给人看）。
+ *
+ * 定义在 framework-ids：前端 stores/types.ts 也用同一份词表 —— 此前两边各写一份，
+ * 加新引擎只改一边时 tsc 毫无反应，只是徽章默默变灰。
+ */
+export type { EngineName } from '../../shared/framework-ids'
 
 export interface FrameworkSpec {
   /** 框架层 id（= 磁盘目录层名 = 复合身份前缀 = 引擎注册键） */

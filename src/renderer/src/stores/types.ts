@@ -82,7 +82,16 @@ export interface ModelEntryState {
  * 前端拿它做徽章配色与分组键 —— 与框架层 id（`llama.cpp` / `sherpa-onnx`）不是一套命名：
  * id 用在路径与注册表，展示名给人看。收紧成联合类型，配色表漏一项会编译失败。
  */
-export type EngineName = "llama" | "sherpa" | "audiocpp";
+/**
+ * 引擎展示名 —— 与主进程共用 src/shared/framework-ids 的同一份词表。
+ *
+ * 此前前端与主进程各写一份联合类型：主进程加新引擎而前端漏改时，tsc **完全不报错**，
+ * 只是徽章与分组悄悄落进灰色兜底（实测加 'probe' 后前端类型检查依然通过）。
+ * 共用后漏改会在编译期炸出来。
+ */
+import type { EngineName } from "@shared/framework-ids";
+
+export type { EngineName };
 
 export interface ModelItemState {
   name: string;

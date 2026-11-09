@@ -90,7 +90,7 @@ function walk(dir, out = []) {
 
 // ── 3. spec 一致性 ────────────────────────────────────────────────────────
 {
-  const idsSrc = read('src/main/models/framework-ids.ts')
+  const idsSrc = read('src/shared/framework-ids.ts')
   const layers = [...(idsSrc.match(/MODEL_LAYERS = \[([^\]]+)\]/)?.[1] ?? '').matchAll(/'([^']+)'/g)].map(
     (m) => m[1]
   )
@@ -154,7 +154,7 @@ function walk(dir, out = []) {
   if (new Set(keys).size !== keys.length) fail(`runtime-packages.ts: framework 键重复 [${keys.join(', ')}]`)
   if (new Set(dirs).size !== dirs.length) fail(`runtime-packages.ts: targetDir 重复 [${dirs.join(', ')}]`)
 
-  const idsSrc = read('src/main/models/framework-ids.ts')
+  const idsSrc = read('src/shared/framework-ids.ts')
   const runtimeKeys = [
     ...(idsSrc.match(/RUNTIME_KEYS = \[([^\]]+)\]/)?.[1] ?? '').matchAll(/'([^']+)'/g)
   ].map((m) => m[1])

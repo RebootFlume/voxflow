@@ -6,7 +6,7 @@
  * 没有 audio.cpp backend）；重跑它会把当前数据覆盖回旧形状。需要新模型就直接加一条 spec。
  */
 
-import type { ModelLayer, SherpaAsrFamily, SherpaTtsFamily } from './framework-ids'
+import type { ModelLayer, SherpaAsrFamily, SherpaTtsFamily } from '../../shared/framework-ids'
 
 export type { ModelLayer, SherpaAsrFamily, SherpaTtsFamily }
 
@@ -114,7 +114,7 @@ export type BackendSpec =
       family: string
     }
 
-// 框架层 id（ModelLayer）定义在 ./framework-ids —— 那里是全仓库唯一的词表，
+// 框架层 id（ModelLayer）定义在 ../../shared/framework-ids —— 那里是全仓库唯一的词表，
 // 这里只 re-export 供调用方沿用既有 import 路径。
 
 export interface ModelSpec {

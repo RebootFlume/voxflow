@@ -28,6 +28,20 @@ export const RUNTIME_KEYS = ['gguf', 'onnx', 'audiocpp'] as const
 export type RuntimeKey = (typeof RUNTIME_KEYS)[number]
 
 /**
+ * 引擎展示名 —— 前端徽章/分组/配色的键。
+ *
+ * 与框架层 id 是两套命名：层是身份（磁盘目录、复合键），引擎名是**给人看的短名**
+ * （llama / sherpa / audiocpp），徽章配色表与分组都以它为键。
+ *
+ * 此前主进程（model-manager.EngineName）与前端（stores/types.EngineName）各写了一份，
+ * 加新引擎漏改前端时 `tsc` 完全不报错，只是徽章默默变成灰色兜底 ——
+ * 实测加 'probe' 到主进程后前端类型检查依然通过。搬到这份零依赖词表后，
+ * 两端共用同一个联合类型，加引擎只改一处。
+ */
+export const ENGINE_NAMES = ['llama', 'sherpa', 'audiocpp'] as const
+export type EngineName = (typeof ENGINE_NAMES)[number]
+
+/**
  * sherpa-onnx 的模型族 —— C API 靠「路径放哪个子结构体」区分模型类型，没有名字嗅探。
  *
  * 定义在这里而不是 session-*.ts：族清单同时约束 spec 声明、C 结构体初始化、

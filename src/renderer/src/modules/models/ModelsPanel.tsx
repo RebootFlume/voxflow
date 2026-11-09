@@ -23,19 +23,12 @@ import { useAppStore, type ModelItemState } from "@/stores";
 import { t } from "@/lib/i18n";
 import { pickFolder, rustOpenInExplorer, sendToSidecar } from "@/lib/ipc";
 import { loadAsrModel, loadTtsModel, unloadAsrModel, unloadTtsModel } from "@/lib/modelLoader";
-import { belongsToFramework, computeIsLoaded, engineOf, findModelItem, frameworkLayerLabel, frameworkOptionsOf, selectLoadingKind } from "@/lib/modelState";
+import { belongsToFramework, computeIsLoaded, ENGINE_BADGE_FILLED_CLASSES, engineOf, findModelItem, frameworkLayerLabel, frameworkOptionsOf, selectLoadingKind } from "@/lib/modelState";
 import { FrameworkPanel } from "./FrameworkPanel";
 
 function refreshModels() {
   void sendToSidecar({ action: "list_models" });
 }
-
-/** 引擎徽章配色（仅视觉查表；未登记引擎走默认样式 —— 新增框架无需改前端） */
-const ENGINE_BADGE_CLASSES: Record<string, string> = {
-  llama: "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20",
-  sherpa: "bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20",
-  torch: "bg-orange-500/10 text-orange-600 dark:text-orange-400 border-orange-500/20",
-};
 
 /** GB 数值显示（≥10 不留小数） */
 function formatGb(gb: number): string {
@@ -191,7 +184,7 @@ function FrameworkBadge({ id }: { id: string }) {
   return (
     <Badge
       variant="outline"
-      className={`ml-1.5 font-mono text-[10px] ${ENGINE_BADGE_CLASSES[engine ?? ""] ?? ""}`}
+      className={`ml-1.5 font-mono text-[10px] ${ENGINE_BADGE_FILLED_CLASSES[engine ?? ""] ?? ""}`}
       title={`${engine ?? "unknown"} · ${label}`}
     >
       {label}
@@ -604,7 +597,7 @@ function ModelListPage({ kind, title, icon: Icon }: { kind: "asr" | "tts"; title
             <div className="flex items-center gap-2 pt-1">
               <Badge
                 variant="outline"
-                className={`font-mono text-[10px] ${ENGINE_BADGE_CLASSES[engineOfGroup[label] ?? ""] ?? ""}`}
+                className={`font-mono text-[10px] ${ENGINE_BADGE_FILLED_CLASSES[engineOfGroup[label] ?? ""] ?? ""}`}
               >
                 {label}
               </Badge>

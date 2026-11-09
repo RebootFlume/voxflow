@@ -4,6 +4,12 @@
   "compilerOptions": {
     "composite": true,
     "types": ["electron-vite/node", "node"],
-    "lib": ["ESNext"]
+    "lib": ["ESNext"],
+    "baseUrl": ".",
+    "paths": {
+      "@shared/*": [
+        "src/shared/*"
+      ]
+    }
   }
 }

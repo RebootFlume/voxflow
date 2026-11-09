@@ -8,7 +8,7 @@
  * 「是否已加载」统一依据 engines（status === "ready" 且 model 匹配），
  * 不再用脆弱的 model 名对比，也不依赖 tts.model / asr.model 的「选中」值。
  */
-import { useAppStore, type ModelItemState } from "@/stores";
+import { useAppStore, type EngineName, type ModelItemState } from "@/stores";
 
 export type ModelKind = "asr" | "tts";
 
@@ -272,6 +272,30 @@ export function syncTtsFrameworkFromLoaded(): void {
  * `current`（当前选中值）不在清单里时（清单未到 / 模型已下架）补到最前面，避免选择框空白。
  */
 const LAST_FRAMEWORK_KEYS = ["onnx"];
+
+/**
+ * 引擎徽章配色 —— 全站唯一一份（模型卡片徽章 + 模型管理页徽章 + 分组标题共用）。
+ *
+ * 此前模型卡片与模型管理页各有一张表，样式还不一样（一个用 border-，一个用 bg-），
+ * 且管理页那张留着 Tauri 时代的 `torch`、又缺 `audiocpp` —— 同一引擎在两页颜色不同。
+ * 类型钉在 EngineName 上：加引擎漏写配色会在编译期报错，而不是悄悄落进灰兜底。
+ */
+export const ENGINE_BADGE_CLASSES: Record<EngineName, string> = {
+  llama: "border-sky-500/40 text-sky-600 dark:text-sky-400",
+  sherpa: "border-emerald-500/40 text-emerald-600 dark:text-emerald-400",
+  audiocpp: "border-violet-500/40 text-violet-600 dark:text-violet-400"
+};
+
+/**
+ * 模型管理页的徽章底色（那张表原本用 bg- 而非 border-）。
+ * 与 ENGINE_BADGE_CLASSES 分开是因为两处视觉语言不同（卡片是描边、列表是淡底），
+ * 但**键集合必须一致** —— 都由 Record<EngineName, …> 约束。
+ */
+export const ENGINE_BADGE_FILLED_CLASSES: Record<EngineName, string> = {
+  llama: "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20",
+  sherpa: "bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20",
+  audiocpp: "bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20"
+};
 
 /**
  * 框架层展示名（模型徽章 / 分组标题的唯一来源）。
