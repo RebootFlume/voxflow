@@ -108,12 +108,11 @@ export function FrameworkPanel() {
     }
   };
 
-  // 框架描述文案查表；CPU/CUDA 变体由 Rust RuntimePkg 下发
+  // 框架描述文案查表（包名与能力由 Rust RuntimePkg 下发）
   const frameworkMeta: Record<string, { descKey: string }> = {
     gguf: { descKey: "framework.desc.llama" },
     onnx: { descKey: "framework.desc.sherpa" },
     audiocpp: { descKey: "framework.desc.audiocpp" },
-    "audiocpp-cuda": { descKey: "framework.desc.audiocpp-cuda" },
   };
 
 

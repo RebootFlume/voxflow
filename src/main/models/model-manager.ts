@@ -68,15 +68,15 @@ export type FilePolicy = 'largest' | 'preferUnquantized'
  * `id` = **框架层 id** = 磁盘目录层名 = 模型复合身份前缀 = 引擎注册键：
  * "llama.cpp" | "sherpa-onnx" | "audio.cpp"。
  *
- * 为什么层按「引擎」而不是「运行时包」分：audio.cpp 的 CPU / CUDA 是两个运行时包
- * （audiocpp / audiocpp-cuda），但**共用同一份权重**——按包分层会把几 GB 权重复制两份。
+ * 为什么层按「引擎」分：层是引擎（与运行时包解耦）——同一引擎的全部模型共享一份权重，
+ * 设备（CPU/CUDA）只影响运行时后端，不影响模型放在哪一层。
  */
 export interface FrameworkSpec {
   /** 框架层 id（= 磁盘目录层名 = 复合身份前缀 = 引擎注册键） */
   id: string
   /** 前端展示名（分组 / 标签 / 显存 JSON key）："llama" | "sherpa" | "audiocpp" */
   engine: string
-  /** 运行时包键（RUNTIME_PACKAGES.framework）：cpu / cuda 变体各一个 */
+  /** 运行时包键（RUNTIME_PACKAGES.framework）：一个引擎可对应多个包，任包就绪即可 */
   runtimeKeys: readonly string[]
   /** 主模型文件扩展名 */
   mainExts: readonly string[]
@@ -112,7 +112,7 @@ export const FRAMEWORKS: readonly FrameworkSpec[] = [
   {
     id: 'audio.cpp',
     engine: 'audiocpp',
-    runtimeKeys: ['audiocpp', 'audiocpp-cuda'],
+    runtimeKeys: ['audiocpp'],
     mainExts: ['.gguf'],
     filePolicy: 'largest',
     usesMmproj: false,

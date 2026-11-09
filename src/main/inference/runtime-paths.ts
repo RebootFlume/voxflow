@@ -29,14 +29,9 @@ export function sherpaRuntimeDir(): string {
   return join(libsDir(), 'sherpa-onnx')
 }
 
-/** audio.cpp 运行时目录（CPU 变体，含 libs/audiocpp.dll） */
+/** audio.cpp 运行时目录（含 libs/audiocpp.dll 与 ggml 各后端 dll） */
 export function audiocppRuntimeDir(): string {
   return join(libsDir(), 'audio-cpp')
-}
-
-/** audio.cpp 运行时目录（CUDA 变体：模块化 ggml + cudart，目录与 CPU 包分开） */
-export function audiocppCudaRuntimeDir(): string {
-  return join(libsDir(), 'audio-cpp-cuda')
 }
 
 /**

@@ -68,11 +68,11 @@ export class AudiocppAsrAdapter implements AsrEngine {
     const modelPath = mainModelFile(spec, dir)
     if (!modelPath) throw new Error(`模型 ${name} 缺少 GGUF 文件`)
 
-    // 有 GPU 才可能走 cuda：没卡却选 cuda 时按 CPU 跑（否则每个用户都会撞变体不匹配）
+    // 单一运行时包：设备只决定后端名；没卡却选 cuda 时按 CPU 跑
     const gpu = await getGpuInfo()
     const choice = audiocppRuntimeForDevice(device, gpu.available)
     if (choice.backend === 'cpu' && device.trim().toLowerCase() !== 'cpu') {
-      log.info(`[audiocpp-asr] ${gpu.available ? 'CUDA 变体未安装' : '未检测到 NVIDIA GPU'}，回退 CPU 推理`)
+      log.info('[audiocpp-asr] 未检测到可用的 NVIDIA GPU，回退 CPU 推理')
     }
 
     return {

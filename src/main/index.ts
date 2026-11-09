@@ -26,6 +26,7 @@ import { sherpaFfiAdapter } from './inference/sherpa-ffi'
 import { registry } from './inference/registry'
 import { setVramRuntimeHooks } from './inference/vram'
 import { killOrphanEngineProcesses } from './inference/device'
+import { migrateLegacyAudiocppRuntime } from './inference/runtime-download'
 import { ttsRegistry } from './tts/registry'
 
 let mainWindow: BrowserWindow | null = null
@@ -152,6 +153,15 @@ app.whenReady().then(async () => {
     log.info(`[model] 模型根: ${resolved}`)
   } catch (e) {
     log.warn(`[model] 恢复模型根失败（改用默认）: ${e instanceof Error ? e.message : String(e)}`)
+  }
+
+  // 旧版 audio.cpp 是 cpu / cuda 两个运行时包，现在合并成一个全功能包：
+  // 把旧的 libs/audio-cpp-cuda 并进 libs/audio-cpp，已装用户不必重下 2GB。
+  try {
+    const moved = migrateLegacyAudiocppRuntime()
+    if (moved.length > 0) log.info(`[framework] audio.cpp 旧变体目录已合并: ${moved.join('、')}`)
+  } catch (e) {
+    log.warn(`[framework] audio.cpp 旧变体目录迁移失败: ${String(e)}`)
   }
 
   // 开发态按 F12 打开 DevTools；生产态忽略 CommandOrControl+R

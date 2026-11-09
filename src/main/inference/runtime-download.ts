@@ -191,50 +191,24 @@ export const RUNTIME_PACKAGES: RuntimePkg[] = [
       ]
     }
   },
-  // audio.cpp 有两个变体，装到不同目录、各自带版本戳：
-  // - cpu：13MB，静态链接 ggml，只能 CPU 推理；
-  // - cuda：435MB（模块化 ggml，含 ggml-cuda.dll）+ 官方 cudart 附件 579MB。
-  // 为什么必须拆成两个包而不是一个：CUDA 包比 CPU 包大 30 倍，无 N 卡的用户
-  // 为了跑 100M 的小模型白下 1GB 不合理；而 CPU 包又跑不了 CUDA。
-  // 变体与目录一一对应，引擎按设备选择（见 audiocppRuntimeForDevice）。
+  // audio.cpp: 单一包。官方发布 CPU / CUDA 两个变体，但 CUDA 包本身带全套
+  // ggml-cpu-*.dll，既能跑 CUDA 也能跑 CPU —— 两个包只是"省 1.97GB 下载"的差别，
+  // 代价是设备选择与安装状态产生必然失败的组合（只装 CPU 包 + 选 CUDA 设备 =
+  // RUNTIME_VARIANT_MISMATCH），且变体概念要贯穿 UI、身份与错误文案。
+  // 定案：只留全功能包，装到 libs/audio-cpp，设备切换纯运行时行为。
   {
     framework: 'audiocpp',
     engine: 'audiocpp',
-    variant: 'cpu',
-    supportsCpu: true,
-    supportsCuda: false,
-    name: 'audio.cpp (CPU)',
-    version: 'v0.9.4',
-    sha256: '',
-    auxSha256: '',
-    unpackedBytes: null,
-    manifest: null,
-    // 官方只发布 lib 包（dll + 头文件 + MSVC 运行库，静态链接 ggml，无附属 dll）
-    url: 'https://github.com/0xShug0/audio.cpp/releases/download/v0.9.4/audio-v0.9.4-lib-windows-x64-cpu.zip',
-    auxUrl: null,
-    auxDir: '',
-    auxFiles: [],
-    innerDir: '',
-    targetDir: 'audio-cpp',
-    marker: 'libs/audiocpp.dll',
-    portBase: 0,
-    smokeArgs: [],
-    smokeProbe: { type: 'skip' }
-  },
-  {
-    framework: 'audiocpp-cuda',
-    engine: 'audiocpp',
-    variant: 'cuda',
-    // CUDA 包也带 ggml-cpu-*.dll，所以既能跑 CUDA 也能回退 CPU
+    variant: '',
     supportsCpu: true,
     supportsCuda: true,
-    name: 'audio.cpp (CUDA)',
+    name: 'audio.cpp',
     version: 'v0.9.4',
     sha256: '',
     auxSha256: '',
     unpackedBytes: null,
     manifest: null,
-    // CUDA 包是模块化 ggml：ggml.dll / ggml-base.dll / ggml-cuda.dll 都在 libs/，
+    // 模块化 ggml：ggml.dll / ggml-base.dll / ggml-cuda.dll 都在 libs/，
     // 且默认不注册 GPU 后端 —— 必须由 bindings 显式 ggml_backend_load_all_from_path。
     url: 'https://github.com/0xShug0/audio.cpp/releases/download/v0.9.4/audio-v0.9.4-lib-windows-x64-cuda12.4.zip',
     // NVIDIA 运行库单独发布（4 个 dll 在 zip 根目录），解到 libs/ 与 audiocpp.dll 同级
@@ -248,7 +222,7 @@ export const RUNTIME_PACKAGES: RuntimePkg[] = [
       'libs/cufft64_11.dll'
     ],
     innerDir: '',
-    targetDir: 'audio-cpp-cuda',
+    targetDir: 'audio-cpp',
     marker: 'libs/audiocpp.dll',
     portBase: 0,
     smokeArgs: [],
@@ -265,6 +239,43 @@ export function libsRoot(): string {
 export function runtimeDirFor(pkg: RuntimePkg): string {
   const found = RUNTIME_PACKAGES.find((p) => p.framework === pkg.framework)
   return join(libsRoot(), found ? found.targetDir : pkg.targetDir)
+}
+
+/** 递归把 src 目录合并进 dest（同名覆盖），用于旧变体目录迁移 */
+function mergeDirInto(src: string, dest: string): void {
+  mkdirSync(dest, { recursive: true })
+  for (const e of readdirSync(src, { withFileTypes: true })) {
+    const from = join(src, e.name)
+    const to = join(dest, e.name)
+    if (e.isDirectory()) {
+      mergeDirInto(from, to)
+    } else {
+      rmSync(to, { force: true })
+      renameSync(from, to)
+    }
+  }
+}
+
+/**
+ * 旧版把 audio.cpp 拆成 cpu / cuda 两个包（libs/audio-cpp + libs/audio-cpp-cuda）。
+ * 现在只有一个全功能包，装在 libs/audio-cpp —— 启动时把旧的 CUDA 目录合并进来，
+ * 已装用户不必重新下载 2GB。
+ *
+ * 合并方向固定为「CUDA → 主目录」：CUDA 包包含 CPU 包的全部能力（自带 ggml-cpu-*），
+ * 反过来的话只装过 CPU 包的用户会缺 ggml-cuda.dll。
+ */
+export function migrateLegacyAudiocppRuntime(): string[] {
+  const legacy = join(libsDir(), 'audio-cpp-cuda')
+  if (!existsSync(legacy)) return []
+  const target = join(libsDir(), 'audio-cpp')
+  try {
+    mergeDirInto(legacy, target)
+    rmSync(legacy, { recursive: true, force: true })
+    return [legacy]
+  } catch (e) {
+    log.warn(`[framework] audio.cpp 旧变体目录合并失败: ${String(e)}`)
+    return []
+  }
 }
 
 /** manifest 是否匹配（构建工具会写 UTF-8 BOM，先剥掉） */
@@ -398,25 +409,9 @@ export function installedRuntimeForDevice(engine: string, device: string): Runti
   return candidates[0] ?? null
 }
 
-/**
- * 运行时变体不匹配（设备要 cuda、装的却是 cpu 包，或反过来）。
- *
- * 以前这种错误直接冒 C 侧原文：
- * `CUDA backend requested but it is not registered in this build (available: CPU:0 "...")`
- * —— 用户看不懂，也不知道下一步该做什么。现在统一成带 code 的结构化错误，
- * 文案直接指向「推理框架」页该装哪个包。
- */
-export class RuntimeVariantError extends Error {
-  readonly code = 'RUNTIME_VARIANT_MISMATCH'
-
-  constructor(message: string) {
-    super(`RUNTIME_VARIANT_MISMATCH: ${message}`)
-  }
-}
-
-/** 按变体取 audio.cpp 运行时包（cpu / cuda） */
-export function audiocppPackage(variant: 'cpu' | 'cuda'): RuntimePkg | undefined {
-  return RUNTIME_PACKAGES.find((p) => p.engine === 'audiocpp' && p.variant === variant)
+/** audio.cpp 运行时包（唯一包；CPU / CUDA 共用同一份）。 */
+export function audiocppPackage(): RuntimePkg | undefined {
+  return RUNTIME_PACKAGES.find((p) => p.engine === 'audiocpp')
 }
 
 /** audio.cpp 运行时选择结果 */
@@ -428,51 +423,28 @@ export interface AudiocppRuntimeChoice {
 }
 
 /**
- * 按设备选择已安装的 audio.cpp 变体。
+ * audio.cpp 运行时选择：只有一个包，装没装才是唯一的失败条件。
  *
- * 规则（用户定案）：
- * - 要 cuda 且 CUDA 包已装 → 用 CUDA 包；
- * - 机器没有 N 卡（gpuAvailable = false）却选了 cuda → 回退 CPU 包（本来也跑不了 GPU）；
- * - 有 N 卡但只装了 CPU 包 → 抛 RUNTIME_VARIANT_MISMATCH，指引去装 CUDA 版；
- * - 设备是 cpu → 优先 CPU 包，其次 CUDA 包（CUDA 包带 ggml-cpu，可跑 CPU）。
+ * 设备只决定传给 C 侧的后端名 —— CPU 与 CUDA 由同一个包里不同的 ggml 后端承担
+ * （包内同时含 ggml-cpu-*.dll 与 ggml-cuda.dll）。
+ *
+ * - 未安装 → 明确提示去「推理框架」页下载；
+ * - 机器没有 N 卡却选了 cuda → 后端降为 cpu（本来也跑不了 GPU），不报错。
  */
 export function audiocppRuntimeForDevice(
   device: string,
   gpuAvailable: boolean
 ): AudiocppRuntimeChoice {
-  const wantsCuda = ['cuda', 'gpu'].includes(device.trim().toLowerCase())
-  const cpuPkg = audiocppPackage('cpu')
-  const cudaPkg = audiocppPackage('cuda')
-  const cpuReady = cpuPkg !== undefined && isRuntimeInstalled(cpuPkg)
-  const cudaReady = cudaPkg !== undefined && isRuntimeInstalled(cudaPkg)
-
-  if (wantsCuda) {
-    if (cudaReady && cudaPkg) {
-      return { pkg: cudaPkg, dir: runtimeDirFor(cudaPkg), backend: 'cuda' }
-    }
-    if (gpuAvailable) {
-      throw new RuntimeVariantError(
-        'audio.cpp 的 CUDA 运行时未安装，当前只有 CPU 版；' +
-          '请到「推理框架」页安装 audio.cpp (CUDA)，或把设备切换为 CPU'
-      )
-    }
-    // 没有 N 卡：本来就用不了 CUDA，静默回退 CPU 变体
-    if (cpuReady && cpuPkg) {
-      return { pkg: cpuPkg, dir: runtimeDirFor(cpuPkg), backend: 'cpu' }
-    }
-  } else {
-    if (cpuReady && cpuPkg) {
-      return { pkg: cpuPkg, dir: runtimeDirFor(cpuPkg), backend: 'cpu' }
-    }
-    if (cudaReady && cudaPkg) {
-      return { pkg: cudaPkg, dir: runtimeDirFor(cudaPkg), backend: 'cpu' }
-    }
+  const pkg = audiocppPackage()
+  if (!pkg || !isRuntimeInstalled(pkg)) {
+    throw new Error('audio.cpp 推理框架未安装：请到「推理框架」页下载 audio.cpp')
   }
-
-  throw new Error(
-    'audio.cpp 推理框架未安装：请到「推理框架」页下载 audio.cpp' +
-      (wantsCuda && gpuAvailable ? ' (CUDA)' : ' (CPU)')
-  )
+  const wantsCuda = ['cuda', 'gpu'].includes(device.trim().toLowerCase())
+  return {
+    pkg,
+    dir: runtimeDirFor(pkg),
+    backend: wantsCuda && gpuAvailable ? 'cuda' : 'cpu'
+  }
 }
 
 /** 返回适合目标设备的默认下载包（已安装包优先，避免切换设备时重复下载） */

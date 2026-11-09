@@ -100,7 +100,7 @@ npm run test:tts            # 写参数逻辑的纯函数测试
 
 ### audio.cpp
 - 先校验 `audiocpp_abi_version()` 与 `REQUIRED_ABI`，不一致应直接报错而不是继续跑。
-- **两个变体、两个目录、两个版本戳**：`audiocpp`（CPU，`libs/audio-cpp`）与 `audiocpp-cuda`（`libs/audio-cpp-cuda`）。升级时两边的 URL / 版本都要改，`.installed-version` 也要分别写。
+- **只有一个包、一个目录、一个版本戳**：`audiocpp` → `libs/audio-cpp`。发布用官方 CUDA 变体 zip（自带全套 `ggml-cpu-*.dll`，CPU/CUDA 都能跑）；CPU 变体 zip 不用（它跑不了 GPU，双包只会造出「只装 CPU 包 + 选 CUDA 设备」这种必然失败的组合）。升级时改 URL / 版本 / `.installed-version` 三处即可。
 - CUDA 包是模块化 ggml：`ggml.dll` / `ggml-base.dll` / `ggml-cuda.dll` 在 `libs/`，且**默认不注册 GPU 后端**，必须 `koffi.load(ggml.dll)` + `ggml_backend_load_all_from_path(libsDir)`，否则 C 侧报 `CUDA backend requested but it is not registered in this build`。官方 cudart 是另一个 zip（4 个 dll），落到 `libs/` 与 `audiocpp.dll` 同级。
 - 部分模型族（kokoro / kitten / piper / zipvoice / sanotts / inflect）需要外部 eSpeak-ng（GPL-3.0），本项目**不引入**；选模型时优先自带文本前端的族（如 MOSS-TTS-Nano、Qwen3-ASR）。
 - 音频返回的是裸指针，必须 `koffi.decode(ptr, 'float', frames * channels)`。

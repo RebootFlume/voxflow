@@ -111,14 +111,12 @@ export class AudiocppTtsEngine implements TtsEngine {
       throw new Error(`${spec.name} 不是 audio.cpp 模型`)
     }
 
-    // 选变体目录：cuda 需要 CUDA 包（含 ggml-cuda.dll），否则回退 CPU 包 / 报变体不匹配
+    // 单一运行时包：设备只决定传给 C 侧的后端名（包内同时含 ggml-cpu / ggml-cuda）
     const gpu = await getGpuInfo()
     const choice = audiocppRuntimeForDevice(device, gpu.available)
     const runtimeDir = choice.dir
     if (choice.backend === 'cpu' && backendFor(device) === 'cuda') {
-      log.info(
-        `[audiocpp-tts] ${gpu.available ? 'CUDA 变体未安装' : '未检测到 NVIDIA GPU'}，回退 CPU 推理`
-      )
+      log.info('[audiocpp-tts] 未检测到可用的 NVIDIA GPU，回退 CPU 推理')
     }
 
     // 候选状态先写入再校验，校验失败必须回滚：否则 isLoaded()（= spec 非空）会谎报已加载
