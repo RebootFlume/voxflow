@@ -13,7 +13,7 @@
 
 import { existsSync } from 'node:fs'
 import { basename, dirname } from 'node:path'
-import { findSpec, getModelRoot } from '../models/model-manager'
+import { findSpecInLayer, layerRoot, modelRef } from '../models/model-manager'
 import type { ModelSpec, VoiceModeSpec } from '../models/spec-data'
 import { sherpaRuntimeDir } from '../inference/runtime-paths'
 import { SherpaTtsHost } from '../inference/sherpa-ffi/host'
@@ -46,16 +46,21 @@ interface SherpaInner {
 /** 合成语速倍率（与旧 CLI 实现一致：固定 1.0） */
 const SYNTH_SPEED = 1
 
-/** 从模型文件路径解析描述符：目录名优先（models_root/<dir>/model.onnx），文件名兜底。 */
+/**
+ * 从模型文件路径解析描述符：目录名优先（<层根>/<dir>/model.onnx），文件名兜底。
+ *
+ * 只在**本框架层内**反查：目录名在层内唯一，跨层同名时不该猜
+ * （猜错的代价是把 A 族的描述符套到 B 族权重上）。
+ */
 function resolveSpec(modelPath: string): ModelSpec | undefined {
   const dir = dirname(modelPath)
   const dirName = basename(dir)
   if (dirName) {
-    const spec = findSpec(dirName)
+    const spec = findSpecInLayer('sherpa-onnx', dirName)
     if (spec) return spec
   }
   const name = basename(modelPath)
-  return name ? findSpec(name) : undefined
+  return name ? findSpecInLayer('sherpa-onnx', name) : undefined
 }
 
 /** 克隆能力的"是否必须配参考文本"（来自描述符，不做模型名分支） */
@@ -75,7 +80,7 @@ export class SherpaTtsEngine implements TtsEngine {
     this.inner = {
       spec: null,
       modelDir: '',
-      modelRoot: getModelRoot(),
+      modelRoot: layerRoot('sherpa-onnx'),
       sid: 0,
       provider: 'cuda',
       numThreads: 4,
@@ -88,7 +93,8 @@ export class SherpaTtsEngine implements TtsEngine {
   // ── TtsEngine 实现 ────────────────────────────────────────────────────────
 
   name(): string {
-    return this.inner.spec?.id ?? ''
+    const spec = this.inner.spec
+    return spec ? modelRef(spec) : ''
   }
 
   async load(modelPath: string, device: string): Promise<void> {

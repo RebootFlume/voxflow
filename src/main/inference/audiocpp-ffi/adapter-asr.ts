@@ -32,7 +32,7 @@ export class AudiocppAsrAdapter implements AsrEngine {
   }
 
   framework(): string {
-    return 'audiocpp'
+    return 'audio.cpp'
   }
 
   async loadModel(name: string): Promise<void> {

@@ -109,11 +109,26 @@ export type BackendSpec =
       family: string
     }
 
+/**
+ * 框架层 id —— **同时是磁盘目录层名与模型身份前缀**。
+ *
+ * 一个框架层 = 一个推理引擎 = 一套权重格式约定；同一个模型名可以出现在多个层里
+ * （如 "Qwen3-ASR-0.6B" 同时有 llama.cpp 版与 audio.cpp 版），靠层区分。
+ * 复合身份 = "<层>/<目录名>"，如 "llama.cpp/qwen3-asr-0.6b"。
+ */
+export type ModelLayer = 'llama.cpp' | 'sherpa-onnx' | 'audio.cpp'
+
 export interface ModelSpec {
   id: string
   name: string
   kind: 'asr' | 'tts'
-  framework: string
+  /** 所属框架层（= 磁盘目录层名 = 复合身份前缀） */
+  framework: ModelLayer
+  /**
+   * 旧目录名（迁移用）：历史版本把这些名字直接放在 models 根下。
+   * 首次启动时把命中的目录搬到 "<层>/<id>"，避免用户重新下载几个 GB。
+   */
+  legacyDirs?: string[]
   source: DownloadSourceSpec
   entries: DownloadEntrySpec[]
   sizeGb: number
@@ -133,10 +148,11 @@ export const SPECS: ModelSpec[] = [
 
     
     {
-        id: "qwen3-asr-0.6b-gguf",
+        id: "qwen3-asr-0.6b",
         name: "Qwen3-ASR-0.6B",
         kind: 'asr',
-        framework: "gguf",
+        framework: "llama.cpp",
+        legacyDirs: ["qwen3-asr-0.6b-gguf", "Qwen3-ASR-0.6B"],
         source: { type: 'huggingface', repo: "ggml-org/Qwen3-ASR-0.6B-GGUF", revision: "main" },
         
         
@@ -177,10 +193,11 @@ export const SPECS: ModelSpec[] = [
         backend: { type: 'llama' },
     },
     {
-        id: "Qwen3-ASR-1.7B",
+        id: "qwen3-asr-1.7b",
         name: "Qwen3-ASR-1.7B",
         kind: 'asr',
-        framework: "gguf",
+        framework: "llama.cpp",
+        legacyDirs: ["Qwen3-ASR-1.7B"],
         source: { type: 'huggingface', repo: "ggml-org/Qwen3-ASR-1.7B-GGUF", revision: "main" },
         
         entries: [
@@ -218,10 +235,11 @@ export const SPECS: ModelSpec[] = [
         backend: { type: 'llama' },
     },
     {
-        id: "audiocpp-qwen3-asr-0.6b",
-        name: "Qwen3-ASR-0.6B (audio.cpp)",
+        id: "qwen3-asr-0.6b",
+        name: "Qwen3-ASR-0.6B",
         kind: 'asr',
-        framework: "audiocpp",
+        framework: "audio.cpp",
+        legacyDirs: ["audiocpp-qwen3-asr-0.6b", "Qwen3-ASR-0.6B (audio.cpp)"],
         source: { type: 'huggingface', repo: "audio-cpp/audio.cpp-gguf", revision: "main" },
         entries: [
             {
@@ -256,10 +274,11 @@ export const SPECS: ModelSpec[] = [
         backend: { type: 'audiocpp', family: 'qwen3_asr' },
     },
     {
-        id: "audiocpp-qwen3-asr-1.7b",
-        name: "Qwen3-ASR-1.7B (audio.cpp)",
+        id: "qwen3-asr-1.7b",
+        name: "Qwen3-ASR-1.7B",
         kind: 'asr',
-        framework: "audiocpp",
+        framework: "audio.cpp",
+        legacyDirs: ["audiocpp-qwen3-asr-1.7b", "Qwen3-ASR-1.7B (audio.cpp)"],
         source: { type: 'huggingface', repo: "audio-cpp/audio.cpp-gguf", revision: "main" },
         entries: [
             {
@@ -294,10 +313,11 @@ export const SPECS: ModelSpec[] = [
         backend: { type: 'audiocpp', family: 'qwen3_asr' },
     },
     {
-        id: "audiocpp-fun-asr-nano",
-        name: "Fun-ASR-Nano (audio.cpp)",
+        id: "fun-asr-nano",
+        name: "Fun-ASR-Nano",
         kind: 'asr',
-        framework: "audiocpp",
+        framework: "audio.cpp",
+        legacyDirs: ["audiocpp-fun-asr-nano", "Fun-ASR-Nano (audio.cpp)"],
         source: { type: 'huggingface', repo: "FunAudioLLM/Fun-ASR-Nano-2512-GGUF", revision: "main" },
         entries: [
             {
@@ -328,10 +348,11 @@ export const SPECS: ModelSpec[] = [
         backend: { type: 'audiocpp', family: 'fun_asr_nano' },
     },
     {
-        id: "audiocpp-moss-transcribe-diarize",
-        name: "MOSS-Transcribe-Diarize (audio.cpp)",
+        id: "moss-transcribe-diarize",
+        name: "MOSS-Transcribe-Diarize",
         kind: 'asr',
-        framework: "audiocpp",
+        framework: "audio.cpp",
+        legacyDirs: ["audiocpp-moss-transcribe-diarize", "MOSS-Transcribe-Diarize (audio.cpp)"],
         source: { type: 'huggingface', repo: "audio-cpp/audio.cpp-gguf", revision: "main" },
         entries: [
             {
@@ -375,10 +396,11 @@ export const SPECS: ModelSpec[] = [
         backend: { type: 'audiocpp', family: 'moss_transcribe_diarize' },
     },
     {
-        id: "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17",
+        id: "sense-voice-int8",
         name: "SenseVoice-int8",
         kind: 'asr',
-        framework: "onnx",
+        framework: "sherpa-onnx",
+        legacyDirs: ["sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17", "SenseVoice-int8"],
         sizeGb: 0.23,
         descriptionZh: "中文全能 · 中英日韩粤 5 语 · 情感/事件/时间戳",
         descriptionEn: "All-round Chinese · zh/en/ja/ko/yue · emotion/event/timestamps",
@@ -394,10 +416,11 @@ export const SPECS: ModelSpec[] = [
         backend: { type: 'sherpaAsr', family: 'sense_voice' },
     },
     {
-        id: "sherpa-onnx-paraformer-zh-small-2024-03-09",
+        id: "paraformer-zh-small",
         name: "Paraformer-zh-small",
         kind: 'asr',
-        framework: "onnx",
+        framework: "sherpa-onnx",
+        legacyDirs: ["sherpa-onnx-paraformer-zh-small-2024-03-09", "Paraformer-zh-small"],
         sizeGb: 0.1,
         descriptionZh: "中文超小 · 74MB · 低端 CPU 设备首选",
         descriptionEn: "Tiny Chinese · 74MB · best for low-end CPU",
@@ -417,7 +440,8 @@ export const SPECS: ModelSpec[] = [
         id: "kokoro-multi-lang-v1_1",
         name: "Kokoro-v1_1",
         kind: 'tts',
-        framework: "sherpa",
+        framework: "sherpa-onnx",
+        legacyDirs: ["Kokoro-v1_1"],
         sizeGb: 0.32,
         descriptionZh: "Kokoro 多语言 v1.1 · 中英103音色 · 纯端到端 · sherpa-onnx 推荐",
         descriptionEn: "Kokoro multi-lang v1.1 · zh/en 103 voices · E2E · sherpa-onnx recommended",
@@ -451,7 +475,8 @@ export const SPECS: ModelSpec[] = [
         id: "kokoro-multi-lang-v1_0",
         name: "Kokoro-v1_0",
         kind: 'tts',
-        framework: "sherpa",
+        framework: "sherpa-onnx",
+        legacyDirs: ["Kokoro-v1_0"],
         sizeGb: 0.32,
         descriptionZh: "Kokoro 多语言 v1.0 · 中英53音色 · 纯端到端",
         descriptionEn: "Kokoro multi-lang v1.0 · zh/en 53 voices · E2E",
@@ -485,7 +510,8 @@ export const SPECS: ModelSpec[] = [
         id: "kokoro-en-v0_19",
         name: "Kokoro-en-v0_19",
         kind: 'tts',
-        framework: "sherpa",
+        framework: "sherpa-onnx",
+        legacyDirs: ["Kokoro-en-v0_19"],
         sizeGb: 0.32,
         descriptionZh: "Kokoro 英文 v0.19 · 11音色 · 纯端到端",
         descriptionEn: "Kokoro English v0.19 · 11 voices · E2E",
@@ -513,7 +539,8 @@ export const SPECS: ModelSpec[] = [
         id: "matcha-icefall-zh-baker",
         name: "Matcha-zh-baker",
         kind: 'tts',
-        framework: "sherpa",
+        framework: "sherpa-onnx",
+        legacyDirs: ["Matcha-zh-baker"],
         sizeGb: 0.3,
         descriptionZh: "Matcha 中文 · 高质量 · 纯端到端",
         descriptionEn: "Matcha Chinese · high quality · E2E",
@@ -550,10 +577,11 @@ export const SPECS: ModelSpec[] = [
             ], requiredFiles: ["model-steps-3.onnx", "tokens.txt", "lexicon.txt"] },
     },
     {
-        id: "sherpa-onnx-zipvoice-distill",
+        id: "zipvoice-distill",
         name: "ZipVoice-distill",
         kind: 'tts',
-        framework: "sherpa",
+        framework: "sherpa-onnx",
+        legacyDirs: ["sherpa-onnx-zipvoice-distill", "ZipVoice-distill"],
         sizeGb: 0.4,
         descriptionZh: "ZipVoice 蒸馏 · 中英 · 语音克隆 · 纯端到端",
         descriptionEn: "ZipVoice distill · zh/en · voice clone · E2E",
@@ -588,10 +616,11 @@ export const SPECS: ModelSpec[] = [
             ] },
     },
     {
-        id: "sherpa-onnx-pocket-tts-int8",
+        id: "pocket-tts-int8",
         name: "PocketTTS-int8",
         kind: 'tts',
-        framework: "sherpa",
+        framework: "sherpa-onnx",
+        legacyDirs: ["sherpa-onnx-pocket-tts-int8", "PocketTTS-int8"],
         sizeGb: 0.5,
         descriptionZh: "Pocket TTS int8 · 快速低延迟 · 纯端到端（克隆未接线）",
         descriptionEn: "Pocket TTS int8 · fast · E2E (clone not wired)",
@@ -624,10 +653,11 @@ export const SPECS: ModelSpec[] = [
             ] },
     },
     {
-        id: "sherpa-onnx-supertonic-3-tts-int8",
+        id: "supertonic-3-tts-int8",
         name: "Supertonic-3-int8",
         kind: 'tts',
-        framework: "sherpa",
+        framework: "sherpa-onnx",
+        legacyDirs: ["sherpa-onnx-supertonic-3-tts-int8", "Supertonic-3-int8"],
         sizeGb: 0.6,
         descriptionZh: "Supertonic 3 · 31语言 · 高质量 · 纯端到端",
         descriptionEn: "Supertonic 3 · 31 languages · high quality · E2E",
@@ -667,10 +697,11 @@ export const SPECS: ModelSpec[] = [
             ] },
     },
     {
-        id: "kitten-nano-en-v0_1-fp16",
+        id: "kitten-nano-en-v0_1_fp16",
         name: "Kitten-nano-en",
         kind: 'tts',
-        framework: "sherpa",
+        framework: "sherpa-onnx",
+        legacyDirs: ["Kitten-nano-en"],
         sizeGb: 0.2,
         descriptionZh: "Kitten nano · 轻量快速 · 英文 · 纯端到端",
         descriptionEn: "Kitten nano · lightweight · en · E2E",
@@ -692,10 +723,11 @@ export const SPECS: ModelSpec[] = [
             ], requiredFiles: ["model.onnx", "tokens.txt"] },
     },
     {
-        id: "audiocpp-moss-tts-nano-100m",
+        id: "moss-tts-nano-100m",
         name: "MOSS-TTS-Nano",
         kind: 'tts',
-        framework: "audiocpp",
+        framework: "audio.cpp",
+        legacyDirs: ["audiocpp-moss-tts-nano-100m", "MOSS-TTS-Nano"],
         sizeGb: 0.19,
         descriptionZh: "MOSS TTS Nano 100M · 中英等多语 · 自带文本前端 · audio.cpp",
         descriptionEn: "MOSS TTS Nano 100M · multilingual · built-in frontend · audio.cpp",
@@ -722,10 +754,11 @@ export const SPECS: ModelSpec[] = [
         backend: { type: 'audiocpp', family: 'moss_tts_nano' },
     },
     {
-        id: "audiocpp-qwen3-tts-customvoice",
+        id: "qwen3-tts-customvoice",
         name: "Qwen3-TTS-1.7B (CustomVoice)",
         kind: 'tts',
-        framework: "audiocpp",
+        framework: "audio.cpp",
+        legacyDirs: ["audiocpp-qwen3-tts-customvoice", "Qwen3-TTS-1.7B (CustomVoice)"],
         sizeGb: 2.69,
         descriptionZh: "Qwen3-TTS 1.7B · 9 个预设音色 · 中英日韩德法俄葡西意 · audio.cpp",
         descriptionEn: "Qwen3-TTS 1.7B · 9 preset voices · zh/en/ja/ko/de/fr/ru/pt/es/it · audio.cpp",

@@ -78,6 +78,14 @@ export interface ModelEntryState {
 
 export interface ModelItemState {
   name: string;
+  /** 复合身份键：`<框架层>/<目录名>`（如 llama.cpp/qwen3-asr-0.6b）。
+   *  展示名可跨框架层重名（"Qwen3-ASR-0.6B" 同时在 llama.cpp 与 audio.cpp），
+   *  只有它能全局唯一定位一个模型 —— config / IPC 参数 / 事件 model 字段都用它。 */
+  id: string;
+  /** 所属框架层（llama.cpp / sherpa-onnx / audio.cpp）；主进程下发 */
+  framework?: string;
+  /** 历史别名（旧 id / 旧展示名）：仅用于旧 config 迁移与旧事件匹配 */
+  aliases?: string[];
   kind: "asr" | "tts";
   /** 既有格式字段（= runtime_key，历史消费方兼容） */
   format: ModelFramework;

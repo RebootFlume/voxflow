@@ -160,6 +160,21 @@ const text = await window.voxflow.invoke<string>('rust_transcribe_llama', {
 
 > 便携模式：exe 旁存在 `portable.txt` 时，数据根 = `<exe>\data\`
 
+### 模型目录按框架分层
+
+`models\` 下按**推理框架**分层，同名模型（如图音色的 Qwen3-ASR-0.6B）分属不同层，互不冲突：
+
+```
+models\llama.cpp\{qwen3-asr-0.6b, qwen3-asr-1.7b}\
+models\sherpa-onnx\{sense-voice-int8, paraformer-zh-small, kokoro-multi-lang-v1_0, ...}\
+models\audio.cpp\{qwen3-asr-0.6b, fun-asr-nano, moss-tts-nano-100m, ...}\
+models\hub\   # HuggingFace 下载缓存
+```
+
+- 模型的**复合身份** = `<框架层>/<目录名>`（如 `llama.cpp/qwen3-asr-0.6b`）：config 里的模型键、IPC 参数、事件里的 model 字段都用它。
+- 界面展示名可跨层重复，靠框架分组区分。
+- 旧版扁平目录（`models\qwen3-asr-0.6b-gguf\` 等）会在启动时自动迁移到分层目录。
+
 ---
 
 ## 🗺️ 移植进度

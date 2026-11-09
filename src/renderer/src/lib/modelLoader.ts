@@ -11,7 +11,7 @@
  */
 import { useAppStore } from "@/stores";
 import { rustLoadAsr, rustUnloadAsr, rustLoadTtsModel, rustUnloadTtsModel } from "@/lib/ipc";
-import { engineOf, runtimeKeyOf, runtimeKeysOf, LOAD_REQ_PENDING } from "@/lib/modelState";
+import { engineOf, findModelItem, runtimeKeyOf, runtimeKeysOf, LOAD_REQ_PENDING } from "@/lib/modelState";
 import { t } from "@/lib/i18n";
 
 /**
@@ -20,7 +20,7 @@ import { t } from "@/lib/i18n";
  */
 function runtimeGate(kind: "asr" | "tts", name: string): boolean {
   const s = useAppStore.getState();
-  const item = s.models.items.find((i) => i.name === name);
+  const item = findModelItem(s.models.items, name);
   // 模型清单可能尚未到达（list_models 事件晚于启动加载）→ ASR 回退到持久化的运行时 key 偏好。
   // 两者都没有时不拦（交给 Rust 报错），不再按 kind 硬编码格式。
   const keys = runtimeKeysOf(item);
@@ -67,7 +67,7 @@ export function loadAsrModel(name: string, device: string): Promise<void> {
   // 前置门禁：缺框架直接给结论
   if (!runtimeGate("asr", name)) return Promise.resolve();
   // 乐观 loading（立即反馈）；框架标识全部来自 Rust 下发的清单字段，不做格式→引擎推导
-  const item = s.models.items.find((i) => i.name === name);
+  const item = findModelItem(s.models.items, name);
   s.setEngineStatus("asr", { framework: engineOf(item), model: name, status: "loading", error: null });
   const fwKey = runtimeKeyOf(item) ?? s.asr.framework;
   s.updateAsr({
@@ -126,7 +126,7 @@ export function loadTtsModel(name: string, device: string): Promise<void> {
   // 乐观阶段先把框架偏好切到这个模型的框架：否则过滤后的列表会把刚点中的模型自己藏起来
   // （框架≠模型所属框架），点完瞬间卡片消失、加载完成又冒出来。最终以 model_ready 事件为准
   // （cuda 设备会纠正到对应 CUDA 运行时包所在的框架标签）。
-  const item = s.models.items.find((i) => i.name === name);
+  const item = findModelItem(s.models.items, name);
   const fwKey = runtimeKeyOf(item);
   s.setEngineStatus("tts", { model: name, status: "loading", error: null });
   s.updateTts({
@@ -239,7 +239,7 @@ export function autoLoadFromManifest(): void {
   let skipped = false;
   for (const t of targets) {
     const st = useAppStore.getState();
-    const item = st.models.items.find((i) => i.name === t.model);
+    const item = findModelItem(st.models.items, t.model);
     if (!item || item.state !== "downloaded") {
       skipped = true;
       st.addLog(`[model] 启动自动加载已跳过：${t.model} 不在已下载模型中（已清空选中）`, "warn");

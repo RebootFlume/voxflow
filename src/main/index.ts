@@ -48,7 +48,7 @@ function revealMainWindow(): void {
 /** 本次会话当前持有的引擎子进程 PID（孤儿清理时不能杀） */
 function currentEnginePids(): Set<number> {
   const pids = new Set<number>()
-  for (const fw of ['gguf', 'onnx']) {
+  for (const fw of ['llama.cpp', 'sherpa-onnx']) {
     const pid = registry().engine(fw)?.pid()
     if (pid) pids.add(pid)
   }

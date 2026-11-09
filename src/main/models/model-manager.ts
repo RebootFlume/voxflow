@@ -64,15 +64,20 @@ export type FilePolicy = 'largest' | 'preferUnquantized'
  * 框架描述符（引擎级元数据：文件发现 / 显存诊断）
  *
  * **新增推理框架 = 加一条数据 + 实现引擎 + 注册一行**，不再需要改任何 match 分支。
- * `id` 是引擎注册键（与 `ModelSpec.framework`、registry 注册行一致）。
+ *
+ * `id` = **框架层 id** = 磁盘目录层名 = 模型复合身份前缀 = 引擎注册键：
+ * "llama.cpp" | "sherpa-onnx" | "audio.cpp"。
+ *
+ * 为什么层按「引擎」而不是「运行时包」分：audio.cpp 的 CPU / CUDA 是两个运行时包
+ * （audiocpp / audiocpp-cuda），但**共用同一份权重**——按包分层会把几 GB 权重复制两份。
  */
 export interface FrameworkSpec {
-  /** 引擎注册键："gguf" | "onnx" | "sherpa" */
+  /** 框架层 id（= 磁盘目录层名 = 复合身份前缀 = 引擎注册键） */
   id: string
-  /** 前端展示名（分组 / 标签 / 显存 JSON key）："llama" | "sherpa" | "torch" */
+  /** 前端展示名（分组 / 标签 / 显存 JSON key）："llama" | "sherpa" | "audiocpp" */
   engine: string
-  /** 运行时包键（RUNTIME_PACKAGES.framework）："gguf" | "onnx" */
-  runtimeKey: string
+  /** 运行时包键（RUNTIME_PACKAGES.framework）：cpu / cuda 变体各一个 */
+  runtimeKeys: readonly string[]
   /** 主模型文件扩展名 */
   mainExts: readonly string[]
   filePolicy: FilePolicy
@@ -84,39 +89,30 @@ export interface FrameworkSpec {
 
 export const FRAMEWORKS: readonly FrameworkSpec[] = [
   {
-    id: 'gguf',
+    id: 'llama.cpp',
     engine: 'llama',
-    runtimeKey: 'gguf',
+    runtimeKeys: ['gguf'],
     mainExts: ['.gguf'],
     filePolicy: 'largest',
     usesMmproj: true,
-    // gguf 引擎跑在本软件的 FFI worker 进程里（不是独立 exe），按 PID 归因即可，
+    // llama.cpp 引擎跑在本软件的 FFI worker 进程里（不是独立 exe），按 PID 归因即可，
     // 没有可按名字匹配的外部进程
     processName: null
   },
   {
-    id: 'onnx',
+    id: 'sherpa-onnx',
     engine: 'sherpa',
-    runtimeKey: 'onnx',
+    runtimeKeys: ['onnx'],
     mainExts: ['.onnx'],
     filePolicy: 'preferUnquantized',
     usesMmproj: false,
-    processName: 'sherpa-onnx-offline-websocket-server'
-  },
-  {
-    id: 'sherpa',
-    engine: 'sherpa',
-    runtimeKey: 'onnx',
-    mainExts: ['.onnx'],
-    filePolicy: 'preferUnquantized',
-    usesMmproj: false,
-    // TTS 合成是一次性子进程：无常驻进程可探
+    // sherpa-onnx 也跑在本软件的 FFI worker 进程里，无常驻 exe 可探
     processName: null
   },
   {
-    id: 'audiocpp',
+    id: 'audio.cpp',
     engine: 'audiocpp',
-    runtimeKey: 'audiocpp',
+    runtimeKeys: ['audiocpp', 'audiocpp-cuda'],
     mainExts: ['.gguf'],
     filePolicy: 'largest',
     usesMmproj: false,
@@ -128,7 +124,7 @@ export const FRAMEWORKS: readonly FrameworkSpec[] = [
 // 显存诊断需要「框架 → 常驻进程名」的映射；注入给 vram 模块（避免两模块互相 import 成环）
 setFrameworkGpuSources(FRAMEWORKS)
 
-/** 按引擎注册键查框架描述符 */
+/** 按框架层 id 查框架描述符 */
 export function frameworkSpec(id: string): FrameworkSpec | undefined {
   return FRAMEWORKS.find((f) => f.id === id)
 }
@@ -138,9 +134,14 @@ export function mainExts(framework: string): readonly string[] {
   return frameworkSpec(framework)?.mainExts ?? []
 }
 
-/** 运行时包键（未知框架 → undefined） */
+/** 运行时包键（未知框架 → undefined；一个框架可能有多个包，取首个） */
 export function runtimeKey(framework: string): string | undefined {
-  return frameworkSpec(framework)?.runtimeKey
+  return frameworkSpec(framework)?.runtimeKeys[0]
+}
+
+/** 运行时包键全表（cpu / cuda 变体；未知框架 → 空表） */
+export function runtimeKeysOf(framework: string): readonly string[] {
+  return frameworkSpec(framework)?.runtimeKeys ?? []
 }
 
 /** 是否附带 mmproj（未知框架 → false） */
@@ -225,6 +226,14 @@ export function setModelRoot(path: string): string {
     abs = join(getDataRoot(), p)
   }
   config().modelRoot = abs
+  // 框架分层迁移：把旧的扁平目录搬进 <框架层>/ 目录（幂等；失败不阻断启动）
+  try {
+    const { moved, skipped } = migrateLegacyModelDirs(abs)
+    if (moved.length > 0) log.info(`[model] 目录迁移: ${moved.join('、')}`)
+    if (skipped.length > 0) log.warn(`[model] 目录迁移跳过: ${skipped.join('、')}`)
+  } catch (e) {
+    log.warn(`[model] 目录迁移失败: ${String(e)}`)
+  }
   return abs
 }
 
@@ -256,7 +265,7 @@ export function configToken(): string {
   return config().token.trim()
 }
 
-// ── 描述符查找（对齐 Rust `crate::tts::spec::ModelSpec::find`）──
+// ── 描述符查找 ──
 
 /** 归一化：大小写不敏感 + 去掉 - 和 _（"Kokoro-v1_0" → "kokorov10"） */
 function norm(s: string): string {
@@ -264,44 +273,156 @@ function norm(s: string): string {
 }
 
 /**
- * 按别名查找：精确 id > 归一化 id > 归一化目录名（id）> 归一化展示名。
- * 接受前端展示名（Kokoro-v1_0）、引擎 id（kokoro-v1_0）、引擎目录名（kokoro-multi-lang-v1_0）。
+ * 模型的**复合身份**：`<框架层>/<目录名>`（如 `llama.cpp/qwen3-asr-0.6b`）。
+ *
+ * 目录名只在**层内**唯一、展示名可**跨层**重名（"Qwen3-ASR-0.6B" 同时存在于
+ * llama.cpp 与 audio.cpp 层）→ 只有复合身份能全局唯一定位一个模型。
+ * 这个字符串就是：磁盘目录、config 里的模型键、IPC 参数、事件里的 model 字段。
  */
-export function findSpec(input: string): ModelSpec | undefined {
-  // 1. 精确 id / 展示名
-  for (const m of SPECS) {
+export function modelRef(spec: ModelSpec): string {
+  return `${spec.framework}/${spec.id}`
+}
+
+/** 框架层根目录：<modelRoot>/<层>（层 = 框架名，如 llama.cpp） */
+export function layerRoot(layer: string, root: string = getModelRoot()): string {
+  return join(root, layer)
+}
+
+/**
+ * 在指定框架层内查找描述符（按 id / 展示名 / 旧目录名，含归一化匹配）。
+ *
+ * 引擎从磁盘目录反查描述符时用这个：目录名在层内唯一，**不需要也不应该**跨层猜。
+ */
+export function findSpecInLayer(layer: string, input: string): ModelSpec | undefined {
+  const inLayer = SPECS.filter((m) => m.framework === layer)
+  for (const m of inLayer) {
     if (m.id === input || m.name === input) return m
+    if (m.legacyDirs?.includes(input)) return m
   }
   const inputNorm = norm(input)
-  // 2. 归一化 id / 展示名
-  for (const m of SPECS) {
+  for (const m of inLayer) {
     if (norm(m.id) === inputNorm || norm(m.name) === inputNorm) return m
-  }
-  // 3. 族前缀兜底（最低优先级；唯一性由测试保证）
-  const prefix = input.split(/[^\p{L}\p{N}]/u)[0]?.toLowerCase() ?? ''
-  if (prefix) {
-    for (const m of SPECS) {
-      if (norm(m.id).startsWith(prefix)) return m
-    }
+    if (m.legacyDirs?.some((d) => norm(d) === inputNorm)) return m
   }
   return undefined
 }
 
 /**
- * 严格查找：只认精确 / 归一化后的 id 与展示名，**不做族前缀兜底**。
+ * 按复合身份 / 名称查找描述符。
+ *
+ * **裸名只在全局唯一时命中**：跨层同名（同名同 id 的两个模型）一律返回 undefined
+ * —— 宁可"找不到"，也不猜错族（猜错的代价是把 A 族的描述符套到 B 族权重上）。
+ */
+export function findSpec(input: string): ModelSpec | undefined {
+  const slash = input.indexOf('/')
+  if (slash > 0) {
+    return findSpecInLayer(input.slice(0, slash), input.slice(slash + 1))
+  }
+  const hits = SPECS.filter((m) => matchesName(m, input))
+  return hits.length === 1 ? hits[0] : undefined
+}
+
+/** 名称匹配：id / 展示名 / 旧目录名（含归一化匹配） */
+function matchesName(m: ModelSpec, input: string): boolean {
+  if (m.id === input || m.name === input) return true
+  if (m.legacyDirs?.includes(input)) return true
+  const n = norm(input)
+  if (norm(m.id) === n || norm(m.name) === n) return true
+  return !!m.legacyDirs?.some((d) => norm(d) === n)
+}
+
+/**
+ * 严格查找：只认精确 / 归一化后的 id 与展示名（跨层重名 → 不猜）。
  *
  * 引擎从磁盘路径反查描述符时用这个（`Qwen3-TTS-12Hz-1.7B-CustomVoice-GGUF`
  * 这种目录名不该靠前缀猜成别的族），猜错的代价是把 A 族的描述符套到 B 族权重上。
  */
 export function findSpecExact(input: string): ModelSpec | undefined {
-  for (const m of SPECS) {
-    if (m.id === input || m.name === input) return m
+  return findSpec(input)
+}
+
+/**
+ * 该模型在**旧扁平布局**（models/ 根下）用过的目录名。
+ *
+ * 框架分层之前，所有模型目录都平铺在 models/ 根下；不同框架可能撞名
+ * （"Qwen3-ASR-0.6B" 同时存在于 llama.cpp 与 audio.cpp），所以旧目录名是
+ * **迁移的唯一线索**（连同旧 id / 旧展示名一起记在描述符的 legacyDirs 里）。
+ */
+export function legacyDirsOf(spec: ModelSpec): string[] {
+  const out: string[] = []
+  for (const d of [spec.id, ...(spec.legacyDirs ?? [])]) {
+    if (!out.includes(d)) out.push(d)
   }
-  const inputNorm = norm(input)
-  for (const m of SPECS) {
-    if (norm(m.id) === inputNorm || norm(m.name) === inputNorm) return m
+  return out
+}
+
+/**
+ * 该模型的**历史别名**（旧 id / 旧展示名 + 唯一时的当前展示名）。
+ *
+ * 前端用它把 config.json 里的旧模型名迁移成新的复合身份。
+ * 当前展示名只在**全局唯一**时才进别名表 —— 重名时（跨层同名）它无法区分，
+ * 硬塞进去会让迁移把值指到错误的模型上。
+ */
+export function aliasesOf(spec: ModelSpec): string[] {
+  const out: string[] = []
+  for (const d of spec.legacyDirs ?? []) {
+    if (!out.includes(d)) out.push(d)
   }
-  return undefined
+  const dup = SPECS.filter((m) => m.name === spec.name).length > 1
+  if (!dup && !out.includes(spec.name)) out.push(spec.name)
+  return out
+}
+
+/**
+ * 一次性迁移：把 models/ 根下的**旧扁平目录**搬进对应框架层。
+ *
+ * 背景：框架分层（models/<框架层>/<目录名>）之前所有模型平铺在 models/ 根下，
+ * 且不同框架可能撞名 —— 分层之后同名模型才能各归各位。
+ *
+ * 幂等：目标已存在 → 跳过（不覆盖）；源不存在 → 跳过；跨设备/占用失败 → 记一笔跳过。
+ * 附加文件（sherpa 的 vocoder 等共享文件）也从根搬到层根。
+ */
+export function migrateLegacyModelDirs(root: string = getModelRoot()): {
+  moved: string[]
+  skipped: string[]
+} {
+  const moved: string[] = []
+  const skipped: string[] = []
+  for (const spec of SPECS) {
+    const dest = specDir(root, spec)
+    if (isDir(dest)) continue // 已在新位置
+    for (const legacy of legacyDirsOf(spec)) {
+      const src = join(root, legacy)
+      if (src === dest || !isDir(src)) continue
+      try {
+        mkdirSync(dirname(dest), { recursive: true })
+        renameSync(src, dest)
+        moved.push(`${legacy} -> ${spec.framework}/${spec.id}`)
+        break
+      } catch {
+        skipped.push(legacy)
+      }
+    }
+  }
+  // 共享附加文件（附加文件落层根，如 sherpa 的 vocoder）
+  for (const spec of SPECS) {
+    if (spec.extraFiles.length === 0) continue
+    const layer = layerRoot(spec.framework, root)
+    for (const extra of spec.extraFiles) {
+      const dest = join(layer, extra.destRel)
+      if (existsSync(dest)) continue
+      const src = join(root, extra.destRel)
+      if (!existsSync(src)) continue
+      try {
+        mkdirSync(layer, { recursive: true })
+        renameSync(src, dest)
+        moved.push(`${extra.destRel} -> ${spec.framework}/${extra.destRel}`)
+      } catch {
+        skipped.push(extra.destRel)
+      }
+    }
+  }
+  return { moved, skipped }
 }
 
 /** 按 id 取精选条目（未知 → undefined） */
@@ -315,30 +436,34 @@ export function defaultEntry(spec: ModelSpec): DownloadEntrySpec | null {
 }
 
 /**
- * 计算模型下载/查找的目标目录：优先用描述符的引擎目录名（engine_id，
- * 与 TTS 引擎查找一致）；未收录模型回退到展示名目录。
- * 修复「下载到展示名目录但引擎找引擎目录名」的不一致。
+ * 模型目录（= 下载目录 = <root>/<框架层>/<spec.id>）。
  */
-export function resolveDownloadDir(root: string, name: string): string {
-  // 1. 描述符（TTS 展示名 / 引擎 id / 目录名 归一化匹配）
-  const spec = findSpec(name)
-  if (spec) return join(root, spec.id)
-  return join(root, name)
+export function specDir(root: string, spec: ModelSpec): string {
+  return join(root, spec.framework, spec.id)
 }
 
 /**
- * 引擎目录（= 描述符的 engine_id 目录名；未收录模型回退展示名）。
- * 引擎侧（llama.cpp FFI / sherpa）查找模型目录时用这个。
+ * 计算模型下载/查找的目标目录。
+ *
+ * `ref` 应是复合身份（`<层>/<目录名>`）；未知模型按 ref 原样拼（兼容旧扁平目录）。
  */
-export function engineDir(name: string): string {
-  const root = getModelRoot()
-  const spec = findSpec(name)
-  return join(root, spec ? spec.id : name)
+export function resolveDownloadDir(root: string, ref: string): string {
+  const spec = findSpec(ref)
+  if (spec) return specDir(root, spec)
+  if (ref.includes('/')) return join(root, ...ref.split('/'))
+  return join(root, ref)
+}
+
+/**
+ * 引擎目录（= 下载目录；引擎侧按复合身份查找模型目录时用这个）。
+ */
+export function engineDir(ref: string): string {
+  return resolveDownloadDir(getModelRoot(), ref)
 }
 
 /** 模型目录（= 下载目录） */
-export function modelDir(name: string): string {
-  return resolveDownloadDir(getModelRoot(), name)
+export function modelDir(ref: string): string {
+  return resolveDownloadDir(getModelRoot(), ref)
 }
 
 // ── 状态检测 ──
@@ -477,15 +602,15 @@ function discoveredMainFiles(
 }
 
 /** 检查模型目录是否已下载完成 */
-export function isComplete(dir: string): boolean {
+export function isComplete(dir: string, root: string = getModelRoot()): boolean {
   if (!isDir(dir)) return false
   // 检测 1：config.json 存在（GGUF 转换仓库常保留）
   if (existsSync(join(dir, 'config.json'))) return true
   // 检测 2：递归查找模型文件（扩展名来自框架描述符表）
   if (FRAMEWORKS.some((f) => findModelFiles(dir, 0, f.mainExts).length > 0)) return true
   // 检测 3：HF 缓存 blobs（兼容 kokoro 等库自行下载到 hub/models--<name>/blobs/）
-  const parent = dirname(dir)
-  const hub = join(parent, 'hub')
+  // 注意：hub 恒定在**模型根**下（不在框架层里），分层后不能按目录的父级推
+  const hub = join(root, 'hub')
   const hfName = `models--${basename(dir).replace(/\//g, '--')}`
   const blobs = join(hub, hfName, 'blobs')
   if (isDir(blobs)) {
@@ -795,7 +920,7 @@ function isFile(path: string): boolean {
  */
 export function activeEntryOf(spec: ModelSpec): DownloadEntrySpec | null {
   if (spec.entries.length === 0) return null
-  const dir = resolveDownloadDir(getModelRoot(), spec.name)
+  const dir = specDir(getModelRoot(), spec)
   const m = readManifest(dir)
   if (m) {
     const e = specEntry(spec, m.entry)
@@ -1028,7 +1153,9 @@ function missingRequiredFiles(spec: ModelSpec, dir: string): string[] {
  * vocos_24khz.onnx）里当前缺失的。它们与模型包分开下载，漏了就是"装不完整"。
  */
 function missingExtraFiles(spec: ModelSpec, root: string): string[] {
-  return spec.extraFiles.filter((e) => !existsSync(join(root, e.destRel))).map((e) => e.destRel)
+  // 附加文件落**框架层根**（同层共享，如 sherpa 的 vocoder）
+  const layer = layerRoot(spec.framework, root)
+  return spec.extraFiles.filter((e) => !existsSync(join(layer, e.destRel))).map((e) => e.destRel)
 }
 
 /**
@@ -1067,20 +1194,6 @@ export function entryUnion(spec: ModelSpec): EntryFileSpec[] {
   return out
 }
 
-/**
- * 运行时包清单（`engine` / `framework` 对）—— 对齐 Rust `inference::runtime_download::RUNTIME_PACKAGES`。
- *
- * 只取清单 payload 需要的两个字段：模型的 `runtime_keys` = 同引擎的所有可用包 key。
- * （完整运行时包表随 `runtime_download` 一起移植；此处只固化这份映射关系。）
- */
-const RUNTIME_PACKAGE_KEYS: ReadonlyArray<{ engine: string; framework: string }> = [
-  { engine: 'gguf', framework: 'gguf' },
-  { engine: 'onnx', framework: 'onnx' },
-  // audio.cpp 拆成 CPU / CUDA 两个变体包，两个都算该引擎的运行时依赖
-  { engine: 'audiocpp', framework: 'audiocpp' },
-  { engine: 'audiocpp', framework: 'audiocpp-cuda' }
-]
-
 /** 精选条目（payload 形状） */
 export type ModelEntryPayload = {
   id: string
@@ -1095,7 +1208,14 @@ export type ModelEntryPayload = {
 
 /** 模型条目（payload 形状；键名 = 前后端协议，snake_case） */
 export type ModelItemPayload = {
+  /** 复合身份（`<框架层>/<目录名>`）：全局唯一，config / IPC / 事件 / 前端 key 都用它 */
+  id: string
+  /** 框架层 id（"llama.cpp" / "sherpa-onnx" / "audio.cpp"）：磁盘层名 */
+  framework: string
+  /** 展示名（可跨层重名，靠 framework 区分） */
   name: string
+  /** 旧名 / 旧 id（配置迁移用；含旧展示名与旧目录名） */
+  aliases: string[]
   kind: 'asr' | 'tts'
   format: string
   /** 新增（只增不改）：前端据此分组/门禁，不再自行做 format→framework 推导 */
@@ -1158,14 +1278,15 @@ export function listModelsPayload(kind?: string): ModelsStatePayload {
     if (kind !== undefined && spec.kind !== kind) continue
     // sherpa-onnx E2E 模型的目录名与展示名不同（如 Kokoro-v1_0 → kokoro-multi-lang-v1_0）
     // 统一用引擎目录名判定（与下载/删除/TTS 引擎一致）
-    const dir = resolveDownloadDir(root, spec.name)
-    const state: ModelItemPayload['state'] = isDownloading(spec.name)
+    const ref = modelRef(spec)
+    const dir = specDir(root, spec)
+    const state: ModelItemPayload['state'] = isDownloading(ref)
       ? 'downloading'
       : specInstalled(spec, dir, root)
         ? 'downloaded'
         : 'not_downloaded'
     // 精选条目：每条的安装状态（manifest 核大小）+ 当前安装条目标记
-    const downloadingEntry = ACTIVE.get(spec.name)?.entryId
+    const downloadingEntry = ACTIVE.get(ref)?.entryId
     const entries: ModelEntryPayload[] = spec.entries.map((e) => ({
       id: e.id,
       label_zh: e.labelZh,
@@ -1182,12 +1303,14 @@ export function listModelsPayload(kind?: string): ModelsStatePayload {
             : 'not_downloaded'
     }))
     const activeEntry = activeEntryOf(spec)?.id ?? null
-    // 兼容旧布局残留：引擎目录不存在但展示名目录存在（如下载失败留了 Kokoro-v1_1）
-    const legacyDir = join(root, spec.name)
-    const dirExists = isDir(dir) || (legacyDir !== dir && isDir(legacyDir))
+    // 兼容旧布局残留：层目录不存在但旧扁平目录还在（迁移前的老安装）
+    const dirExists = isDir(dir) || legacyDirsOf(spec).some((d) => isDir(join(root, d)))
     const fmt = runtimeKey(spec.framework) ?? spec.framework
     const obj: ModelItemPayload = {
+      id: ref,
+      framework: spec.framework,
       name: spec.name,
+      aliases: aliasesOf(spec),
       kind: spec.kind,
       format: fmt,
       engine: frameworkSpec(spec.framework)?.engine ?? '',
@@ -1207,7 +1330,7 @@ export function listModelsPayload(kind?: string): ModelsStatePayload {
       state,
       dir_exists: dirExists,
       languages: spec.languages,
-      runtime_keys: RUNTIME_PACKAGE_KEYS.filter((p) => p.engine === spec.framework).map((p) => p.framework),
+      runtime_keys: [...runtimeKeysOf(spec.framework)],
       language_mode: languageModeStr(spec.languageMode),
       voice_mode: voiceModeJson(spec.voiceMode),
       supports_clone: spec.voiceMode.type === 'clone' || spec.voiceMode.type === 'presetAndClone'
@@ -1759,8 +1882,8 @@ export function downloadProgressEvent(
   }
 }
 
-export function isDownloading(name: string): boolean {
-  return ACTIVE.has(name)
+export function isDownloading(ref: string): boolean {
+  return ACTIVE.has(ref)
 }
 
 /** llama.cpp 推理的默认 ctx（与历史 llama-server 路线保持一致） */
@@ -1769,13 +1892,12 @@ const DEFAULT_CTX_SIZE = 2048
 /**
  * 开始下载；`entryId` 为空 = 默认条目（无条目的模型忽略该参数）。
  *
- * 迁移旧布局：E2E 模型曾下载到展示名目录（如 models/Matcha-zh-baker），
- * 现在引擎找引擎目录名（matcha-icefall-zh-baker）。若旧目录已存在且完整，
- * 直接迁移到新目录名并返回"已就绪"，避免用户重新下载。
+ * `ref` 是复合身份（`<框架层>/<目录名>`）。旧扁平布局的目录在启动迁移时
+ * 已经搬到层下；这里再兜一次（迁移失败时也不该让用户重新下载）。
  */
-export async function startDownload(name: string, entryId: string): Promise<void> {
-  const spec = findSpec(name)
-  if (!spec) throw new Error(`unknown model: ${name}`)
+export async function startDownload(ref: string, entryId: string): Promise<void> {
+  const spec = findSpec(ref)
+  if (!spec) throw new Error(`unknown model: ${ref}`)
   if (!spec.available) {
     throw new Error(`engine not available yet: ${spec.name}`)
   }
@@ -1785,20 +1907,20 @@ export async function startDownload(name: string, entryId: string): Promise<void
     if (!entry) throw new Error(`unknown entry: ${entryId}`)
   }
 
-  // 迁移旧布局：E2E 模型曾下载到展示名目录（如 models/Matcha-zh-baker），
-  // 现在引擎找引擎目录名（matcha-icefall-zh-baker）。若旧目录已存在且完整，
-  // 直接迁移到新目录名并返回"已就绪"，避免用户重新下载。
+  // 旧扁平布局兜底：旧目录已存在且完整 → 搬进层目录，省掉重新下载
   const root = getModelRoot()
-  const newDir = resolveDownloadDir(root, spec.name)
-  const oldDir = join(root, spec.name)
-  if (oldDir !== newDir && isDir(oldDir) && !existsSync(newDir)) {
-    if (isComplete(oldDir)) {
+  const newDir = specDir(root, spec)
+  if (!existsSync(newDir)) {
+    for (const legacy of legacyDirsOf(spec)) {
+      const oldDir = join(root, legacy)
+      if (!isDir(oldDir) || !isComplete(oldDir, root)) continue
       try {
+        mkdirSync(dirname(newDir), { recursive: true })
         renameSync(oldDir, newDir)
         console.error(`[model] migrated ${oldDir} -> ${newDir}`)
         emitSidecar({
           status: 'model_downloaded',
-          model: spec.name,
+          model: modelRef(spec),
           path: newDir
         })
         emitModelsState()
@@ -1810,10 +1932,10 @@ export async function startDownload(name: string, entryId: string): Promise<void
   }
   // 占位要早于磁盘预检（下面有 await 点），否则并发点击会重复下载
   const cancel: CancelFlag = { cancelled: false }
-  if (ACTIVE.has(spec.name)) {
+  if (ACTIVE.has(modelRef(spec))) {
     return // 同模型已在下载（含切条目），忽略重复点击
   }
-  ACTIVE.set(spec.name, { cancel, entryId })
+  ACTIVE.set(modelRef(spec), { cancel, entryId })
   // 磁盘预检（异步：PowerShell 兜底不能占 Electron 主线程）
   const free = await freeBytesForRoot()
   if (free !== null) {
@@ -1826,7 +1948,7 @@ export async function startDownload(name: string, entryId: string): Promise<void
     const need = Math.floor(needGb * 1024 ** 3)
     if (free < need) {
       // 预检没过：撤销占位，别把模型卡在「下载中」
-      ACTIVE.delete(spec.name)
+      ACTIVE.delete(modelRef(spec))
       throw new Error(
         `disk full: need ~${needGb.toFixed(1)}GB, free ${(free / 1024 ** 3).toFixed(1)}GB`
       )
@@ -1837,25 +1959,26 @@ export async function startDownload(name: string, entryId: string): Promise<void
 }
 
 /** 请求取消下载（返回是否命中进行中的下载） */
-export function requestCancel(name: string): boolean {
-  const active = ACTIVE.get(name)
+export function requestCancel(ref: string): boolean {
+  const active = ACTIVE.get(ref)
   if (!active) return false
   active.cancel.cancelled = true
   return true
 }
 
 /** 删除模型（返回释放的字节数） */
-export function deleteModel(name: string): number {
-  if (!findSpec(name)) throw new Error(`unknown model: ${name}`)
-  if (isDownloading(name)) {
-    throw new Error(`downloading: ${name}`)
+export function deleteModel(ref: string): number {
+  const spec = findSpec(ref)
+  if (!spec) throw new Error(`unknown model: ${ref}`)
+  if (isDownloading(ref)) {
+    throw new Error(`downloading: ${ref}`)
   }
   const root = getModelRoot()
-  // 顺带清理该模型的下载临时物（`.tmp/<name>.*`：中断留下的 .part / 解压失败的归档）
+  // 顺带清理该模型的下载临时物（`.tmp/<目录名>.*`：中断留下的 .part / 解压失败的归档）
   const tmpDir = join(root, '.tmp')
   try {
     for (const f of readdirSync(tmpDir)) {
-      if (f.startsWith(`${name}.`)) {
+      if (f.startsWith(`${spec.id}.`) || f.startsWith(`${spec.id}-`)) {
         try {
           unlinkSync(join(tmpDir, f))
         } catch {
@@ -1866,17 +1989,17 @@ export function deleteModel(name: string): number {
   } catch {
     // 没有 .tmp 目录
   }
-  // 删除目标目录：优先引擎目录名，同时兼容旧布局展示名残留（如 Kokoro-v1_1）
-  const dir = resolveDownloadDir(root, name)
-  const legacyDir = join(root, name)
-  if (!existsSync(dir) && legacyDir !== dir && existsSync(legacyDir)) {
-    // 旧布局残留：删展示名目录
-    const freed = dirSizeBytes(legacyDir)
-    rmSync(legacyDir, { recursive: true, force: true })
-    return freed
-  }
+  // 删除目标目录（层下）；旧扁平残留（迁移前的老安装）也一并清掉
+  const dir = specDir(root, spec)
   if (!existsSync(dir)) {
-    throw new Error(`not found: ${name}`)
+    for (const legacy of legacyDirsOf(spec)) {
+      const legacyDir = join(root, legacy)
+      if (!existsSync(legacyDir)) continue
+      const freed = dirSizeBytes(legacyDir)
+      rmSync(legacyDir, { recursive: true, force: true })
+      return freed
+    }
+    throw new Error(`not found: ${ref}`)
   }
   const freed = dirSizeBytes(dir)
   rmSync(dir, { recursive: true, force: true })
@@ -1885,9 +2008,9 @@ export function deleteModel(name: string): number {
 
 /** 下载主流程（Rust `run_download`） */
 async function runDownload(spec: ModelSpec, entryId: string, cancel: CancelFlag): Promise<void> {
-  const name = spec.name
-  // 下载目标目录：E2E 模型用引擎目录名（与 TTS 引擎查找一致）
-  const dest = resolveDownloadDir(getModelRoot(), name)
+  const name = modelRef(spec)
+  // 下载目标目录：<模型根>/<框架层>/<目录名>
+  const dest = specDir(getModelRoot(), spec)
   emitSidecar({ status: 'model_download_started', model: name })
   emitModelsState()
 
@@ -1928,7 +2051,7 @@ async function runDownload(spec: ModelSpec, entryId: string, cancel: CancelFlag)
   if (result.ok) {
     // 附加文件（描述符声明，如 ZipVoice 的 vocoder）：落模型根，已存在则跳过
     for (const extra of spec.extraFiles) {
-      const extraDest = join(getModelRoot(), extra.destRel)
+      const extraDest = join(layerRoot(spec.framework), extra.destRel)
       if (existsSync(extraDest)) continue
       let url: string
       if (extra.source.type === 'github') {
@@ -1976,7 +2099,7 @@ async function downloadModelFiles(
   }
   const repo = source.repo
   const revision = source.revision
-  const dir = resolveDownloadDir(getModelRoot(), spec.name)
+  const dir = specDir(getModelRoot(), spec)
   mkdirSync(dir, { recursive: true })
   const proxy = parseProxy(getProxy())
   const previous = readManifest(dir)
@@ -2023,7 +2146,7 @@ async function downloadModelFiles(
           }
         } else {
           manifestFiles.push([file.name, md.size])
-          emitSidecar(downloadProgressEvent(spec.name, e, md.size, md.size))
+          emitSidecar(downloadProgressEvent(modelRef(spec), e, md.size, md.size))
           reused = true
         }
       }
@@ -2033,7 +2156,7 @@ async function downloadModelFiles(
     if (reused) continue
     const onProgress = (downloaded: number, got: number | null): void => {
       const pct = got !== null && got > 0 ? s + Math.floor((e - s) * (downloaded / got)) : s
-      emitSidecar(downloadProgressEvent(spec.name, pct, downloaded, got))
+      emitSidecar(downloadProgressEvent(modelRef(spec), pct, downloaded, got))
     }
     const headers: Record<string, string> = {}
     const auth = hfAuthHeader(url, token)

@@ -10,7 +10,7 @@
  */
 
 import { basename, dirname } from 'node:path'
-import { findSpec, findSpecExact } from '../models/model-manager'
+import { findSpecInLayer, modelRef } from '../models/model-manager'
 import type { ModelSpec } from '../models/spec-data'
 import { AudiocppTtsHost } from '../inference/audiocpp-ffi/host'
 import { audiocppRuntimeForDevice } from '../inference/runtime-download'
@@ -51,18 +51,14 @@ function resolveSpec(modelPath: string): ModelSpec | undefined {
     if (parent === dir) break
     dir = parent
   }
-  // 先严格匹配：目录名可能长得像别的族（`Qwen3-TTS-...-GGUF`），前缀兜底会猜错族
+  // 只在**本框架层内**反查：目录名可能长得像别的族（`Qwen3-TTS-...-GGUF`），
+  // 跨层/前缀兜底会猜错族（把 A 族的描述符套到 B 族权重上）。
   for (const name of levels) {
-    const spec = findSpecExact(name)
-    if (spec) return spec
-  }
-  // 再宽松兜底（旧布局的族名前缀等）
-  for (const name of levels) {
-    const spec = findSpec(name)
+    const spec = findSpecInLayer('audio.cpp', name)
     if (spec) return spec
   }
   const file = basename(modelPath)
-  return file ? findSpecExact(file) : undefined
+  return file ? findSpecInLayer('audio.cpp', file) : undefined
 }
 
 /** 设备名 → audio.cpp 后端名 */
@@ -92,7 +88,8 @@ export class AudiocppTtsEngine implements TtsEngine {
   // ── TtsEngine 实现 ────────────────────────────────────────────────────────
 
   name(): string {
-    return this.inner.spec?.id ?? ''
+    const spec = this.inner.spec
+    return spec ? modelRef(spec) : ''
   }
 
   async load(modelPath: string, device: string): Promise<void> {

@@ -28,18 +28,18 @@ export function findModelSpec(input: string): ModelSpec | undefined {
   return findAsrModelSpec(input)
 }
 
-/** 已注册的 ASR 引擎（顺序 = 加载优先级：gguf 主引擎在前） */
+/** 已注册的 ASR 引擎（顺序 = 加载优先级：llama.cpp 主引擎在前） */
 export class AsrRegistry {
   private engines = new Map<string, AsrEngine>()
   private activeFramework = ''
 
   constructor() {
-    // gguf → llama.cpp 进程内 FFI（llama.dll + mtmd.dll，worker 子进程隔离崩溃）
-    this.register('gguf', llamaFfiAdapter)
-    // onnx → sherpa-onnx 进程内 FFI（sherpa-onnx-c-api.dll，worker 子进程隔离崩溃）
-    this.register('onnx', sherpaFfiAdapter)
-    // audiocpp → audio.cpp 进程内 FFI（ggml 运行时，TTS / ASR 共用同一套 C ABI）
-    this.register('audiocpp', audiocppAsrAdapter)
+    // llama.cpp → 进程内 FFI（llama.dll + mtmd.dll，worker 子进程隔离崩溃）
+    this.register('llama.cpp', llamaFfiAdapter)
+    // sherpa-onnx → 进程内 FFI（sherpa-onnx-c-api.dll，worker 子进程隔离崩溃）
+    this.register('sherpa-onnx', sherpaFfiAdapter)
+    // audio.cpp → 进程内 FFI（ggml 运行时，TTS / ASR 共用同一套 C ABI）
+    this.register('audio.cpp', audiocppAsrAdapter)
   }
 
   /** 注册一个引擎 */
@@ -58,7 +58,7 @@ export class AsrRegistry {
    * 为什么要多问一句 `isLoaded()`：Rust 版是**实时**按引擎 slot 算 active
    * （`src-tauri/src/inference/slot.rs:56-63`），这里存的是 `activeFramework`
    * 这个缓存字符串。两者会不一致 —— 例如 `rust_unload_sherpa_asr` 直接调引擎的
-   * unload() 绕过了注册表，缓存还停在 'onnx'，于是上层（文件转写 / 对外 API /
+   * unload() 绕过了注册表，缓存还停在 'sherpa-onnx'，于是上层（文件转写 / 对外 API /
    * 热键）以为引擎还在跑 → 跳过重新加载 → 直接报「sherpa ASR 未加载」。
    */
   activeEngine(): AsrEngine | undefined {
@@ -66,7 +66,7 @@ export class AsrRegistry {
     return e && e.isLoaded() ? e : undefined
   }
 
-  /** 当前已加载的框架名（如 "gguf" / "onnx"），无则空（与 activeEngine 同一口径） */
+  /** 当前已加载的框架名（如 "llama.cpp" / "sherpa-onnx"），无则空（与 activeEngine 同一口径） */
   activeFrameworkName(): string {
     return this.activeEngine() ? this.activeFramework : ''
   }
@@ -98,7 +98,7 @@ export class AsrRegistry {
 
   /** 加载「最近一次被请求」的 ASR 模型（注册表路由，保证互斥）——热键/文件/API 兜底用 */
   async loadRequestedAsr(onStage: (stage: string) => void): Promise<{ framework: string; model: string }> {
-    const { name, device } = lastRequestedModel() ?? { name: 'Qwen3-ASR-0.6B', device: 'cuda' }
+    const { name, device } = lastRequestedModel() ?? { name: 'llama.cpp/qwen3-asr-0.6b', device: 'cuda' }
     return this.loadAsrByName(name, device, onStage)
   }
 

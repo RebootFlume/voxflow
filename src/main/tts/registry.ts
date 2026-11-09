@@ -7,8 +7,7 @@
  * - 加引擎 = 在构造函数注册一行（接口 + 引擎实现，无 if/else）。
  */
 
-import { join } from 'node:path'
-import { getModelRoot, mainModelFile, findSpec } from '../models/model-manager'
+import { getModelRoot, mainModelFile, findSpec, modelRef, specDir } from '../models/model-manager'
 import type { ModelSpec } from '../models/spec-data'
 import { AudiocppTtsEngine } from './engine-audiocpp'
 import { SherpaTtsEngine } from './engine-sherpa'
@@ -20,8 +19,8 @@ export class TtsRegistry {
   private activeFramework = ''
 
   constructor() {
-    this.register('sherpa', new SherpaTtsEngine())
-    this.register('audiocpp', new AudiocppTtsEngine())
+    this.register('sherpa-onnx', new SherpaTtsEngine())
+    this.register('audio.cpp', new AudiocppTtsEngine())
   }
 
   /** 注册一个引擎 */
@@ -55,9 +54,9 @@ export class TtsRegistry {
     const engine = this.engines.get(framework)
     if (!engine) throw new Error(`框架 ${framework} 未注册`)
 
-    // 主模型文件（models_root / spec.id / model.onnx 等）
+    // 主模型文件（models_root / <框架层> / spec.id / model.onnx 等）
     // 注意：**先解析再卸载**——解析失败（缺文件）时用户原来加载的模型不受影响。
-    const dir = joinModelDir(spec.id)
+    const dir = joinModelDir(spec)
     const mainFile = mainModelFile(spec, dir)
     if (!mainFile) throw new Error(`模型 ${spec.name} 缺少主模型文件`)
 
@@ -66,7 +65,7 @@ export class TtsRegistry {
 
     await engine.load(mainFile, device)
     this.activeFramework = framework
-    return { framework, model: spec.name }
+    return { framework, model: modelRef(spec) }
   }
 
   /** 卸载除指定框架外的所有引擎 */
@@ -101,7 +100,7 @@ export class TtsRegistry {
     return this.active()?.name() ?? ''
   }
 
-  /** 当前加载的框架标识（"sherpa" / 空） */
+  /** 当前加载的框架标识（"sherpa-onnx" / "audio.cpp" / 空） */
   activeFrameworkName(): string {
     return this.activeFramework
   }
@@ -128,14 +127,14 @@ export class TtsRegistry {
   }
 
   /** 模型目录（供 speakers.json 等按 spec 读取） */
-  modelDir(specId: string): string {
-    return joinModelDir(specId)
+  modelDir(spec: ModelSpec): string {
+    return joinModelDir(spec)
   }
 }
 
-/** 模型目录 = models 根 / spec.id */
-function joinModelDir(specId: string): string {
-  return join(getModelRoot(), specId)
+/** 模型目录 = models 根 / <框架层> / spec.id */
+function joinModelDir(spec: ModelSpec): string {
+  return specDir(getModelRoot(), spec)
 }
 
 let registry: TtsRegistry | null = null

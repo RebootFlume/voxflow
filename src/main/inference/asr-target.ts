@@ -5,28 +5,20 @@
  * 都从这里取路径，避免每个引擎各写一份模型名匹配规则（低耦合的落点）。
  */
 
-import { SPECS, type ModelSpec } from '../models/spec-data'
-import { activeEntryOf, mainModelFile, mmprojFile, modelDir } from '../models/model-manager'
-
-/** 归一化：大小写不敏感 + 去掉 - 和 _（"Kokoro-v1_0" → "kokorov10"） */
-function norm(s: string): string {
-  return s.toLowerCase().replace(/[-_]/g, '')
-}
+import type { ModelSpec } from '../models/spec-data'
+import { activeEntryOf, findSpec, mainModelFile, mmprojFile, modelDir } from '../models/model-manager'
 
 /**
- * 按别名查找模型描述符：精确 id/展示名 > 归一化 id/展示名 > 族前缀兜底。
+ * 按复合身份查找 ASR 模型描述符。
  *
- * 接受前端展示名（Kokoro-v1_0）、引擎 id（kokoro-v1_0）、引擎目录名。
- * 族前缀是最低优先级的兜底（唯一性由模型清单保证）。
+ * 首选 `<框架层>/<目录名>`（如 `llama.cpp/qwen3-asr-0.6b`）；裸名只在**全局唯一**
+ * 时命中。跨层同名（"Qwen3-ASR-0.6B" 在 llama.cpp 与 audio.cpp 各有一份）
+ * 一律不猜 —— 猜错族的代价是把 A 族的描述符套到 B 族权重上。
+ *
+ * 不按 kind 过滤：调用方（load_model）还要靠 kind 区分 ASR / TTS 路由。
  */
 export function findAsrModelSpec(input: string): ModelSpec | undefined {
-  for (const m of SPECS) if (m.id === input || m.name === input) return m
-  const ni = norm(input)
-  const exact = SPECS.find((m) => norm(m.id) === ni || norm(m.name) === ni)
-  if (exact) return exact
-  const prefix = input.split(/[^a-zA-Z0-9]/)[0]?.toLowerCase() ?? ''
-  if (prefix === '') return undefined
-  return SPECS.find((m) => norm(m.id).startsWith(prefix))
+  return findSpec(input)
 }
 
 /** 一个 ASR 模型的运行时文件 */

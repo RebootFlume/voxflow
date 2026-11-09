@@ -107,9 +107,18 @@ export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: Mod
         diskFreeGb: typeof payload.disk_free_gb === "number" ? payload.disk_free_gb : s.models.diskFreeGb,
         proxy: typeof payload.proxy === "string" ? payload.proxy : s.models.proxy,
         items: items.map((m: Record<string, unknown>) => {
-          const prev = s.models.items.find((it) => it.name === m.name);
+          // 身份键：主进程下发的复合身份（框架层/目录名）；缺失时退回展示名（兼容旧主进程）
+          const id = String(m.id ?? m.name ?? "");
+          const prev =
+            s.models.items.find((it) => it.id === id) ??
+            s.models.items.find((it) => it.name === m.name);
           return {
             name: String(m.name ?? ""),
+            id,
+            framework: typeof m.framework === "string" ? m.framework : undefined,
+            aliases: Array.isArray(m.aliases)
+              ? (m.aliases.filter((a) => typeof a === "string") as string[])
+              : undefined,
             kind: (m.kind === "tts" ? "tts" : "asr") as ModelItemState["kind"],
             // format / engine / runtime_key 全部透传 Rust 原值（非法/缺失保持空值，不塞默认）
             format: typeof m.format === "string" ? m.format : "",
@@ -160,7 +169,7 @@ export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: Mod
       models: {
         ...s.models,
         items: s.models.items.map((it) =>
-          it.name === name
+          it.id === name || it.name === name
             ? {
                 ...it,
                 state: "downloading" as const,
@@ -180,7 +189,7 @@ export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: Mod
       models: {
         ...s.models,
         items: s.models.items.map((it) =>
-          it.name === name
+          it.id === name || it.name === name
             ? { ...it, state: "downloading" as const, percent: 100, extracting: true }
             : it,
         ),
@@ -194,7 +203,7 @@ export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: Mod
       models: {
         ...s.models,
         items: s.models.items.map((it) =>
-          it.name === model
+          it.id === model || it.name === model
             ? {
                 ...it,
                 // 成功 → downloaded（不等下次扫描磁盘）；取消/失败/未知 → not_downloaded。

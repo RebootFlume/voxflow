@@ -26,7 +26,7 @@ export interface AsrSlice {
 export const createAsrSlice = (set: (partial: Partial<AsrSlice> | ((s: AsrSlice) => Partial<AsrSlice>)) => void): AsrSlice => ({
   asr: {
     hotkey: "CapsLock",
-    model: "Qwen3-ASR-0.6B",
+    model: "llama.cpp/qwen3-asr-0.6b",
     device: "cpu",
     framework: "gguf",
     modelStatus: "idle",

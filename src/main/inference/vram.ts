@@ -522,9 +522,9 @@ export function readGgufKvGeometryCached(filePath: string): GgufKvGeometry | nul
 
 /** 框架 → 显存占用来源（进程名）；由 `model_manager` 注入（避免两个模块互相 import 成环） */
 export interface FrameworkGpuSource {
-  /** 引擎注册键（"gguf" | "onnx" | "sherpa"） */
+  /** 引擎注册键（框架层 id："llama.cpp" | "sherpa-onnx" | "audio.cpp"） */
   id: string
-  /** 前端展示名（分组 / 标签 / 显存 JSON key）："llama" | "sherpa" | "torch" */
+  /** 前端展示名（分组 / 标签 / 显存 JSON key）："llama" | "sherpa" | "audiocpp" */
   engine: string
   /** 常驻进程名（null = 无常驻进程） */
   processName: string | null

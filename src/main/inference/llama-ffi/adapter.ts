@@ -30,7 +30,7 @@ export class LlamaFfiAdapter implements AsrEngine {
   }
 
   framework(): string {
-    return 'gguf'
+    return 'llama.cpp'
   }
 
   async loadModel(name: string): Promise<void> {

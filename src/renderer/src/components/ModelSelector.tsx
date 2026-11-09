@@ -75,7 +75,7 @@ export function ModelSelector({ kind, selected, onSelect, formatFilter, download
     // 只展示已下载的模型（可加载的）
     if (downloadedOnly) return i.state === "downloaded";
     // 默认：已下载 或 当前选中（但选中但未下载的不显示，避免误导）
-    return i.state === "downloaded" || (i.name === selected && i.state !== "not_downloaded");
+    return i.state === "downloaded" || (i.id === selected && i.state !== "not_downloaded");
   });
 
   if (models.length === 0) {
@@ -91,9 +91,9 @@ export function ModelSelector({ kind, selected, onSelect, formatFilter, download
   return (
     <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))" }}>
       {models.map((m) => {
-        const isLoaded = computeIsLoaded(kind, m.name);
+        const isLoaded = computeIsLoaded(kind, m.id);
         const status = engineStatus;
-        const isSelected = m.name === selected;
+        const isSelected = m.id === selected;
         // 失败原因只在该模型是当前选中时展示（否则会串台到别的模型）
         const isFailedHere = isSelected && status === "error";
         // 状态文案：选中 ≠ 已在跑。选中但引擎 idle 时明确写「未加载」——
@@ -119,9 +119,9 @@ export function ModelSelector({ kind, selected, onSelect, formatFilter, download
 
         return (
           <div
-            key={m.name}
+            key={m.id}
             onClick={() => {
-              if (!loading) onSelect(m.name);
+              if (!loading) onSelect(m.id);
             }}
             title={loading ? t(locale, "model.gate.cardDisabled") : undefined}
             className={`flex items-center justify-between rounded-lg border p-3 transition-all ${

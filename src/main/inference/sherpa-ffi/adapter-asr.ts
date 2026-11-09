@@ -36,7 +36,7 @@ export class SherpaFfiAdapter implements AsrEngine {
   }
 
   framework(): string {
-    return 'onnx'
+    return 'sherpa-onnx'
   }
 
   async loadModel(name: string): Promise<void> {

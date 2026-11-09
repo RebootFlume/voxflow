@@ -12,7 +12,7 @@ import { join } from 'node:path'
 import { emitSidecar } from '../core/events'
 import { setTtsBusy } from '../api-server'
 import { getDataRoot } from '../core/data-root'
-import { findSpec } from '../models/model-manager'
+import { findSpec, modelRef } from '../models/model-manager'
 import type { PresetSpec } from '../models/spec-data'
 import { MAX_CHARS_PER_CHUNK, splitText } from './chunk'
 import { ttsRegistry } from './registry'
@@ -132,8 +132,8 @@ export async function listTtsSpeakers(): Promise<Record<string, unknown>> {
       : spec.voiceMode.type === 'presetAndClone'
         ? spec.voiceMode.preset
         : null
-  const speakers = preset ? speakerList(reg.modelDir(spec.id), preset) : []
-  return { model: spec.name, num_speakers: speakers.length, speakers }
+  const speakers = preset ? speakerList(reg.modelDir(spec), preset) : []
+  return { model: modelRef(spec), num_speakers: speakers.length, speakers }
 }
 
 /**

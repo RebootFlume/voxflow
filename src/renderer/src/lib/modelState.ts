@@ -22,13 +22,79 @@ export type ModelKind = "asr" | "tts";
  */
 export const LOAD_REQ_PENDING = -1;
 
-/** 清单里按展示名 / 引擎目录名归一化找模型（与 Rust `spec::find` 的别名集合一致） */
+/**
+ * 按**身份键**查清单项：复合身份（`llama.cpp/qwen3-asr-0.6b`）优先，
+ * 其次展示名，最后历史别名（旧 id / 旧展示名）。
+ *
+ * 为什么不能只按展示名查：框架分层之后展示名可跨层重名（"Qwen3-ASR-0.6B" 同时在
+ * llama.cpp 与 audio.cpp），按名查会把另一个框架的模型当成同一个。
+ * 展示名 / 别名命中多个时**不猜**（返回 undefined）——宁可"查不到"，
+ * 也不要把 A 框架的模型当成 B 框架的。
+ */
+export function findModelItem<
+  T extends Pick<ModelItemState, "id" | "name" | "aliases">,
+>(items: readonly T[], key: string): T | undefined {
+  if (!key) return undefined;
+  const byId = items.find((i) => i.id === key);
+  if (byId) return byId;
+  const byName = items.filter((i) => i.name === key);
+  if (byName.length === 1) return byName[0];
+  const byAlias = items.filter((i) => !!i.aliases?.includes(key));
+  if (byAlias.length === 1) return byAlias[0];
+  return undefined;
+}
+
+/** 展示用模型名：身份键 → 清单里的展示名（查不到就原样返回） */
+export function modelDisplayName(
+  items: readonly ModelItemState[],
+  key: string,
+): string {
+  if (!key) return "";
+  return findModelItem(items, key)?.name ?? key;
+}
+
+/**
+ * 旧配置迁移：把 config.json 里的旧模型名（展示名 / 旧 id）换成新的复合身份键。
+ *
+ * 框架分层之后模型的**身份**是 `框架层/目录名`，而旧配置存的是展示名
+ * （"Qwen3-ASR-0.6B"）或旧 id（"qwen3-asr-0.6b-gguf"）。清单到达后用主进程下发的
+ * 别名表（aliases）把它们映射过去；映射不唯一（跨层同名）就保持原值不动 ——
+ * 宁可让用户手动重选一次，也不要把模型指到另一个框架去。
+ */
+export function migrateLegacyModelKeys(items: readonly ModelItemState[]): void {
+  const s = useAppStore.getState();
+  const resolve = (key: string): string => {
+    if (!key) return key;
+    const hit = items.filter((i) => !!i.aliases?.includes(key));
+    return hit.length === 1 ? hit[0].id : key;
+  };
+  const asrModel = resolve(s.asr.model);
+  const ttsModel = resolve(s.tts.model);
+  const asrLast: Record<string, string> = {};
+  for (const [k, v] of Object.entries(s.asr.lastModelByFramework ?? {})) asrLast[k] = resolve(v);
+  const ttsLast: Record<string, string> = {};
+  for (const [k, v] of Object.entries(s.tts.lastModelByFramework ?? {})) ttsLast[k] = resolve(v);
+  const asrChanged =
+    asrModel !== s.asr.model ||
+    Object.keys(asrLast).some((k) => asrLast[k] !== s.asr.lastModelByFramework?.[k]);
+  const ttsChanged =
+    ttsModel !== s.tts.model ||
+    Object.keys(ttsLast).some((k) => ttsLast[k] !== s.tts.lastModelByFramework?.[k]);
+  if (asrChanged) s.updateAsr({ model: asrModel, lastModelByFramework: asrLast });
+  if (ttsChanged) s.updateTts({ model: ttsModel, lastModelByFramework: ttsLast });
+}
+
+/**
+ * 清单里按身份键 / 展示名 / 引擎目录名归一化找模型（与主进程 `findSpec` 的别名集合一致）
+ */
 export function ttsModelInfoOf(
   items: ModelItemState[],
   model: string,
 ): ModelItemState | null {
   if (!model) return null;
   const norm = (s: string) => s.toLowerCase().replace(/[-_]/g, "");
+  const byKey = findModelItem(items, model);
+  if (byKey) return byKey.kind === "tts" ? byKey : null;
   return (
     items.find(
       (m) => m.kind === "tts" && (norm(m.name) === norm(model) || norm(m.path) === norm(model)),
@@ -87,7 +153,7 @@ export function engineOf(
 /** 依据模型清单元数据判断模型种类；清单未就绪时默认 ASR（事件路径应优先采信 payload.kind） */
 export function resolveModelKind(name: string): ModelKind | null {
   if (!name) return null;
-  const item = useAppStore.getState().models.items.find((i) => i.name === name);
+  const item = findModelItem(useAppStore.getState().models.items, name);
   if (item) return item.kind;
   // 无清单可查时不猜名字：默认 ASR（与旧默认语义一致）
   return "asr";
@@ -134,7 +200,7 @@ export function applyAsrFrameworkFromRust(
   if (!fw) return;
   const s = useAppStore.getState();
   const item =
-    (modelName ? s.models.items.find((i) => i.name === modelName) : undefined) ??
+    (modelName ? findModelItem(s.models.items, modelName) : undefined) ??
     s.models.items.find((i) => i.engine === fw) ??
     s.models.items.find((i) => runtimeKeyOf(i) === fw);
   // 归一到运行时包 key：模型数据优先；该 id 本身就是已登记的运行时包时原样使用
@@ -151,7 +217,7 @@ export function syncAsrFrameworkFromLoaded(): void {
   const s = useAppStore.getState();
   const name = s.engines.asr.model || s.asr.model;
   if (!name) return;
-  const item = s.models.items.find((i) => i.name === name);
+  const item = findModelItem(s.models.items, name);
   if (!item) return;
   const key = runtimeKeyOf(item);
   if (!key) return;
@@ -175,7 +241,7 @@ export function applyTtsFrameworkFromRust(
   if (!fw) return;
   const s = useAppStore.getState();
   const item =
-    (modelName ? s.models.items.find((i) => i.name === modelName) : undefined) ??
+    (modelName ? findModelItem(s.models.items, modelName) : undefined) ??
     s.models.items.find((i) => i.kind === "tts" && (i.engine === fw || runtimeKeyOf(i) === fw));
   const key =
     (item ? runtimeKeyOf(item) : null) ??
@@ -190,7 +256,7 @@ export function syncTtsFrameworkFromLoaded(): void {
   const s = useAppStore.getState();
   const name = s.engines.tts.model || s.tts.model;
   if (!name) return;
-  const item = s.models.items.find((i) => i.name === name);
+  const item = findModelItem(s.models.items, name);
   if (!item) return;
   const key = runtimeKeyOf(item);
   if (!key) return;
@@ -262,7 +328,7 @@ export function loadedFrameworkLabel(kind: ModelKind): string {
   const s = useAppStore.getState();
   const e = s.engines[kind];
   if (!e.model) return "";
-  const item = s.models.items.find((i) => i.name === e.model);
+  const item = findModelItem(s.models.items, e.model);
   const key = runtimeKeyOf(item) ?? e.framework;
   return s.runtime.packages?.find((p) => p.framework === key)?.name ?? e.framework ?? "";
 }

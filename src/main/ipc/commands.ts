@@ -319,7 +319,8 @@ function isModelInUse(name: string): boolean {
     if (!loaded) return false
     if (loaded === name) return true
     const loadedSpec = findModelSpec(loaded)
-    return !!loadedSpec && loadedSpec.id === spec.id
+    // 比全身份（框架层 + 目录名）：不同层可以有同名目录
+    return !!loadedSpec && loadedSpec.framework === spec.framework && loadedSpec.id === spec.id
   }
   return false
 }
@@ -459,9 +460,9 @@ export const commands: Record<string, CommandHandler> = {
     // 双保险：即使 active 判定异常，也把两个引擎都停掉（对齐 Rust 版）
     await llamaEngine.unload()
     // 走注册表卸载：注册表里的 activeFramework 缓存会被一起清掉
-    // （直接调 sherpaFfiAdapter.unload() 会把缓存留在 'onnx'）。
-    await registry().unload('onnx')
-    await registry().unload('audiocpp')
+    // （直接调 sherpaFfiAdapter.unload() 会把缓存留在 'sherpa-onnx'）。
+    await registry().unload('sherpa-onnx')
+    await registry().unload('audio.cpp')
     return { ok: true, loaded: false }
   },
 
@@ -481,7 +482,7 @@ export const commands: Record<string, CommandHandler> = {
   },
 
   rust_start_llama_server: async (args) => {
-    const model = optStr(args, 'model') ?? 'Qwen3-ASR-0.6B'
+    const model = optStr(args, 'model') ?? 'llama.cpp/qwen3-asr-0.6b'
     const device = optStr(args, 'device') ?? 'cuda'
     emitStatus('model_loading', { model, kind: 'asr' })
     void (async () => {
@@ -517,9 +518,9 @@ export const commands: Record<string, CommandHandler> = {
   rust_unload_sherpa_asr: async () => {
     // 走注册表卸载：SherpaFfiAdapter 就是注册表里的那个单例，
     // 效果一样，但注册表会顺手清掉 activeFramework 缓存 —— 之前这里直接调
-    // 绕过注册表直接 unload 会让缓存停在 'onnx'，
+    // 绕过注册表直接 unload 会让缓存停在 'sherpa-onnx'，
     // 上层以为引擎还在跑 → 跳过重载 → 报「sherpa ASR 未加载」。
-    await registry().unload('onnx')
+    await registry().unload('sherpa-onnx')
     return { status: 'unloaded' }
   },
 
@@ -615,7 +616,7 @@ export const commands: Record<string, CommandHandler> = {
   // ── 调试 ──────────────────────────────────────────────────────────────────
   /** 调试用：硬编码加载 Kokoro-v1_0（CPU），验证 TTS 链路是否通 */
   rust_test_tts_model: async () => {
-    const { framework, model } = await ttsRegistry().load('Kokoro-v1_0', 'cpu')
+    const { framework, model } = await ttsRegistry().load('sherpa-onnx/kokoro-multi-lang-v1_0', 'cpu')
     return { status: 'loaded', model, framework, device: 'cpu' }
   }
 }

@@ -23,7 +23,7 @@ import { useAppStore, type ModelItemState } from "@/stores";
 import { t } from "@/lib/i18n";
 import { pickFolder, rustOpenInExplorer, sendToSidecar } from "@/lib/ipc";
 import { loadAsrModel, loadTtsModel, unloadAsrModel, unloadTtsModel } from "@/lib/modelLoader";
-import { belongsToFramework, computeIsLoaded, engineOf, frameworkOptionsOf, runtimeKeyOf, selectLoadingKind } from "@/lib/modelState";
+import { belongsToFramework, computeIsLoaded, engineOf, findModelItem, frameworkOptionsOf, runtimeKeyOf, selectLoadingKind } from "@/lib/modelState";
 import { FrameworkPanel } from "./FrameworkPanel";
 
 function refreshModels() {
@@ -182,8 +182,8 @@ function SettingsPage() {
 // 框架徽章（模型所属推理框架）
 // ============================================================
 
-function FrameworkBadge({ name }: { name: string }) {
-  const item = useAppStore((s) => s.models.items.find((i) => i.name === name));
+function FrameworkBadge({ id }: { id: string }) {
+  const item = useAppStore((s) => findModelItem(s.models.items, id));
   // 徽章文本 = 运行时包 key（缺省退回引擎名/format）；配色按引擎 —— 全部来自 Rust 下发
   const engine = engineOf(item);
   const label = runtimeKeyOf(item) ?? engine ?? "unknown";
@@ -202,9 +202,9 @@ function FrameworkBadge({ name }: { name: string }) {
 // 模型行组件（列表式，可展开）
 // ============================================================
 
-function ModelRow({ name }: { name: string }) {
+function ModelRow({ id }: { id: string }) {
   const locale = useAppStore((s) => s.locale);
-  const item = useAppStore((s) => (s.models.items ?? []).find((i) => i.name === name));
+  const item = useAppStore((s) => findModelItem(s.models.items ?? [], id));
   // 推理设备按 kind 取各自偏好：ASR 与 TTS 互不影响（早期这里 TTS 被硬编码成 cpu，
   // 于是"设备选 CUDA、从模型管理页加载却跑在 CPU 上"，且界面还显示 CUDA）
   const asrDevice = useAppStore((s) => s.asr.device);
@@ -224,7 +224,7 @@ function ModelRow({ name }: { name: string }) {
   // 任一引擎加载中 → 禁止加载/卸载/删除（防止快速切换并发）；判定与门禁、卡片禁用同一处
   const anyLoading = useAppStore(selectLoadingKind) !== null;
 
-  const isLoaded = computeIsLoaded(it.kind, it.name);
+  const isLoaded = computeIsLoaded(it.kind, it.id);
   const isDownloaded = it.state === "downloaded" || isLoaded;
   const isDownloading = it.state === "downloading";
   const isNotDownloaded = it.state === "not_downloaded" && !isLoaded;
@@ -275,17 +275,17 @@ function ModelRow({ name }: { name: string }) {
 
   /** 下载/切换条目：entryId 缺省 = Rust 侧默认条目（无条目概念的模型走这条） */
   async function doDownload(entryId?: string) {
-    await sendToSidecar({ action: "download_model", model: it.name, ...(entryId ? { entry: entryId } : {}) });
+    await sendToSidecar({ action: "download_model", model: it.id, ...(entryId ? { entry: entryId } : {}) });
     refreshModels();
   }
   async function doCancel() {
     useAppStore.setState((s) => ({
-      models: { ...s.models, items: (s.models.items ?? []).map((x) => x.name === it.name ? { ...x, cancelRequested: true } : x) },
+      models: { ...s.models, items: (s.models.items ?? []).map((x) => x.id === it.id ? { ...x, cancelRequested: true } : x) },
     }));
-    await sendToSidecar({ action: "cancel_download", model: it.name });
+    await sendToSidecar({ action: "cancel_download", model: it.id });
   }
   async function doDelete() {
-    await sendToSidecar({ action: "delete_model", model: it.name });
+    await sendToSidecar({ action: "delete_model", model: it.id });
     refreshModels();
   }
   async function doUnload() {
@@ -301,9 +301,9 @@ function ModelRow({ name }: { name: string }) {
     // 设备取该 kind 自己的偏好：TTS 支持 CUDA（sherpa provider）
     const device = it.kind === "tts" ? ttsDevice : asrDevice;
     if (it.kind === "tts") {
-      await loadTtsModel(it.name, device);
+      await loadTtsModel(it.id, device);
     } else {
-      await loadAsrModel(it.name, device);
+      await loadAsrModel(it.id, device);
     }
     refreshModels();
   }
@@ -329,7 +329,7 @@ function ModelRow({ name }: { name: string }) {
               {it.quant}
             </Badge>
           )}
-          <FrameworkBadge name={it.name} />
+          <FrameworkBadge id={it.id} />
           {cpuSlow && (
             <Badge variant="outline" className="ml-1 text-[10px] bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20">
               ⚠ {t(locale, "models.cpuSlow")}
@@ -492,7 +492,8 @@ function ModelListPage({ kind, title, icon: Icon }: { kind: "asr" | "tts"; title
   const locale = useAppStore((s) => s.locale);
   const items = useAppStore((s) => s.models?.items ?? EMPTY_ITEMS);
   const runtimePackages = useAppStore((s) => s.runtime.packages);
-  const names = items.filter((i) => i.kind === kind).map((i) => i.name);
+  // 身份用复合键（框架层/目录名）：展示名可跨层重名，列表 key 与选中判定都必须用身份
+  const ids = items.filter((i) => i.kind === kind).map((i) => i.id);
   const [everLoaded, setEverLoaded] = useState(items.length > 0);
   // 框架筛选（页面本地状态，默认"全部"）：只做收窄，不隐藏任何东西。
   // 刻意不写 asr.framework / tts.framework —— 那两个字段同时决定加载路由与面板里的模型列表。
@@ -507,11 +508,11 @@ function ModelListPage({ kind, title, icon: Icon }: { kind: "asr" | "tts"; title
     [items, kind, runtimePackages],
   );
   const shown = fwFilter
-    ? names.filter((n) => {
-        const it = items.find((i) => i.name === n);
+    ? ids.filter((n) => {
+        const it = items.find((i) => i.id === n);
         return it ? belongsToFramework(it, fwFilter) : false;
       })
-    : names;
+    : ids;
 
   useEffect(() => {
     refreshModels();
@@ -546,7 +547,7 @@ function ModelListPage({ kind, title, icon: Icon }: { kind: "asr" | "tts"; title
                 fwFilter === "" ? "border-primary bg-primary/10 text-primary" : "hover:border-primary/40"
               }`}
             >
-              {t(locale, "models.filter.all")} {names.length}
+              {t(locale, "models.filter.all")} {ids.length}
             </Badge>
           </button>
           {fwOptions.map((o) => (
@@ -564,18 +565,18 @@ function ModelListPage({ kind, title, icon: Icon }: { kind: "asr" | "tts"; title
         </div>
       )}
 
-      {names.length === 0 && everLoaded && (
+      {ids.length === 0 && everLoaded && (
         <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
           {t(locale, "models.sidecarLost")}
         </p>
       )}
 
-      {names.length === 0 && !everLoaded && (
+      {ids.length === 0 && !everLoaded && (
         <div className="flex h-16 items-center justify-center text-sm text-muted-foreground">…</div>
       )}
 
       {/* 筛选后该框架下没有模型（只能发生在这类框架的模型都没下载时） */}
-      {names.length > 0 && shown.length === 0 && (
+      {ids.length > 0 && shown.length === 0 && (
         <p className="text-sm text-muted-foreground">{t(locale, "common.noModelsFramework")}</p>
       )}
 
@@ -584,7 +585,7 @@ function ModelListPage({ kind, title, icon: Icon }: { kind: "asr" | "tts"; title
         const grouped: Record<string, string[]> = {};
         const order: string[] = [];
         for (const n of shown) {
-          const item = items.find((i) => i.name === n);
+          const item = items.find((i) => i.id === n);
           const eng = engineOf(item) || "unknown"; // 无 engine/data 时的兜底标签
           if (!grouped[eng]) {
             grouped[eng] = [];
@@ -605,7 +606,7 @@ function ModelListPage({ kind, title, icon: Icon }: { kind: "asr" | "tts"; title
                 {eng} · {grouped[eng].length}
               </span>
             </div>
-            {grouped[eng].map((n) => <ModelRow key={n} name={n} />)}
+            {grouped[eng].map((n) => <ModelRow key={n} id={n} />)}
           </div>
         ));
       })()}

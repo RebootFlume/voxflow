@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { onSidecarEvent, rustListTtsSpeakers, rustTtsVoicesList, rustTtsVoiceUse, sendToSidecar } from "@/lib/ipc";
-import { applyEngineStatus, applyAsrFrameworkFromRust, applyTtsFrameworkFromRust, syncAsrFrameworkFromLoaded, syncTtsFrameworkFromLoaded, resolveModelKind, runtimeKeyOf, ttsSupportsClone, LOAD_REQ_PENDING } from "@/lib/modelState";
+import { applyEngineStatus, applyAsrFrameworkFromRust, applyTtsFrameworkFromRust, syncAsrFrameworkFromLoaded, syncTtsFrameworkFromLoaded, resolveModelKind, runtimeKeyOf, ttsSupportsClone, findModelItem, migrateLegacyModelKeys, LOAD_REQ_PENDING } from "@/lib/modelState";
 import { useAppStore, type EngineState } from "@/stores";
 import { t } from "@/lib/i18n";
 
@@ -59,7 +59,7 @@ export function useSidecarEvents() {
       // 运行日志：下载进度按 ≥5% 节流，其余全量留痕
       if (status === "model_download_progress") {
         const pct = typeof payload.percent === "number" ? payload.percent : null;
-        const last = store.models.items.find((i) => i.name === model)?.percent ?? -100;
+        const last = findModelItem(store.models.items, model)?.percent ?? -100;
         store.applyDownloadProgress(payload);
         if (pct != null && pct - last >= 5) {
           store.addLog(`[download] ${model} ${pct.toFixed(1)}%`, "info");
@@ -150,6 +150,8 @@ export function useSidecarEvents() {
         }
         case "models_state":
           store.applyModelsState(payload);
+          // 旧 config 里的模型名（展示名 / 旧 id）→ 新的复合身份键（清单到达后才有别名表）
+          migrateLegacyModelKeys(useAppStore.getState().models.items);
           // 启动阶段：清单落地后按开关自动加载（含"模型还在不在"校验）。只在此处触发一次。
           void import("@/lib/modelLoader").then(({ autoLoadFromManifest }) => autoLoadFromManifest());
           // 清理无效的 tts.model：不在已下载列表（或未下载）时重置为空，避免显示「未下载的选中模型」
@@ -157,7 +159,7 @@ export function useSidecarEvents() {
             const st = useAppStore.getState();
             const ttsSel = st.tts.model;
             if (ttsSel) {
-              const item = st.models.items.find((i) => i.name === ttsSel);
+              const item = findModelItem(st.models.items, ttsSel);
               const isAsr = resolveModelKind(ttsSel) === "asr";
               if (!item || (item.kind === "tts" && item.state === "not_downloaded" && st.engines.tts.status !== "ready") || isAsr) {
                 st.updateTts({ model: "" });
@@ -420,7 +422,7 @@ export function useSidecarEvents() {
                   });
                   // 快照带出真实加载模型 → 对齐框架标签（key/engine 全部来自清单）
                   if (asrSnap.model) {
-                    const item = useAppStore.getState().models.items.find((i) => i.name === asrSnap.model);
+                    const item = findModelItem(useAppStore.getState().models.items, asrSnap.model);
                     const key = runtimeKeyOf(item);
                     if (key) applyAsrFrameworkFromRust(key, item?.engine, asrSnap.model);
                   }

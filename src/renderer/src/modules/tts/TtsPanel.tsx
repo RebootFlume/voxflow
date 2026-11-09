@@ -29,7 +29,7 @@ import {
   rustTtsVoiceUse,
   type TtsVoiceItem,
 } from "@/lib/ipc";
-import { belongsToFramework, frameworkOptionsOf, loadedFrameworkLabel, selectLoadingKind, supportsClone, ttsModelInfoOf } from "@/lib/modelState";
+import { belongsToFramework, findModelItem, frameworkOptionsOf, loadedFrameworkLabel, modelDisplayName, selectLoadingKind, supportsClone, ttsModelInfoOf } from "@/lib/modelState";
 import { useAudioPreview } from "@/lib/useAudioPreview";
 import { loadTtsModel, selectTtsFramework } from "@/lib/modelLoader";
 import { useExportDir } from "@/lib/useExportDir";
@@ -55,7 +55,7 @@ function ModelDevicePage() {
   const frameworkOptions = frameworkOptionsOf(modelItems, "tts", runtimePackages, tts.framework);
 
   // 已加载的模型不属于当前框架 → 说明"现在跑的是别的框架的模型"（切框架不会替你卸载）
-  const loadedItem = modelItems.find((i) => i.name === (engine.model ?? ""));
+  const loadedItem = findModelItem(modelItems, engine.model ?? "");
   const loadedOtherFramework =
     engine.status === "ready" && !!engine.model && !belongsToFramework(loadedItem, tts.framework);
   // 设备待应用：引擎已就绪，且当前设备偏好 ≠ 引擎实际生效的设备
@@ -136,7 +136,7 @@ function ModelDevicePage() {
           {loadedOtherFramework && (
             <div className="rounded-md border border-sky-500/30 bg-sky-500/5 px-3 py-2 text-xs text-sky-700 dark:text-sky-400">
               {t(locale, "tts.framework.loaded", {
-                model: engine.model ?? "",
+                model: modelDisplayName(modelItems, engine.model ?? ""),
                 framework: engine.framework ?? "",
               })}
               <span className="ml-2 text-muted-foreground">{t(locale, "tts.framework.loadedHint")}</span>

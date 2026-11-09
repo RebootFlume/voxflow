@@ -8,7 +8,7 @@ import { Switch } from "@/components/ui/switch";
 import { ModelSelector } from "@/components/ModelSelector";
 import { ModelStatusBadge } from "@/components/ModelStatusBadge";
 import { useAppStore } from "@/stores";
-import { computeIsLoaded, frameworkOptionsOf, loadedFrameworkLabel, selectLoadingKind } from "@/lib/modelState";
+import { computeIsLoaded, frameworkOptionsOf, loadedFrameworkLabel, modelDisplayName, selectLoadingKind } from "@/lib/modelState";
 import { selectAsrFramework } from "@/lib/modelLoader";
 import { VolumeWave } from "@/components/VolumeWave";
 import { t } from "@/lib/i18n";
@@ -308,7 +308,7 @@ export function AsrPanel() {
             {asr.modelStatus === "ready" && (
               <div className="rounded-md border border-sky-500/30 bg-sky-500/5 px-3 py-2 text-xs text-sky-700 dark:text-sky-400">
                 {t(locale, "asr.framework.loaded", {
-                  model: asr.model,
+                  model: modelDisplayName(modelItems, asr.model),
                   framework: asr.framework.toUpperCase(),
                 })}
                 <span className="ml-2 text-muted-foreground">
