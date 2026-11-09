@@ -245,16 +245,45 @@ export class AudiocppTtsEngine implements TtsEngine {
     this.inner.instruct = trimmed ? trimmed : null
   }
 
+  /**
+   * UI 传进来的音色 → C 侧的 voice_id。
+   *
+   * 前端对所有模型统一用 **sid（数字序号）** 标识音色（sherpa 的 sid 本身就是整数
+   * speaker id）；但 audio.cpp 的预设音色是**名字**（qwen3_tts 的 vivian / serena…）。
+   * 描述符里有 `speakers: string[]` 时按序号取名，没有则原样透传
+   * （数字 = 该族自己的 speaker id，非数字 = voice_id）。
+   */
+  private resolveVoiceId(voice: string): string {
+    const v = (voice ?? '').trim()
+    const spec = this.inner.spec
+    const vm = spec?.voiceMode
+    const names = vm?.type === 'preset' ? vm.speakers : vm?.type === 'presetAndClone' ? vm.preset.speakers : undefined
+    if (!v) {
+      // 空 = 用模型默认音色。但**有命名预设音色的族不接受缺省**（Qwen3 CustomVoice
+      // 直接报 "prefill requires speaker"），所以这里落到第一个。
+      return names && names.length > 0 ? names[0] : ''
+    }
+    if (names && names.length > 0) {
+      const idx = Number(v)
+      if (Number.isInteger(idx) && idx >= 0 && idx < names.length) return names[idx]
+      if (names.includes(v)) return v
+      // 有预设音色列表却给不出有效项（空串 / 越界 / 别的模型遗留）：用第一个。
+      // 不能下发空值 —— Qwen3 CustomVoice 对缺 speaker 的请求直接报
+      // "prefill requires speaker"，比"用了默认音色"更糟。
+      return names[0]
+    }
+    return v
+  }
+
   async synthesize(text: string, voice: string): Promise<SynthAudio> {
     if (!this.isLoaded()) throw new Error('TTS 模型未加载')
     if (!text) return { samples: new Int16Array(0), sampleRate: 0 }
 
     const options: Record<string, string> = {}
-    // 语音参数非空时透传为 voice_id（部分族支持）；空则用模型默认
-    const voiceId = (voice ?? '').trim()
     // 克隆激活时音色由参考音频决定，voice_id 不再参与
     const clone = this.inner.referenceAudio
-    if (!clone && voiceId && Number.isNaN(Number(voiceId))) options.voice_id = voiceId
+    const voiceId = clone ? '' : this.resolveVoiceId(voice)
+    if (voiceId) options.voice_id = voiceId
     // 参考文本：Qwen3-TTS 克隆需要它对齐参考音频内容
     if (clone && this.inner.referenceText) options.reference_text = this.inner.referenceText
     // 音色描述：与 voice_id / 克隆相互独立（C 侧把空 instructions 视为未设置）

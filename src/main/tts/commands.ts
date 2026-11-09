@@ -23,6 +23,9 @@ import { TtsCancel, type SynthAudio, type TtsEngine } from './traits'
 /** 全局取消令牌（与 `rust_cancel_tts` 共用） */
 export const ttsCancel = new TtsCancel()
 
+/** 未设置导出目录时的落盘位置（数据根下 `tts-output/`） */
+const DEFAULT_EXPORT_DIR = 'tts-output'
+
 /** 音色库目录（数据根下 `tts-voices/`） */
 export function voicesDir(): string {
   return join(getDataRoot(), voices.DIR_NAME)
@@ -251,8 +254,12 @@ export async function synthesize(
   }
   if (outcome.samples.length === 0) throw new Error('合成音频为空')
 
+  // 导出目录未设置（试听也走这条路径）→ 落到数据根下的 tts-output。
+  // 空串直接 mkdir 会抛 ENOENT: no such file or directory, mkdir ''，
+  // 用户在「音色设置」点试听就只看到一句莫名其妙的内核错误。
+  const outDir = exportDir.trim() || join(getDataRoot(), DEFAULT_EXPORT_DIR)
   // 建目录改异步：Electron 主线程做同步 IO 会让窗口卡住（长文本合成时尤其明显）
-  if (!existsSync(exportDir)) await mkdir(exportDir, { recursive: true })
+  if (!existsSync(outDir)) await mkdir(outDir, { recursive: true })
 
   const ts = localTimeStamp()
   const safeText = [...text]
@@ -260,7 +267,7 @@ export async function synthesize(
     .filter((c) => /[\p{L}\p{N}]/u.test(c) || c === ' ' || /[\u{4e00}-\u{9fff}]/u.test(c))
     .join('')
   const fileName = safeText.trim() ? `${safeText.trim()}_${ts}.wav` : `tts_${ts}.wav`
-  const outPath = join(exportDir, fileName)
+  const outPath = join(outDir, fileName)
 
   await writeInt16Wav(outPath, outcome.samples, Math.max(outcome.sampleRate, 1))
 
