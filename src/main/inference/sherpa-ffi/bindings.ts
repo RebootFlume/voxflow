@@ -313,6 +313,13 @@ export interface GenerationConfigInput {
   referenceAudio: Float32Array | null
   referenceSampleRate: number
   referenceText: string
+  /**
+   * 族级合成选项（JSON 字符串，C 侧 `GenerationConfig.extra`）。
+   *
+   * 只有部分族读它 —— Supertonic 的 `lang` / `seed` / `num_steps` 全在这里，
+   * 而它**没有**独立的语言字段。空串 = 不设置（C 侧用各自默认值）。
+   */
+  extra?: string
 }
 
 /* ------------------------------------------------------------------ *
@@ -340,7 +347,14 @@ export interface SherpaTtsApi {
   /** 生成音频；返回 GeneratedAudio*（用完必须 destroy_generated_audio） */
   generate: (tts: Handle, text: string, sid: number, speed: number) => Handle
   /** 带合成参数的生成（支持参考音频/语音克隆） */
-  generate_with_config: (tts: Handle, text: string, config: Handle) => Handle
+  /** 后两个参数对应 C 原型的 callback/arg，本集成恒为 null（不需要逐帧进度回调） */
+  generate_with_config: (
+    tts: Handle,
+    text: string,
+    config: Handle,
+    callback: unknown,
+    arg: unknown
+  ) => Handle
   destroy_generated_audio: (audio: Handle) => void
 }
 
@@ -405,9 +419,14 @@ export function loadSherpaFfi(runtimeDir: string): SherpaFfi {
     create_tts: lib.func('SherpaOnnxCreateOfflineTts', voidPtr, [koffi.pointer(ttsConfig)]),
     destroy_tts: lib.func('SherpaOnnxDestroyOfflineTts', 'void', [voidPtr]),
     generate: lib.func('SherpaOnnxOfflineTtsGenerate', voidPtr, [voidPtr, C, 'int32_t', 'float']),
+    // C 原型是 5 个参数：tts, text, config, callback, arg。
+    // 少声明后两个会按 x64 调用约定把寄存器里的残留值当成参数 → 进程 0xC0000005 崩溃
+    // （表现为 worker 退出 code=3221225477，日志里只剩一句"TTS 模型未加载"）。
     generate_with_config: lib.func('SherpaOnnxOfflineTtsGenerateWithConfig', voidPtr, [
       voidPtr,
       C,
+      voidPtr,
+      voidPtr,
       voidPtr
     ]),
     destroy_generated_audio: lib.func('SherpaOnnxDestroyOfflineTtsGeneratedAudio', 'void', [voidPtr])
@@ -446,7 +465,7 @@ export function loadSherpaFfi(runtimeDir: string): SherpaFfi {
         reference_sample_rate: input.referenceSampleRate,
         reference_text: input.referenceText,
         num_steps: 0,
-        extra: '',
+        extra: input.extra ?? '',
         phoneme_codepoints: null,
         phoneme_codepoints_lens: null,
         phoneme_codepoints_num_sentences: 0,

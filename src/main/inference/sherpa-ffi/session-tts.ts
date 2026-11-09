@@ -41,6 +41,8 @@ export interface SherpaTtsSynthOptions {
   referenceSampleRate: number
   /** 语音克隆参考文本 */
   referenceText: string
+  /** 族级合成选项 JSON（透传到 C 的 `GenerationConfig.extra`）；空串 = 不设置 */
+  extra: string
 }
 
 /** 合成结果（采样为 [-1,1] 浮点，由调用方转 16bit） */
@@ -113,9 +115,12 @@ export class SherpaTtsSession {
     const { ffi, tts } = this
     if (!text) return { samples: new Float32Array(0), sampleRate: 0 }
 
-    // 克隆类模型（ZipVoice）要走带参考音频的接口；其余走简单接口
-    const audio = opts.referenceAudio
-      ? this.generateWithReference(text, opts)
+    // 需要参考音频（ZipVoice 克隆）或族级选项（Supertonic 的 lang）时走带 config 的接口。
+    // 简单接口 SherpaOnnxOfflineTtsGenerate 只有 text/sid/speed 三个参数，表达不了 extra ——
+    // 之前 Supertonic 的语言下拉选了不生效，就是因为它一直走的是这条简单路径。
+    const needsConfig = Boolean(opts.referenceAudio) || opts.extra !== ''
+    const audio = needsConfig
+      ? this.generateWithConfig(text, opts)
       : ffi.tts.generate(tts, text, opts.sid, opts.speed)
     if (!audio) throw new Error('合成失败（C API 返回空结果）')
 
@@ -126,18 +131,20 @@ export class SherpaTtsSession {
     }
   }
 
-  /** 带参考音频合成（语音克隆） */
-  private generateWithReference(text: string, opts: SherpaTtsSynthOptions): Handle {
+  /** 带完整合成参数（参考音频 / 族级 extra） */
+  private generateWithConfig(text: string, opts: SherpaTtsSynthOptions): Handle {
     const built = this.ffi.make_generation_config({
       sid: opts.sid,
       speed: opts.speed,
       referenceAudio: opts.referenceAudio,
       referenceSampleRate: opts.referenceSampleRate,
-      referenceText: opts.referenceText
+      referenceText: opts.referenceText,
+      extra: opts.extra
     })
     // keepAlive 必须活到调用结束（里面的浮点缓冲是指针的目标）
     void built.keepAlive
-    return this.ffi.tts.generate_with_config(this.tts, text, built.handle)
+    // callback / arg 传 null：进度回调对本集成没用（合成是同步阻塞的）
+    return this.ffi.tts.generate_with_config(this.tts, text, built.handle, null, null)
   }
 
   /** 释放合成器 */

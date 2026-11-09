@@ -236,9 +236,27 @@ export class SherpaTtsEngine implements TtsEngine {
       speed: SYNTH_SPEED,
       referenceAudio: reference?.samples ?? null,
       referenceSampleRate: reference?.sampleRate ?? 0,
-      referenceText: this.inner.referenceText ?? ''
+      referenceText: this.inner.referenceText ?? '',
+      // 族级选项：Sherpa 没有统一的「语言」参数字段，Supertonic 从 extra 里读 lang。
+      // 其它族不认这个键（各自忽略），所以只在有语言需求时拼。
+      extra: this.synthesisExtra()
     })
     return { samples: reply.samples, sampleRate: reply.sampleRate }
+  }
+
+  /**
+   * 族级合成选项（C 的 `GenerationConfig.extra`）。
+   *
+   * 只有 Supertonic 需要：它的语言不在结构体字段里，而是 `{"lang": "en"}`。
+   * 其余族没有语言自由度（auto / fixed / cloning），返回空串即不设置。
+   */
+  private synthesisExtra(): string {
+    const spec = this.inner.spec
+    if (!spec || spec.backend.type !== 'sherpaTts') return ''
+    if (spec.backend.family !== 'supertonic') return ''
+    const lang = this.inner.language
+    if (!lang) return ''
+    return JSON.stringify({ lang })
   }
 
   vramEstimateMb(): number | null {

@@ -69,6 +69,8 @@ export interface SynthesizeRequest {
   referenceSampleRate: number
   /** 语音克隆参考文本（ZipVoice 需要） */
   referenceText: string
+  /** 族级合成选项 JSON（映射到 C 的 `GenerationConfig.extra`）；空串 = 不设置 */
+  extra: string
 }
 
 /** 合成结果 */

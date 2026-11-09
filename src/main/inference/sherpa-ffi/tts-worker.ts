@@ -54,7 +54,8 @@ runFfiWorker({
         speed: req.speed,
         referenceAudio: req.referenceAudio ? toFloat32Array(req.referenceAudio) : null,
         referenceSampleRate: req.referenceSampleRate,
-        referenceText: req.referenceText
+        referenceText: req.referenceText,
+        extra: req.extra
       })
       return { samples: toInt16(audio.samples), sampleRate: audio.sampleRate }
     }
