@@ -114,7 +114,12 @@ Write-Host "`n=== [2/3] 编译根目录启动器 ===" -ForegroundColor Cyan
 $csc = Find-Csc
 if (-not (Test-Path $cache)) { New-Item $cache -ItemType Directory -Force | Out-Null }
 $launcher = "$cache\VoxFlowLauncher.exe"
-& $csc /nologo /target:winexe /optimize+ /out:"$launcher" "$root\scripts\inno\VoxFlowLauncher.cs"
+# /win32icon 不能省：csc 默认给 .NET 的空白窗口图标。
+# 快捷方式、任务栏、卸载列表读的都是这个 exe 的图标，
+# 只有安装器外壳才看 SetupIconFile —— 少了这一句就是「安装包有图标、装完变白板」。
+$ico = "$root\build\icon.ico"
+if (-not (Test-Path $ico)) { Write-Error "找不到 $ico" }
+& $csc /nologo /target:winexe /optimize+ /win32icon:"$ico" /out:"$launcher" "$root\scripts\inno\VoxFlowLauncher.cs"
 if ($LASTEXITCODE -ne 0) { Write-Error "启动器编译失败" }
 Write-Host "  ✔ $launcher ($([math]::Round((Get-Item $launcher).Length/1KB)) KB)" -ForegroundColor Green
 
