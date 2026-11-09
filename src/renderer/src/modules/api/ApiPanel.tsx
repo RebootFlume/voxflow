@@ -5,7 +5,6 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/stores";
 import { t } from "@/lib/i18n";
@@ -87,44 +86,60 @@ export function ApiPanel() {
             />
           </div>
 
-          {/* 监听地址 */}
+          {/* 监听地址：平铺卡片 + 圆点单选。
+              只有两个互斥选项，用下拉要把备选藏起来点一次才看得到 —— 而这两项的区别
+              （谁能访问）恰恰是用户要判断的东西，平铺才能一眼比较。
+              切换即生效：服务在跑就重启，与下拉版本行为一致。 */}
           <div className="space-y-2">
             <label className="text-sm font-medium">{t(locale, "api.service.host")}</label>
-            <Select
-              value={api.host}
-              onValueChange={(v) => {
-                updateApi({ host: v });
-                // 如果服务正在运行，切换地址需要重启
-                if (api.enabled) {
-                  void sendToSidecar({ action: "stop_api" });
-                  setTimeout(() => startApi(v), 200);
-                }
-              }}
-            >
-              <SelectTrigger className="w-80">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="127.0.0.1">
-                  <div className="flex items-center gap-2">
-                    <Lock className="h-3.5 w-3.5 text-muted-foreground" />
-                    <div>
-                      <div className="text-sm">{t(locale, "api.service.host.localhost")}</div>
-                      <div className="text-[11px] text-muted-foreground">{t(locale, "api.service.host.localhost.desc")}</div>
-                    </div>
-                  </div>
-                </SelectItem>
-                <SelectItem value="0.0.0.0">
-                  <div className="flex items-center gap-2">
-                    <Globe className="h-3.5 w-3.5 text-muted-foreground" />
-                    <div>
-                      <div className="text-sm">{t(locale, "api.service.host.lan")}</div>
-                      <div className="text-[11px] text-muted-foreground">{t(locale, "api.service.host.lan.desc")}</div>
-                    </div>
-                  </div>
-                </SelectItem>
-              </SelectContent>
-            </Select>
+            <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label={t(locale, "api.service.host")}>
+              {[
+                { value: "127.0.0.1", icon: Lock, titleKey: "api.service.host.localhost", descKey: "api.service.host.localhost.desc" },
+                { value: "0.0.0.0", icon: Globe, titleKey: "api.service.host.lan", descKey: "api.service.host.lan.desc" },
+              ].map(({ value, icon: Icon, titleKey, descKey }) => {
+                const active = api.host === value;
+                const select = () => {
+                  if (active) return;
+                  updateApi({ host: value });
+                  // 服务正在运行时换监听地址必须重启才生效
+                  if (api.enabled) {
+                    void sendToSidecar({ action: "stop_api" });
+                    setTimeout(() => startApi(value), 200);
+                  }
+                };
+                return (
+                  <button
+                    key={value}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    onClick={select}
+                    className={cn(
+                      "flex items-start gap-2.5 rounded-lg border p-3 text-left transition-all",
+                      active
+                        ? "border-primary bg-primary/5 ring-1 ring-primary/20"
+                        : "border-border hover:border-primary/40 hover:bg-muted/50",
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border",
+                        active ? "border-primary bg-primary" : "border-muted-foreground/40",
+                      )}
+                    >
+                      {active && <span className="h-1.5 w-1.5 rounded-full bg-primary-foreground" />}
+                    </span>
+                    <span className="min-w-0">
+                      <span className="flex items-center gap-1.5 text-sm font-medium">
+                        <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        {t(locale, titleKey)}
+                      </span>
+                      <span className="mt-0.5 block text-[11px] text-muted-foreground">{t(locale, descKey)}</span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           <div className="space-y-2">
