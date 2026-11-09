@@ -8,8 +8,8 @@
 ;   <root>\
 ;     VoxFlow.exe     ← 根目录启动器（scripts\inno\VoxFlowLauncher.cs 编译产物）
 ;     bin\            ← Electron 本体
-;     data\           ← 预建空目录（安装版不用它，数据根在 %APPDATA%）
-;     libs\           ← 推理运行时，按需下载
+;     data\           ← 运行时创建（安装版不用它，数据根在 %APPDATA%）
+;     libs\           ← 运行时创建，推理运行时按需下载
 ;
 ; 为什么 exe 在根、Electron 在 bin：用户要求的目录布局。
 ; 应用侧靠 src\main\core\data-root.ts 的 appRootDir() 识别 bin\ 布局，
@@ -60,13 +60,6 @@ Source: "..\..\.cache\VoxFlowLauncher.exe"; DestDir: "{app}"; DestName: "{#AppEx
 
 ; ── Electron 本体 → bin\ ──────────────────────────────────────────────
 Source: "..\..\release\win-unpacked\*"; DestDir: "{app}\bin"; Flags: ignoreversion recursesubdirs createallsubdirs
-
-[Dirs]
-; data\ 与 libs\ 预建空目录，让目录结构与便携版一致。
-; 安装版的数据根实际在 %APPDATA%\com.voxflow.app（见 data-root.ts 的 isPortable）。
-Name: "{app}\data"; Flags: uninsneveruninstall
-Name: "{app}\data\models"; Flags: uninsneveruninstall
-Name: "{app}\libs"; Flags: uninsneveruninstall
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"

@@ -67,8 +67,24 @@ Write-Host "`n=== [1/3] 第一遍：electron-builder --dir（纯文件目录） 
 
 if ($SkipBuild) {
     Write-Host "  -SkipBuild：跳过，复用现有 release\win-unpacked" -ForegroundColor DarkGray
+    # 复用也有坑：out\ 若比源码旧，打出来的 exe 里是旧逻辑。
+    # 这里只警告不中止 —— 明确传了 -SkipBuild 就是想快，但至少让人看见。
+    $outJs = Get-Item "$root\out\main\index.js" -ErrorAction SilentlyContinue
+    $newestSrc = Get-ChildItem "$root\src" -Recurse -Include *.ts,*.tsx |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($outJs -and $newestSrc -and $outJs.LastWriteTime -lt $newestSrc.LastWriteTime) {
+        Write-Host ("  ⚠ out\main\index.js 比 src\" + $newestSrc.Name + " 旧，" +
+            "产出的 exe 将是旧代码。去掉 -SkipBuild 重跑。") -ForegroundColor Yellow
+    }
 } else {
     Push-Location $root
+    # 先编译 TS/React → out\。--dir 只是把 out\ 连同 node_modules 塞进 Electron，
+    # 不会自己编译；漏了这步打出来的是上一次的旧代码（本次踩坑：out\ 停在 04:35，
+    # data-root.ts 06:11 才改，packaging 出来的 exe 里根本没有 appRootDir）。
+    & node "$root\scripts\typecheck.mjs"
+    if ($LASTEXITCODE -ne 0) { Pop-Location; Write-Error "typecheck 失败，中止打包" }
+    & node "$root\node_modules\electron-vite\bin\electron-vite.js" build
+    if ($LASTEXITCODE -ne 0) { Pop-Location; Write-Error "electron-vite build 失败，中止打包" }
     # --dir 只产出解包目录；不传 --win 就不碰 nsis/dmg 那些安装器 target。
     # 直接调 cli.js 而不是 npx：这台机器 npm 的 shim 坏了（nvm 的 sh 脚本找不到 node）。
     & node "$root\node_modules\electron-builder\cli.js" --dir
@@ -122,18 +138,19 @@ $stageBin = "$stage\bin"
 New-Item $stageBin -ItemType Directory -Force | Out-Null
 Copy-Item "$unpacked\*" $stageBin -Recurse -Force
 
-# data\ 与 libs\：预建空目录（内容首次运行时按需生成）
-New-Item "$stage\data\models" -ItemType Directory -Force | Out-Null
-New-Item "$stage\libs" -ItemType Directory -Force | Out-Null
+# data\ 与 libs\ 不预建：getDataRoot() 会 mkdir 出 data\models，
+# 运行时下载则 mkdir 出 libs\ —— 空目录进 zip 只是噪音。
+# 未运行过的便携版解压后只有 VoxFlow.exe / bin\ / portable.txt。
 
 Write-Host "  → 便携版: VoxFlow-Portable-$ver.zip" -ForegroundColor Cyan
 $zip = "$out\VoxFlow-Portable-$ver.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 # bsdtar（Windows 自带，System32\tar.exe）支持 zip，比 Compress-Archive 快得多
-Push-Location $stage
-& tar -a -c -f $zip *
+# 显式列出成员再传给 tar：PowerShell 不替原生程序展开通配符，
+# 裸写 * 时 tar 收到的是字面星号（本次踩坑：退出码 1）。
+$items = Get-ChildItem $stage | ForEach-Object { $_.Name }
+& tar -a -c -f $zip -C $stage @items
 $code = $LASTEXITCODE
-Pop-Location
 if ($code -ne 0) { Write-Error "便携版压缩失败（退出码 $code）" }
 Remove-Item $stage -Recurse -Force
 Write-Host "  ✔ $zip ($([math]::Round((Get-Item $zip).Length/1MB)) MB)" -ForegroundColor Green
