@@ -1,5 +1,5 @@
 /**
- * 推理引擎运行时目录（libs）—— 对齐 Rust 版 `src-tauri/src/inference/runtime_paths.rs`。
+ * 推理引擎运行时目录（libs）。
  *
  * 单一逻辑：libs 永远在 exe 同级目录。
  * - 打包版（安装/便携）：libs/ 与 exe 同级（用户从「推理框架」页下载解压到那）
@@ -7,10 +7,14 @@
  *
  * 不再做多路径回退（环境变量 / _up_ / 项目根）——统一只认 exe 目录，
  * 避免跨项目/残留目录误判。
+ *
+ * **目录名从 RUNTIME_PACKAGES 派生**，这里不再出现 'llama-cpp' 之类的字面量：
+ * 之前 targetDir 在这两处各写一份，改运行时包名时必须同时改两处，漏了就必然找不到 dll。
  */
 
 import { join } from 'path'
 import { exeDir } from '../core/data-root'
+import { RUNTIME_PACKAGES, type RuntimePkg } from './runtime-packages'
 
 export { exeDir }
 
@@ -19,34 +23,24 @@ export function libsDir(): string {
   return join(exeDir(), 'libs')
 }
 
-/** llama-cpp 运行时目录（含 llama.dll / mtmd.dll / ggml*.dll） */
-export function llamaRuntimeDir(): string {
-  return join(libsDir(), 'llama-cpp')
+/** 某运行时包的解压目录（`<libs>/<targetDir>`） */
+export function runtimePkgDir(framework: RuntimePkg['framework']): string {
+  const pkg = RUNTIME_PACKAGES.find((p) => p.framework === framework)
+  if (!pkg) throw new Error(`未登记的运行时包: ${framework}（见 RUNTIME_PACKAGES）`)
+  return join(libsDir(), pkg.targetDir)
 }
 
-/** sherpa-onnx 运行时目录（含 websocket server exe） */
+/** llama.cpp 运行时目录（含 llama.dll / mtmd.dll / ggml*.dll） */
+export function llamaRuntimeDir(): string {
+  return runtimePkgDir('gguf')
+}
+
+/** sherpa-onnx 运行时目录（含 bin/ include/ lib/） */
 export function sherpaRuntimeDir(): string {
-  return join(libsDir(), 'sherpa-onnx')
+  return runtimePkgDir('onnx')
 }
 
 /** audio.cpp 运行时目录（含 libs/audiocpp.dll 与 ggml 各后端 dll） */
 export function audiocppRuntimeDir(): string {
-  return join(libsDir(), 'audio-cpp')
-}
-
-/**
- * sherpa-onnx 工具可执行文件的**规范位置**：`<sherpa_runtime_dir>/bin/<name>`。
- *
- * 官方包根 = `bin/include/lib`，所有 CLI（offline / offline-tts / offline-websocket-server）
- * 与运行库同处 `bin/` —— 下载一次即可让 ASR 与 TTS 两个工具同时可用。
- * 本函数是布局的单一真源：下载校验 marker、ASR 引擎、TTS 引擎都走这里，
- * 避免"一处假设 bin/、另一处假设扁平"导致必然有一侧失败。
- */
-export function sherpaExe(name: string): string {
-  return join(sherpaRuntimeDir(), 'bin', name)
-}
-
-/** exe 同级目录（libs / data 等资源的基准） */
-export function appDir(): string {
-  return exeDir()
+  return runtimePkgDir('audiocpp')
 }

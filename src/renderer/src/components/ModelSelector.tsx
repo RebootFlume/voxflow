@@ -1,4 +1,4 @@
-import { useAppStore, type ModelItemState, type ModelFramework } from "@/stores";
+import { useAppStore, type EngineName, type ModelItemState, type ModelFramework } from "@/stores";
 import { t } from "@/lib/i18n";
 import { Badge } from "@/components/ui/badge";
 import { belongsToFramework, computeIsLoaded, engineOf, runtimeKeyOf, runtimeKeysOf, runtimePackageLabels, selectLoadingKind } from "@/lib/modelState";
@@ -6,12 +6,15 @@ import { belongsToFramework, computeIsLoaded, engineOf, runtimeKeyOf, runtimeKey
 const EMPTY_ITEMS: ModelItemState[] = [];
 
 /**
- * 引擎徽章配色（仅视觉查表；未登记引擎走默认样式 —— 新增框架无需改前端）
+ * 引擎徽章配色：键 = model-manager FRAMEWORKS 的 `engine` 字段。
+ *
+ * `torch` 是 Tauri 时代遗留（引擎早已移除），去掉避免误以为是可选后端；
+ * `audiocpp` 之前缺席，audio.cpp 的模型只能落到灰色兜底。
  */
-const ENGINE_BADGE_CLASSES: Record<string, string> = {
+const ENGINE_BADGE_CLASSES: Record<EngineName, string> = {
   llama: "border-sky-500/40 text-sky-600 dark:text-sky-400",
   sherpa: "border-emerald-500/40 text-emerald-600 dark:text-emerald-400",
-  torch: "border-orange-500/40 text-orange-600 dark:text-orange-400",
+  audiocpp: "border-violet-500/40 text-violet-600 dark:text-violet-400",
 };
 
 /**

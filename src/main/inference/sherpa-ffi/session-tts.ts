@@ -9,15 +9,10 @@ import { existsSync } from 'node:fs'
 import { loadSherpaFfi, type Handle, type SherpaFfi } from './bindings'
 import type { TtsModelPayload } from './protocol'
 
-/** TTS 模型族（= C API 的 7 个子结构体） */
-export type SherpaTtsFamily =
-  | 'vits'
-  | 'matcha'
-  | 'kokoro'
-  | 'kitten'
-  | 'zipvoice'
-  | 'pocket'
-  | 'supertonic'
+// TTS 模型族（= C API 的 7 个子结构体）词表在 models/framework-ids.ts
+import type { SherpaTtsFamily } from '../../models/framework-ids'
+
+export type { SherpaTtsFamily }
 
 export interface SherpaTtsSessionOptions {
   /** sherpa-onnx 运行时根目录 */

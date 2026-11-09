@@ -58,7 +58,6 @@ npm run check:abi onnx v2.1.0 --offline # 只用本地缓存（无网时）
 | --- | --- |
 | `version` | 官方 tag（llama 是 `b####`，其余是 `vX.Y.Z`） |
 | `url` / `auxUrl` | 资产地址；**先用浏览器/curl 确认存在**，并核对 `Content-Length` |
-| `innerDir` | 包内顶层目录名。`placeExtracted()` 会自动剥离「只有一个顶层目录」的情况，所以平铺包写 `''`。**每次升级都要解压看一眼**：zip/tar 结构换过不止一次（llama b12211 就从带 wrapper 目录变成平铺） |
 | `marker` | 安装完整性判据（某个 exe/dll 的相对路径） |
 | `targetDir` | 落到 `libs/<targetDir>` |
 | `portBase` / `smokeProbe` | 试启动参数；纯库类（如 audio.cpp）用 `{ type: 'skip' }` |

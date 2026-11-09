@@ -46,7 +46,7 @@ export interface SynthesizeReply {
 
 /** 加载 ASR 模型 */
 export interface LoadAsrRequest {
-  /** audio.cpp 运行时根目录（<libs>/audio-cpp 或 <libs>/audio-cpp-cuda） */
+  /** audio.cpp 运行时根目录（<libs>/audio-cpp） */
   runtimeDir: string
   /** 主模型文件绝对路径（.gguf） */
   modelPath: string

@@ -14,7 +14,7 @@
     "start": "electron-vite preview",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
-    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "typecheck": "node scripts/check-consistency.mjs && npm run typecheck:node && npm run typecheck:web",
     "build": "npm run typecheck && electron-vite build",
     "postinstall": "install-electron && electron-builder install-app-deps",
     "rebuild": "electron-rebuild -f",
@@ -36,7 +36,8 @@
     "check:updates": "node scripts/check-runtime-updates.mjs",
     "check:abi": "node scripts/check-runtime-abi.mjs",
     "test:tts": "node scripts/run-ts-tests.mjs scripts/tts-tests.ts",
-    "screenshot": "node scripts/screenshot.mjs"
+    "screenshot": "node scripts/screenshot.mjs",
+    "check:consistency": "node scripts/check-consistency.mjs"
   },
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.2",

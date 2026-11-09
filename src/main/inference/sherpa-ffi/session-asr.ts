@@ -10,8 +10,11 @@ import koffi from 'koffi'
 import { loadSherpaFfi, type Handle, type SherpaFfi } from './bindings'
 import type { AsrStage } from '../engine'
 
-/** 模型族（C API 用「哪个子结构体放路径」来区分模型类型，没有模型名嗅探） */
-export type SherpaAsrFamily = 'paraformer' | 'sense_voice' | 'transducer' | 'nemo_ctc'
+// 模型族词表在 models/framework-ids.ts（全仓库唯一一份：spec 声明、C 结构体、
+// NUMERIC_DEFAULTS 三处共用）。这里 re-export 保持既有 import 路径可用。
+import type { SherpaAsrFamily } from '../../models/framework-ids'
+
+export type { SherpaAsrFamily }
 
 export interface SherpaAsrSessionOptions {
   /** sherpa-onnx 运行时根目录（含 bin/ include/ lib/） */

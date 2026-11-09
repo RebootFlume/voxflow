@@ -1,9 +1,14 @@
 /**
- * 模型描述符数据表 —— 由 `scripts/rust-spec-to-ts.mjs` 从 Tauri 版
- * `src-tauri/src/tts/spec.rs` 的 `SPECS` 静态表自动转换而来（勿手工编辑）。
+ * 模型描述符数据表 —— **手工维护的唯一权威**（新增模型只改这里）。
  *
- * 字段名已从 Rust 的 snake_case 归一为 camelCase；枚举判别值改为字符串字面量。
+ * 历史：本文件最初由 `scripts/rust-spec-to-ts.mjs` 从 Tauri 版的 Rust 静态表转换而来。
+ * 那份源表已随项目迁移到 Electron 删除，**生成器也已过时**（它的接口没有 `instruct`、
+ * 没有 audio.cpp backend）；重跑它会把当前数据覆盖回旧形状。需要新模型就直接加一条 spec。
  */
+
+import type { ModelLayer, SherpaAsrFamily, SherpaTtsFamily } from './framework-ids'
+
+export type { ModelLayer, SherpaAsrFamily, SherpaTtsFamily }
 
 export interface DownloadSourceSpec {
   type: 'github' | 'huggingface'
@@ -86,14 +91,14 @@ export type BackendSpec =
   | {
       /** sherpa-onnx ASR（进程内 FFI）：family 决定模型路径放哪个 C 子结构体 */
       type: 'sherpaAsr'
-      family: 'paraformer' | 'sense_voice' | 'transducer' | 'nemo_ctc'
+      family: SherpaAsrFamily
       /** 该族支持指定语言时使用（空 = 自动） */
       language?: string
     }
   | {
       /** sherpa-onnx TTS（进程内 FFI）：family 决定 C 子结构体，cli 描述字段与文件 */
       type: 'sherpaTts'
-      family: 'vits' | 'matcha' | 'kokoro' | 'kitten' | 'zipvoice' | 'pocket' | 'supertonic'
+      family: SherpaTtsFamily
       cli: ArgSpec[]
       requiredFiles: string[]
     }
@@ -109,14 +114,8 @@ export type BackendSpec =
       family: string
     }
 
-/**
- * 框架层 id —— **同时是磁盘目录层名与模型身份前缀**。
- *
- * 一个框架层 = 一个推理引擎 = 一套权重格式约定；同一个模型名可以出现在多个层里
- * （如 "Qwen3-ASR-0.6B" 同时有 llama.cpp 版与 audio.cpp 版），靠层区分。
- * 复合身份 = "<层>/<目录名>"，如 "llama.cpp/qwen3-asr-0.6b"。
- */
-export type ModelLayer = 'llama.cpp' | 'sherpa-onnx' | 'audio.cpp'
+// 框架层 id（ModelLayer）定义在 ./framework-ids —— 那里是全仓库唯一的词表，
+// 这里只 re-export 供调用方沿用既有 import 路径。
 
 export interface ModelSpec {
   id: string

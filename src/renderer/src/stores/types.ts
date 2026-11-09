@@ -76,6 +76,14 @@ export interface ModelEntryState {
   state: "downloaded" | "not_downloaded" | "downloading";
 }
 
+/**
+ * 引擎展示名（主进程 FRAMEWORKS[].engine 下发）。
+ *
+ * 前端拿它做徽章配色与分组键 —— 与框架层 id（`llama.cpp` / `sherpa-onnx`）不是一套命名：
+ * id 用在路径与注册表，展示名给人看。收紧成联合类型，配色表漏一项会编译失败。
+ */
+export type EngineName = "llama" | "sherpa" | "audiocpp";
+
 export interface ModelItemState {
   name: string;
   /** 复合身份键：`<框架层>/<目录名>`（如 llama.cpp/qwen3-asr-0.6b）。
@@ -90,7 +98,7 @@ export interface ModelItemState {
   /** 既有格式字段（= runtime_key，历史消费方兼容） */
   format: ModelFramework;
   /** 引擎展示名（llama / sherpa / torch …，Rust 下发；用于分组/标签/配色） */
-  engine?: string;
+  engine?: EngineName;
   /** 运行时包 key（gguf / onnx …，Rust 下发；用于运行门禁与包查询；缺省回退 format） */
   runtime_key?: string;
   /** 该框架全部可用运行时包 key（主进程下发；多包时任包就绪即可） */

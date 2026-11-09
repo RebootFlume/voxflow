@@ -18,7 +18,7 @@ import { log } from './core/logger'
 import { defaultModelRoot, readSavedModelRoot } from './core/data-root'
 import { appIconPath } from './core/paths'
 import { ensureSingleInstance } from './core/single-instance'
-import { adoptProxyEnv, setModelRoot } from './models/model-manager'
+import { FRAMEWORKS, adoptProxyEnv, setModelRoot } from './models/model-manager'
 import { createTray, destroyTray, showMainWindow } from './tray'
 import { startHotkeyListener, stopHotkeyListener } from './system/hotkey'
 import { llamaEngine } from './inference/llama-ffi'
@@ -46,11 +46,16 @@ function revealMainWindow(): void {
   }
 }
 
-/** 本次会话当前持有的引擎子进程 PID（孤儿清理时不能杀） */
+/**
+ * 本次会话当前持有的引擎子进程 PID（孤儿清理时不能杀）。
+ *
+ * 遍历 FRAMEWORKS 而不是手写层名列表：之前写死 `['llama.cpp','sherpa-onnx']` 漏了
+ * audio.cpp —— 它在用时被当成孤儿杀掉，表现为「合成跑到一半突然 worker 退出」。
+ */
 function currentEnginePids(): Set<number> {
   const pids = new Set<number>()
-  for (const fw of ['llama.cpp', 'sherpa-onnx']) {
-    const pid = registry().engine(fw)?.pid()
+  for (const { id } of FRAMEWORKS) {
+    const pid = registry().engine(id)?.pid()
     if (pid) pids.add(pid)
   }
   return pids

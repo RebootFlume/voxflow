@@ -217,6 +217,7 @@ models\hub\   # HuggingFace 下载缓存
 | audio.cpp TTS 音色 | `Qwen3-TTS-1.7B (CustomVoice)` 9 个预设音色（vivian/serena/uncle_fu/dylan/eric/ryan/aiden/ono_anna/sohee）真机合成通过，24kHz，峰值 18182 / 22500（非静音） |
 | audio.cpp 音色描述 | `Qwen3-TTS-1.7B (CustomVoice)` 的 `instruct`（一句话描述嗓音/风格）：同 seed 下无/低沉/高亢三组输出时长与能量分布明显不同，证明描述生效；不支持该能力的模型（MOSS-TTS-Nano）明确拒绝 |
 | audio.cpp 克隆音色 | `Qwen3-TTS-0.6B (Base)` / `1.7B (Base)`（仅克隆，`voice_mode.type = clone`）：参考音频 5.6s + 参考文本 → `audiocpp_request_set_voice_audio` 下发 → 合成 24kHz 非静音，SenseVoice 回读文本一致 |
+| 元数据单一来源 | 框架层 id / 运行时包键 / sherpa 族词表集中在 `src/main/models/framework-ids.ts`；运行时包数据表在 `inference/runtime-packages.ts`。目录名、孤儿清理的框架列表、徽章配色表全部从中派生，且三处加了编译期断言（漏写即 `tsc` 报错）。跨语言约定（i18n 中英键对齐、`t()` 引用的键必须存在、spec 的 framework/legacyDirs 合法性）由 `node scripts/check-consistency.mjs` 检查，已挂进 `npm run typecheck` |
 | 参数单一设置点 | 音色 / 语言 / 音色描述只在「文字转语音」页设置；「音色设置」页只负责音色库管理与试听（不再有「应用」「使用」按钮，避免 `tts.voice` / `ttsClone` 出现第二个写入点）。控件形态由 `lib/ttsCapabilities.ts` 从模型能力推导：`edit` 渲染下拉/输入框，`badge` 渲染「自动识别」「固定中文」「需参考音频」这类只读徽标，`hidden` 整个字段不出现 |
 | 音色选择全链路 | 预设（9 音色下拉，合成页可就地切换）/ 克隆（音色库「使用」→ 自动恢复）/ 音色描述（输入即下发，试听前 flush）。`voice` 同时接受序号与音色名（含 `alloy (EN)` 这类后缀），认不出时记 warn 并退默认音色，越界序号直接报可用范围 |
 | 音色页对称禁用 | 仅克隆模型禁用「预设音色」页并自动切到克隆工作区；仅预设模型禁用「克隆音色」页；换模型时引擎丢弃上一份参考音频（否则预设模型被当克隆请求，报 `prefill requires speaker`） |

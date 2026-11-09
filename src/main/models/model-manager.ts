@@ -54,6 +54,7 @@ import {
   type ModelSpec,
   type VoiceModeSpec
 } from './spec-data'
+import type { ModelLayer, RuntimeKey } from './framework-ids'
 
 // ── 注册表（对齐原 Rust 版 registry） ──
 
@@ -71,13 +72,22 @@ export type FilePolicy = 'largest' | 'preferUnquantized'
  * 为什么层按「引擎」分：层是引擎（与运行时包解耦）——同一引擎的全部模型共享一份权重，
  * 设备（CPU/CUDA）只影响运行时后端，不影响模型放在哪一层。
  */
+/** 引擎展示名（= 前端徽章/分组键；与框架层 id 是两套命名，前者给人看） */
+export type EngineName = 'llama' | 'sherpa' | 'audiocpp'
+
 export interface FrameworkSpec {
   /** 框架层 id（= 磁盘目录层名 = 复合身份前缀 = 引擎注册键） */
   id: string
-  /** 前端展示名（分组 / 标签 / 显存 JSON key）："llama" | "sherpa" | "audiocpp" */
-  engine: string
-  /** 运行时包键（RUNTIME_PACKAGES.framework）：一个引擎可对应多个包，任包就绪即可 */
-  runtimeKeys: readonly string[]
+  /**
+   * 前端展示名（分组 / 标签 / 显存 JSON key / 徽章配色）。
+   * 收紧成字面量联合：前端 ENGINE_BADGE_CLASSES 以它为键，写错就是静默灰徽章。
+   */
+  engine: EngineName
+  /**
+   * 运行时包键（RUNTIME_PACKAGES.framework）：一个引擎可对应多个包，任包就绪即可。
+   * 类型钉在 RuntimeKey 上 —— 写错的键编译不过（此前是 string，打错只是静默不匹配）。
+   */
+  runtimeKeys: readonly RuntimeKey[]
   /** 主模型文件扩展名 */
   mainExts: readonly string[]
   filePolicy: FilePolicy
@@ -87,7 +97,7 @@ export interface FrameworkSpec {
   processName: string | null
 }
 
-export const FRAMEWORKS: readonly FrameworkSpec[] = [
+export const FRAMEWORKS = [
   {
     id: 'llama.cpp',
     engine: 'llama',
@@ -119,7 +129,17 @@ export const FRAMEWORKS: readonly FrameworkSpec[] = [
     // audio.cpp 跑在本软件的 FFI worker 进程里，按 PID 归因即可
     processName: null
   },
-]
+] as const satisfies readonly FrameworkSpec[]
+
+/**
+ * 编译期断言：MODEL_LAYERS 里的每一层都必须在这里有描述符。
+ *
+ * 与 RUNTIME_PACKAGES 的键断言互补：那边保证「包键有数据」，这边保证「层有描述符」。
+ * 之前漏一层只会表现为「该框架的模型全部查不到 mainExts」，没有任何报错。
+ */
+type UncoveredLayers = Exclude<ModelLayer, (typeof FRAMEWORKS)[number]['id']>
+const assertEveryLayerHasSpec: [UncoveredLayers] extends [never] ? true : UncoveredLayers = true
+void assertEveryLayerHasSpec
 
 // 显存诊断需要「框架 → 常驻进程名」的映射；注入给 vram 模块（避免两模块互相 import 成环）
 setFrameworkGpuSources(FRAMEWORKS)

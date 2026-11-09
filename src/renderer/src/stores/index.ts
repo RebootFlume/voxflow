@@ -23,4 +23,4 @@ export const useAppStore = create<AppState>()((set) => ({
 
 // Re-export shared pieces for backward compatibility
 export { DEFAULT_SUB_MENUS } from "./slices/shared";
-export type { Module, HistoryRecord, RuntimeLog, RuntimeLogLevel, TranscribeTask, TtsTask, ModelFramework, ModelItemState, EngineState } from "./types";
+export type { Module, HistoryRecord, RuntimeLog, RuntimeLogLevel, TranscribeTask, TtsTask, ModelFramework, ModelItemState, EngineState, EngineName } from "./types";

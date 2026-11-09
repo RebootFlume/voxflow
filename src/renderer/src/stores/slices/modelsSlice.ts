@@ -1,4 +1,4 @@
-import type { EngineState, ModelEntryState, ModelItemState } from "../types";
+import type { EngineName, EngineState, ModelEntryState, ModelItemState } from "../types";
 
 /** 引擎集中管理：每个功能（asr/tts）一个引擎状态 */
 export interface EngineRegistry {
@@ -12,6 +12,7 @@ function idleEngine(): EngineState {
 
 // ── 能力字段归一化（models_state 事件 → ModelItemState）──
 // 形状不合法 / 缺失一律保持 undefined：不塞默认值，避免掩盖上游缺字段（UI 侧各自兜底）。
+const ENGINE_NAMES: EngineName[] = ["llama", "sherpa", "audiocpp"];
 const LANGUAGE_MODES: NonNullable<ModelItemState["language_mode"]>[] = ["auto", "fixed", "select", "cloning"];
 const VOICE_MODES: NonNullable<ModelItemState["voice_mode"]>["type"][] = ["fixed", "preset", "clone", "preset_and_clone"];
 
@@ -120,9 +121,13 @@ export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: Mod
               ? (m.aliases.filter((a) => typeof a === "string") as string[])
               : undefined,
             kind: (m.kind === "tts" ? "tts" : "asr") as ModelItemState["kind"],
-            // format / engine / runtime_key 全部透传 Rust 原值（非法/缺失保持空值，不塞默认）
+            // format / engine / runtime_key 全部透传主进程原值（非法/缺失保持空值，不塞默认）
             format: typeof m.format === "string" ? m.format : "",
-            engine: typeof m.engine === "string" ? m.engine : undefined,
+            // engine 是联合类型（徽章配色表的键）：未知值必须落到 undefined 走兜底样式，
+            // 不能原样透传 —— 否则配色表查不到、界面也不会报错
+            engine: ENGINE_NAMES.includes(m.engine as EngineName)
+              ? (m.engine as EngineName)
+              : undefined,
             runtime_key: typeof m.runtime_key === "string" ? m.runtime_key : undefined,
             runtime_keys: Array.isArray(m.runtime_keys)
               ? (m.runtime_keys.filter((k) => typeof k === "string") as string[])
