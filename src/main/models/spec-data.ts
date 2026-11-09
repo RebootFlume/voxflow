@@ -35,6 +35,8 @@ export interface PresetSpec {
   count: number
   speakersFile: string | null
   perLanguage: boolean
+  /** 内联音色名列表（模型族用固定 voice_id 而非数字 sid 时用；优先于 speakersFile） */
+  speakers?: string[]
 }
 
 export interface CloneSpec {
@@ -44,7 +46,14 @@ export interface CloneSpec {
 
 export type VoiceModeSpec =
   | { type: 'fixed' }
-  | { type: 'preset'; count: number; speakersFile: string | null; perLanguage: boolean }
+  | {
+      type: 'preset'
+      count: number
+      speakersFile: string | null
+      perLanguage: boolean
+      /** 内联音色名列表（优先于 speakersFile；如 audio.cpp 的 voice_id 预设音色） */
+      speakers?: string[]
+    }
   | { type: 'clone'; requiresText: boolean; overridesPreset: boolean }
   | {
       type: 'presetAndClone'
@@ -245,6 +254,125 @@ export const SPECS: ModelSpec[] = [
         languageMode: 'fixed',
         voiceMode: { type: 'fixed' },
         backend: { type: 'audiocpp', family: 'qwen3_asr' },
+    },
+    {
+        id: "audiocpp-qwen3-asr-1.7b",
+        name: "Qwen3-ASR-1.7B (audio.cpp)",
+        kind: 'asr',
+        framework: "audiocpp",
+        source: { type: 'huggingface', repo: "audio-cpp/audio.cpp-gguf", revision: "main" },
+        entries: [
+            {
+                id: "q8_0",
+                labelZh: "Q8_0 · 单文件 · 推荐",
+                labelEn: "Q8_0 · single file · Recommended",
+                files: [
+                    { role: 'main', name: "Qwen3-ASR-1.7B-GGUF/qwen3-asr-1.7b-q8_0.gguf", sizeMb: 2358.5 },
+                ],
+                default: true,
+            },
+            {
+                id: "f16",
+                labelZh: "F16 · 单文件（更准、更大）",
+                labelEn: "F16 · single file (more accurate, larger)",
+                files: [
+                    { role: 'main', name: "Qwen3-ASR-1.7B-GGUF/qwen3-asr-1.7b-f16.gguf", sizeMb: 3898.3 },
+                ],
+                default: false,
+            },
+        ],
+        sizeGb: 2.36,
+        descriptionZh: "Qwen3-ASR 1.7B · 31 语种与中文方言 · audio.cpp 运行时",
+        descriptionEn: "Qwen3-ASR 1.7B · 31 languages + Chinese dialects · audio.cpp runtime",
+        available: true,
+        cpu: "slow",
+        extraFiles: [],
+        quant: "Q8_0",
+        languages: [],
+        languageMode: 'fixed',
+        voiceMode: { type: 'fixed' },
+        backend: { type: 'audiocpp', family: 'qwen3_asr' },
+    },
+    {
+        id: "audiocpp-fun-asr-nano",
+        name: "Fun-ASR-Nano (audio.cpp)",
+        kind: 'asr',
+        framework: "audiocpp",
+        source: { type: 'huggingface', repo: "FunAudioLLM/Fun-ASR-Nano-2512-GGUF", revision: "main" },
+        entries: [
+            {
+                id: "q8_0",
+                labelZh: "Q8_0 · 单文件 · 推荐",
+                labelEn: "Q8_0 · single file · Recommended",
+                files: [{ role: 'main', name: "fun-asr-nano-2512-q8_0.gguf", sizeMb: 996.9 }],
+                default: true,
+            },
+            {
+                id: "f16",
+                labelZh: "F16 · 单文件（更准、更大）",
+                labelEn: "F16 · single file (more accurate, larger)",
+                files: [{ role: 'main', name: "fun-asr-nano-2512-f16.gguf", sizeMb: 1598.1 }],
+                default: false,
+            },
+        ],
+        sizeGb: 0.97,
+        descriptionZh: "Fun-ASR-Nano 2512 · 中/英/日 · 自带 ITN 数字规范化 · audio.cpp 运行时",
+        descriptionEn: "Fun-ASR-Nano 2512 · zh/en/ja · built-in ITN · audio.cpp runtime",
+        available: true,
+        cpu: "good",
+        extraFiles: [],
+        quant: "Q8_0",
+        languages: [],
+        languageMode: 'fixed',
+        voiceMode: { type: 'fixed' },
+        backend: { type: 'audiocpp', family: 'fun_asr_nano' },
+    },
+    {
+        id: "audiocpp-moss-transcribe-diarize",
+        name: "MOSS-Transcribe-Diarize (audio.cpp)",
+        kind: 'asr',
+        framework: "audiocpp",
+        source: { type: 'huggingface', repo: "audio-cpp/audio.cpp-gguf", revision: "main" },
+        entries: [
+            {
+                id: "q8_0",
+                labelZh: "Q8_0 · 1.1GB · 推荐",
+                labelEn: "Q8_0 · 1.1GB · Recommended",
+                files: [
+                    { role: 'main', name: "MOSS-Transcribe-Diarize-GGUF/moss-transcribe-diarize-q8_0.gguf", sizeMb: 1079.7 },
+                ],
+                default: true,
+            },
+            {
+                id: "q4_k",
+                labelZh: "Q4_K · 723MB（更小）",
+                labelEn: "Q4_K · 723MB (smaller)",
+                files: [
+                    { role: 'main', name: "MOSS-Transcribe-Diarize-GGUF/moss-transcribe-diarize-q4_k.gguf", sizeMb: 723.2 },
+                ],
+                default: false,
+            },
+            {
+                id: "bf16",
+                labelZh: "BF16 · 1.7GB（更准）",
+                labelEn: "BF16 · 1.7GB (more accurate)",
+                files: [
+                    { role: 'main', name: "MOSS-Transcribe-Diarize-GGUF/moss-transcribe-diarize-bf16.gguf", sizeMb: 1748.1 },
+                ],
+                default: false,
+            },
+        ],
+        sizeGb: 1.08,
+        descriptionZh: "MOSS 转写 + 说话人分离（带时间戳）· 50+ 语言 · audio.cpp 运行时",
+        descriptionEn: "MOSS transcription with speaker diarization + timestamps · 50+ languages · audio.cpp runtime",
+        available: true,
+        cpu: "slow",
+        extraFiles: [],
+        quant: "Q8_0",
+        languages: [],
+        languageMode: 'fixed',
+        voiceMode: { type: 'fixed' },
+        backend: { type: 'audiocpp', family: 'moss_transcribe_diarize' },
     },
     {
         id: "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17",
@@ -592,6 +720,55 @@ export const SPECS: ModelSpec[] = [
         languageMode: 'auto',
         voiceMode: { type: 'fixed' },
         backend: { type: 'audiocpp', family: 'moss_tts_nano' },
+    },
+    {
+        id: "audiocpp-qwen3-tts-customvoice",
+        name: "Qwen3-TTS-1.7B (CustomVoice)",
+        kind: 'tts',
+        framework: "audiocpp",
+        sizeGb: 2.69,
+        descriptionZh: "Qwen3-TTS 1.7B · 9 个预设音色 · 中英日韩德法俄葡西意 · audio.cpp",
+        descriptionEn: "Qwen3-TTS 1.7B · 9 preset voices · zh/en/ja/ko/de/fr/ru/pt/es/it · audio.cpp",
+        available: true,
+        cpu: "slow",
+        source: { type: 'huggingface', repo: "audio-cpp/audio.cpp-gguf", revision: "main" },
+        entries: [
+            {
+                id: "q8_0",
+                labelZh: "Q8_0 · 2.7GB（推荐）",
+                labelEn: "Q8_0 · 2.7GB (recommended)",
+                files: [{
+                    role: 'main',
+                    name: "Qwen3-TTS-12Hz-1.7B-CustomVoice-GGUF/qwen3-tts-12hz-1.7b-customvoice-q8_0.gguf",
+                    sizeMb: 2686.6,
+                }],
+                default: true,
+            },
+            {
+                id: "bf16",
+                labelZh: "BF16 · 4.0GB（更准）",
+                labelEn: "BF16 · 4.0GB (more accurate)",
+                files: [{
+                    role: 'main',
+                    name: "Qwen3-TTS-12Hz-1.7B-CustomVoice-GGUF/qwen3-tts-12hz-1.7b-customvoice-bf16.gguf",
+                    sizeMb: 3985.6,
+                }],
+                default: false,
+            },
+        ],
+        extraFiles: [],
+        quant: "Q8_0",
+        languages: ["zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"],
+        languageMode: 'select',
+        voiceMode: {
+            type: 'preset',
+            count: 9,
+            speakersFile: null,
+            perLanguage: false,
+            // audio.cpp 的 voice_id 预设音色（Qwen3-TTS CustomVoice checkpoint 的 9 个命名说话人）
+            speakers: ["vivian", "serena", "uncle_fu", "dylan", "eric", "ryan", "aiden", "ono_anna", "sohee"],
+        },
+        backend: { type: 'audiocpp', family: 'qwen3_tts' },
     },
 
 ]

@@ -10,7 +10,7 @@
  */
 
 import { basename, dirname } from 'node:path'
-import { findSpec } from '../models/model-manager'
+import { findSpec, findSpecExact } from '../models/model-manager'
 import type { ModelSpec } from '../models/spec-data'
 import { AudiocppTtsHost } from '../inference/audiocpp-ffi/host'
 import { audiocppRuntimeForDevice } from '../inference/runtime-download'
@@ -42,19 +42,27 @@ const SYNTH_SPEED = 1
  * 所以要从文件所在目录往上找到描述符目录（最多 3 层），文件名只作最后兜底。
  */
 function resolveSpec(modelPath: string): ModelSpec | undefined {
+  const levels: string[] = []
   let dir = dirname(modelPath)
   for (let i = 0; i < 3; i++) {
     const name = basename(dir)
-    if (name) {
-      const spec = findSpec(name)
-      if (spec) return spec
-    }
+    if (name) levels.push(name)
     const parent = dirname(dir)
     if (parent === dir) break
     dir = parent
   }
+  // 先严格匹配：目录名可能长得像别的族（`Qwen3-TTS-...-GGUF`），前缀兜底会猜错族
+  for (const name of levels) {
+    const spec = findSpecExact(name)
+    if (spec) return spec
+  }
+  // 再宽松兜底（旧布局的族名前缀等）
+  for (const name of levels) {
+    const spec = findSpec(name)
+    if (spec) return spec
+  }
   const file = basename(modelPath)
-  return file ? findSpec(file) : undefined
+  return file ? findSpecExact(file) : undefined
 }
 
 /** 设备名 → audio.cpp 后端名 */

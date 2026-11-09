@@ -287,6 +287,23 @@ export function findSpec(input: string): ModelSpec | undefined {
   return undefined
 }
 
+/**
+ * 严格查找：只认精确 / 归一化后的 id 与展示名，**不做族前缀兜底**。
+ *
+ * 引擎从磁盘路径反查描述符时用这个（`Qwen3-TTS-12Hz-1.7B-CustomVoice-GGUF`
+ * 这种目录名不该靠前缀猜成别的族），猜错的代价是把 A 族的描述符套到 B 族权重上。
+ */
+export function findSpecExact(input: string): ModelSpec | undefined {
+  for (const m of SPECS) {
+    if (m.id === input || m.name === input) return m
+  }
+  const inputNorm = norm(input)
+  for (const m of SPECS) {
+    if (norm(m.id) === inputNorm || norm(m.name) === inputNorm) return m
+  }
+  return undefined
+}
+
 /** 按 id 取精选条目（未知 → undefined） */
 export function specEntry(spec: ModelSpec, id: string): DownloadEntrySpec | undefined {
   return spec.entries.find((e) => e.id === id)

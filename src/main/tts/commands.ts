@@ -40,6 +40,10 @@ export function ttsProgressPayload(done: number, total: number): Record<string, 
 
 /** 说话人列表：speakers.json 优先（名字 + 数量 = 列表长度），否则生成 0..count 编号 */
 function speakerList(dir: string, preset: PresetSpec): { sid: number; name: string }[] {
+  // 内联音色名（模型族的 voice_id 预设）：名字即 voice_id，sid 仅作序号
+  if (preset.speakers && preset.speakers.length > 0) {
+    return preset.speakers.map((name, i) => ({ sid: i, name }))
+  }
   if (preset.speakersFile) {
     try {
       const data = readFileSync(join(dir, preset.speakersFile), 'utf-8')

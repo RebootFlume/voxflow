@@ -198,7 +198,8 @@ const text = await window.voxflow.invoke<string>('rust_transcribe_llama', {
 | 对外 API | `npm run verify:api` —— 16 项全过（鉴权 / 路由 / 错误码 / multipart / WAV 编码） |
 | **真实推理闭环** | `npm run verify:real` —— **25 项全过**：Kokoro TTS 合成 → Qwen3-ASR(CUDA) 转写 → SenseVoice 转写 → 对外 API 转写，识别文本与原文一致 |
 | audio.cpp 端到端 | 真机：`MOSS-TTS-Nano`（q8_0，193MB，CPU）加载 + 中英合成通过，wav 48kHz / 峰值 27592（非静音） |
-| audio.cpp 变体与 ASR | CPU（13MB）/CUDA（435MB + cudart 579MB）两个独立包，按设备选变体；`Qwen3-ASR-0.6B (audio.cpp)` 真机转写与 llama 版文本一致；缺 CUDA 变体时抛 `RUNTIME_VARIANT_MISMATCH` 并指引去装 |
+| audio.cpp 变体与 ASR | CPU（13MB）/CUDA（435MB + cudart 579MB）两个独立包，按设备选变体；`Qwen3-ASR-0.6B/1.7B`、`Fun-ASR-Nano`、`MOSS-Transcribe-Diarize` 真机转写通过（MOSS 带说话人分离与时间戳）；缺 CUDA 变体时抛 `RUNTIME_VARIANT_MISMATCH` 并指引去装 |
+| audio.cpp TTS 音色 | `Qwen3-TTS-1.7B (CustomVoice)` 9 个预设音色（vivian/serena/uncle_fu/dylan/eric/ryan/aiden/ono_anna/sohee）真机合成通过，24kHz，峰值 18182 / 22500（非静音） |
 | 无 Python / 无 eSpeak | 运行时只剩 `llama-cpp` / `sherpa-onnx` / `audio-cpp`（两个变体），三者均 Apache-2.0；TTS 音素化由模型自带 lexicon 完成 |
 
 ### 真实推理验证（最有说服力的一条）
