@@ -274,6 +274,24 @@ export function syncTtsFrameworkFromLoaded(): void {
 const LAST_FRAMEWORK_KEYS = ["onnx"];
 
 /**
+ * 框架层展示名（模型徽章 / 分组标题的唯一来源）。
+ *
+ * 为什么不用运行时包 key（`gguf` / `onnx` / `audiocpp`）：那是**下载单元**的键，不是框架名。
+ * 最直接的证据是 `gguf` —— llama.cpp 与 audio.cpp 的主模型文件都是 .gguf，两个不同引擎
+ * 共用一个包 key，用户看徽章根本分不出模型属于谁。而框架层 id 本身就是给人看的名字
+ * （llama.cpp / sherpa-onnx / audio.cpp），且与「推理框架」页、框架下拉完全一致。
+ *
+ * 回退顺序：框架层 id → 引擎展示名 → "unknown"。刻意不回退 runtime_key：
+ * 它会把这个函数本要消除的歧义（gguf）又带回来。
+ */
+export function frameworkLayerLabel(
+  item: Pick<ModelItemState, "framework" | "engine" | "runtime_key" | "format"> | undefined | null,
+): string {
+  if (!item) return "unknown";
+  return item.framework || item.engine || "unknown";
+}
+
+/**
  * 框架展示名 = 运行时包名去掉变体后缀（"audio.cpp (CPU)" → "audio.cpp"）。
  *
  * 下拉框与提示里选/说的是**引擎**，具体跑哪个变体由设备与「推理框架」页的安装情况决定。

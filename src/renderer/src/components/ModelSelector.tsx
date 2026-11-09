@@ -1,7 +1,7 @@
 import { useAppStore, type EngineName, type ModelItemState, type ModelFramework } from "@/stores";
 import { t } from "@/lib/i18n";
 import { Badge } from "@/components/ui/badge";
-import { belongsToFramework, computeIsLoaded, engineOf, runtimeKeyOf, runtimeKeysOf, runtimePackageLabels, selectLoadingKind } from "@/lib/modelState";
+import { belongsToFramework, computeIsLoaded, engineOf, frameworkLayerLabel, runtimeKeysOf, runtimePackageLabels, selectLoadingKind } from "@/lib/modelState";
 
 const EMPTY_ITEMS: ModelItemState[] = [];
 
@@ -18,15 +18,15 @@ const ENGINE_BADGE_CLASSES: Record<EngineName, string> = {
 };
 
 /**
- * 徽章文案：运行时包 key 去掉设备变体后缀（`llama-cpp` → `LLAMA`）。
+ * 徽章文案：框架层名（llama.cpp / sherpa-onnx / audio.cpp）。
  *
- * 理由：徽章回答的是"这个模型跑在哪个框架上"，而 cpu / cuda 是同一引擎的两个包 —— 具体用哪个包
- * 由上方的框架下拉与设备选择决定。键名原样显示还会撑爆 200px 的卡片列，把模型名挤成 "Kokoro-…"。
- * 既有 `gguf` / `onnx` 无后缀，显示不变。
+ * 此前显示运行时包 key（gguf / onnx / audiocpp），但那是**下载单元**的键：
+ * llama.cpp 与 audio.cpp 的主文件都是 .gguf，共用 `gguf` 这个 key —— 两个不同引擎
+ * 在卡片上写着同一个徽章，无法区分。框架层 id 本身可读，且与「推理框架」页、
+ * 框架下拉同一套命名。
  */
 function frameworkLabelOf(item: ModelItemState): string {
-  const key = runtimeKeyOf(item) ?? engineOf(item) ?? "unknown";
-  return key.replace(/-(?:cpu|cuda\d*)$/i, "");
+  return frameworkLayerLabel(item);
 }
 
 /** 模型大小显示：已下载用真实磁盘占用，未下载用清单预估值 */
@@ -55,7 +55,7 @@ function FormatBadge({ item }: { item: ModelItemState }) {
         ENGINE_BADGE_CLASSES[engine ?? ""] ?? "border-muted-foreground/40 text-muted-foreground"
       }`}
     >
-      {label.toUpperCase()}
+      {label}
     </Badge>
   );
 }

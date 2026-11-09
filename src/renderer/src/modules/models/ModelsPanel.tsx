@@ -23,7 +23,7 @@ import { useAppStore, type ModelItemState } from "@/stores";
 import { t } from "@/lib/i18n";
 import { pickFolder, rustOpenInExplorer, sendToSidecar } from "@/lib/ipc";
 import { loadAsrModel, loadTtsModel, unloadAsrModel, unloadTtsModel } from "@/lib/modelLoader";
-import { belongsToFramework, computeIsLoaded, engineOf, findModelItem, frameworkOptionsOf, runtimeKeyOf, selectLoadingKind } from "@/lib/modelState";
+import { belongsToFramework, computeIsLoaded, engineOf, findModelItem, frameworkLayerLabel, frameworkOptionsOf, selectLoadingKind } from "@/lib/modelState";
 import { FrameworkPanel } from "./FrameworkPanel";
 
 function refreshModels() {
@@ -184,13 +184,14 @@ function SettingsPage() {
 
 function FrameworkBadge({ id }: { id: string }) {
   const item = useAppStore((s) => findModelItem(s.models.items, id));
-  // 徽章文本 = 运行时包 key（缺省退回引擎名/format）；配色按引擎 —— 全部来自 Rust 下发
+  // 徽章文本 = 框架层名（llama.cpp / sherpa-onnx / audio.cpp）；配色按引擎 —— 均来自 Rust 下发。
+  // 不用运行时包 key：llama.cpp 与 audio.cpp 都叫 `gguf`，徽章会一样、分不出引擎。
   const engine = engineOf(item);
-  const label = runtimeKeyOf(item) ?? engine ?? "unknown";
+  const label = frameworkLayerLabel(item);
   return (
     <Badge
       variant="outline"
-      className={`ml-1.5 font-mono text-[10px] uppercase ${ENGINE_BADGE_CLASSES[engine ?? ""] ?? ""}`}
+      className={`ml-1.5 font-mono text-[10px] ${ENGINE_BADGE_CLASSES[engine ?? ""] ?? ""}`}
       title={`${engine ?? "unknown"} · ${label}`}
     >
       {label}
@@ -583,30 +584,35 @@ function ModelListPage({ kind, title, icon: Icon }: { kind: "asr" | "tts"; title
       {/* 按引擎分组展示：分组与顺序全部来自 Rust 清单（engine 首次出现顺序，确定性） */}
       {(() => {
         const grouped: Record<string, string[]> = {};
+        // 分组键 = 框架层名，与卡片徽章同一套文案（此前按 engine 分组，标题显示
+        // "llama"/"sherpa"，同一个列表里徽章写 gguf/onnx、标题写 llama/sherpa，两套命名）
         const order: string[] = [];
+        // 分组名 → 引擎名：配色表仍按引擎查（同一个框架层的所有模型必然是同一引擎）
+        const engineOfGroup: Record<string, string> = {};
         for (const n of shown) {
           const item = items.find((i) => i.id === n);
-          const eng = engineOf(item) || "unknown"; // 无 engine/data 时的兜底标签
-          if (!grouped[eng]) {
-            grouped[eng] = [];
-            order.push(eng);
+          const label = frameworkLayerLabel(item);
+          if (!grouped[label]) {
+            grouped[label] = [];
+            order.push(label);
+            engineOfGroup[label] = engineOf(item) ?? "";
           }
-          grouped[eng].push(n);
+          grouped[label].push(n);
         }
-        return order.map((eng) => (
-          <div key={eng} className="space-y-2">
+        return order.map((label) => (
+          <div key={label} className="space-y-2">
             <div className="flex items-center gap-2 pt-1">
               <Badge
                 variant="outline"
-                className={`font-mono text-[10px] uppercase ${ENGINE_BADGE_CLASSES[eng] ?? ""}`}
+                className={`font-mono text-[10px] ${ENGINE_BADGE_CLASSES[engineOfGroup[label] ?? ""] ?? ""}`}
               >
-                {eng}
+                {label}
               </Badge>
-              <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                {eng} · {grouped[eng].length}
+              <span className="text-xs font-medium tracking-wide text-muted-foreground">
+                {label} · {grouped[label].length}
               </span>
             </div>
-            {grouped[eng].map((n) => <ModelRow key={n} id={n} />)}
+            {grouped[label].map((n) => <ModelRow key={n} id={n} />)}
           </div>
         ));
       })()}
