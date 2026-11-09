@@ -25,6 +25,8 @@ export interface TtsSlice {
   /** 语音克隆状态 */
   ttsClone: {
     active: boolean;
+    /** 生效中的音色库条目 id（空 = 未激活）。合成页的「音色」下拉用它表达"当前选的是哪条克隆"。 */
+    id: string;
     /** 生效中的克隆音色名（音色库里的 name）；展示用，空 = 名字未知。
      *  整个 `ttsClone` 都是**运行态**：不进 config.json，权威与选中项在
      *  `tts-voices/voices.json`（模型就绪时按 `active_id` 恢复）。 */
@@ -61,13 +63,13 @@ export const createTtsSlice = (set: (partial: Partial<TtsSlice> | ((s: TtsSlice)
   },
   ttsModelStatus: "idle",
   ttsTasks: [],
-  ttsClone: { active: false, name: "", audioPath: "", referenceText: "", status: "idle", error: "" },
+  ttsClone: { active: false, id: "", name: "", audioPath: "", referenceText: "", status: "idle", error: "" },
   updateTts: (patch) => set((s) => ({ tts: { ...s.tts, ...patch } })),
   setTtsModelStatus: (ttsModelStatus) => set({ ttsModelStatus }),
   updateTtsClone: (patch) => set((s) => ({ ttsClone: { ...s.ttsClone, ...patch } })),
   resetTtsClone: () =>
     set({
-      ttsClone: { active: false, name: "", audioPath: "", referenceText: "", status: "idle", error: "" },
+      ttsClone: { active: false, id: "", name: "", audioPath: "", referenceText: "", status: "idle", error: "" },
     }),
   addTtsTask: (task) => {
     const id = Date.now();

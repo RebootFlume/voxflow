@@ -320,6 +320,7 @@ export function useSidecarEvents() {
                     const v = lib?.voices.find((x) => x.id === activeId);
                     useAppStore.getState().updateTtsClone({
                       active: true,
+                      id: activeId,
                       status: "ok",
                       error: "",
                       ...(v ? { name: v.name, audioPath: v.audio_path, referenceText: v.reference_text } : {}),

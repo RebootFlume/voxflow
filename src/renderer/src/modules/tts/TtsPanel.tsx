@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Progress } from "@/components/ui/progress";
@@ -31,6 +31,7 @@ import {
   type TtsVoiceItem,
 } from "@/lib/ipc";
 import { belongsToFramework, findModelItem, frameworkKeyLabel, frameworkOptionsOf, loadedFrameworkLabel, modelDisplayName, selectLoadingKind, supportsClone, ttsModelInfoOf } from "@/lib/modelState";
+import { ttsParamControls, type TtsParamControl } from "@/lib/ttsCapabilities";
 import { useAudioPreview } from "@/lib/useAudioPreview";
 import { loadTtsModel, selectTtsFramework } from "@/lib/modelLoader";
 import { useExportDir } from "@/lib/useExportDir";
@@ -343,6 +344,7 @@ function useVoiceLibrary(): VoiceLibraryApi {
       await rustTtsVoiceUse(v.id);
       updateTtsClone({
         active: true,
+        id: v.id,
         name: v.name,
         audioPath: v.audio_path,
         referenceText: v.reference_text,
@@ -460,6 +462,7 @@ function useVoiceLibrary(): VoiceLibraryApi {
       const list = await refresh();
       const updated = list?.voices.find((v) => v.id === editedId);
       resetModal();
+      // 改的是生效条目 ⇒ 参考音频/参考文本变了，引擎里的必须跟着换
       if (wasSelected && updated) await applyVoice(updated);
     } catch (e) {
       setFormBusy(false);
@@ -755,16 +758,17 @@ function VoiceTileGrid({ lib, locale }: VoiceTileGridProps) {
                   ? t(locale, "tts.stop")
                   : t(locale, "tts.voice.lib.preview")}
               </Button>
-              {busy ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-              ) : (
+              {busy && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
+              {/* 不提供「使用」：选中哪条克隆音色统一在合成页的音色下拉里做，
+                  否则同一份 ttsClone 有两个写入点（谁后点谁生效）。 */}
+              {selected && (
                 <Button
                   size="sm"
+                  variant="ghost"
                   className="h-6 px-2 text-[11px]"
-                  disabled={selected}
-                  onClick={() => void lib.applyVoice(v)}
+                  onClick={() => useAppStore.getState().setActiveSubMenu("synthesize")}
                 >
-                  {t(locale, "tts.voice.lib.use")}
+                  {t(locale, "tts.gotoSynthesize")}
                 </Button>
               )}
               <Button
@@ -863,10 +867,6 @@ function VoiceSettingsPage() {
   useEffect(() => {
     if (presetBlocked && tts.voiceMode === "preset") updateTts({ voiceMode: "clone" });
   }, [presetBlocked, tts.voiceMode, updateTts]);
-  /** Clone + overrides_preset：克隆激活后隐藏 sid 控件（不是禁用） */
-  const sidHidden = mode === "clone" && cloneActive && vm?.overrides_preset === true;
-  /** PresetAndClone：克隆激活时 sid 控件禁用（保留可见） */
-  const sidDisabled = mode === "preset_and_clone" && cloneActive;
   /** requires_text 缺省（旧 payload / 未声明）→ 保持必填 */
   const requiresText = vm?.requires_text !== false;
   /** 试听用 voice：单音色模型没有可切换 sid，直接用模型第一个音色 */
@@ -953,26 +953,12 @@ function VoiceSettingsPage() {
   }
 
   /**
-   * 输入即下发（300ms 防抖），不再依赖 onBlur。
+   * 试听前把描述同步给引擎。
    *
-   * 之前只在失焦时下发：用户写完描述直接点「试听当前音色」时，blur 与 click 的
-   * 先后顺序由浏览器决定，实测会出现「描述没进引擎、试听用的是旧音色」且毫无提示。
-   * 现在既防抖自动下发，又在试听/合成前显式 flush 一次。
+   * 描述输入框已经搬到「文字转语音」页（见 ttsCapabilities.ts 的单一设置点约定），
+   * 这里不再持有防抖计时器：只要保证引擎拿到的和 store 里的一致即可，重复下发是幂等的。
    */
-  const instructTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  function queueInstruct(text: string) {
-    if (instructTimer.current) clearTimeout(instructTimer.current);
-    instructTimer.current = setTimeout(() => {
-      instructTimer.current = null;
-      void syncInstruct(text);
-    }, 300);
-  }
-  /** 立即下发待处理的描述（若有），保证随后的合成立即生效 */
   async function flushInstruct() {
-    if (instructTimer.current) {
-      clearTimeout(instructTimer.current);
-      instructTimer.current = null;
-    }
     await syncInstruct(useAppStore.getState().tts.instruct);
   }
 
@@ -1031,6 +1017,16 @@ function VoiceSettingsPage() {
                 ? `${numSpeakers} ${t(locale, "tts.voice.speakersAvailable")}`
                 : t(locale, "tts.voice.presetDesc")}
             </CardDescription>
+            {/* 职责分离：本页只「听」，参数统一在「文字转语音」页设置 */}
+            <p className="text-[11px] text-muted-foreground">
+              {t(locale, "tts.voice.previewOnlyHint")}
+              <button
+                className="ml-1 text-primary underline-offset-2 hover:underline"
+                onClick={() => useAppStore.getState().setActiveSubMenu("synthesize")}
+              >
+                {t(locale, "tts.gotoSynthesize")}
+              </button>
+            </p>
           </CardHeader>
           <CardContent className="min-h-0 flex-1 space-y-3 overflow-y-auto">
             {noModel ? (
@@ -1043,46 +1039,7 @@ function VoiceSettingsPage() {
               </div>
             ) : (
               <>
-                {/* 音色描述（instruct）：仅声明支持的模型出现。与音色/克隆相互独立，
-                    一句话改写嗓音或风格；留空 = 不干预。 */}
-                {instructCapable && (
-                  <div className="space-y-1">
-                    <label htmlFor="tts-instruct" className="text-xs font-medium">
-                      {t(locale, "tts.voice.instruct")}
-                    </label>
-                    <div className="flex items-start gap-2">
-                      <Textarea
-                        id="tts-instruct"
-                        value={tts.instruct}
-                        onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => {
-                          updateTts({ instruct: e.target.value });
-                          queueInstruct(e.target.value);
-                        }}
-                        onBlur={() => void flushInstruct()}
-                        placeholder={t(locale, "tts.voice.instructPlaceholder")}
-                        className="min-h-[56px] resize-y text-xs"
-                        rows={2}
-                      />
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="h-8 shrink-0"
-                        disabled={!tts.instruct.trim()}
-                        onClick={() => {
-                          updateTts({ instruct: "" });
-                          if (instructTimer.current) {
-                            clearTimeout(instructTimer.current);
-                            instructTimer.current = null;
-                          }
-                          void syncInstruct("");
-                        }}
-                      >
-                        {t(locale, "tts.voice.instructClear")}
-                      </Button>
-                    </div>
-                    <p className="text-[11px] text-muted-foreground">{t(locale, "tts.voice.instructHint")}</p>
-                  </div>
-                )}
+                {/* 音色描述不在这里：参数只在「文字转语音」页设置（本页只负责听） */}
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <Button
                     variant="outline"
@@ -1101,19 +1058,12 @@ function VoiceSettingsPage() {
                 {previewError && (
                   <p className="text-xs text-destructive">{t(locale, "tts.voice.previewFailed", { msg: previewError })}</p>
                 )}
-                {/* sid 越界（持久化的 voice 不在当前模型音色列表里）→ 高亮 + 一键回到列表第一个音色 */}
+                {/* sid 越界不再给「改为第一个音色」按钮：voice 的唯一写入点在合成页，
+                    模型就绪时 useSidecarEvents 已自动对齐，这里只做说明性提示。 */}
                 {voiceOutOfRange && (
-                  <div className="flex flex-wrap items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-600 dark:text-amber-400">
-                    <span>{t(locale, "tts.voice.outOfRange", { min: sidMin, max: sidMax })}</span>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="h-6 px-2 text-xs"
-                      onClick={() => updateTts({ voice: String(speakers[0].sid) })}
-                    >
-                      {t(locale, "tts.voice.fixVoice")}
-                    </Button>
-                  </div>
+                  <p className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-600 dark:text-amber-400">
+                    {t(locale, "tts.voice.outOfRange", { min: sidMin, max: sidMax })}
+                  </p>
                 )}
               {fixedVoice ? (
                 // Fixed（单音色模型）：不渲染音色遍历，显示固定音色名 + 原因
@@ -1166,7 +1116,8 @@ function VoiceSettingsPage() {
                             }`}>{sp.name}</span>
                             <span className="mt-0.5 block text-[10px] text-muted-foreground">sid {sp.sid}</span>
                           </div>
-                          {/* 条目动作显式分「试听」「应用」两个按钮（不做点一下即切换） */}
+                          {/* 本页只负责「听」：音色参数统一在「文字转语音」页设置，
+                              避免同一份 tts.voice 有两个写入点（谁覆盖谁全看用户操作顺序）。 */}
                           <Button
                             variant="ghost"
                             size="sm"
@@ -1177,21 +1128,10 @@ function VoiceSettingsPage() {
                             {previewBusy ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Play className="mr-1 h-3 w-3" />}
                             {t(locale, "tts.voice.lib.preview")}
                           </Button>
-                          {selected ? (
+                          {selected && (
                             <Badge variant="outline" className="shrink-0 border-primary/40 px-1.5 py-0 text-[10px] text-primary">
                               {t(locale, "tts.voice.lib.selected")}
                             </Badge>
-                          ) : (
-                            <Button
-                              size="sm"
-                              className="h-6 shrink-0 px-2 text-[11px]"
-                              onClick={() => {
-                                updateTts({ voice: String(sp.sid) });
-                                if (ttsClone.active) void handleClearClone();
-                              }}
-                            >
-                              {t(locale, "tts.voice.lib.apply")}
-                            </Button>
                           )}
                         </div>
                       );
@@ -1203,24 +1143,6 @@ function VoiceSettingsPage() {
                 </>
               ) : (
                 <p className="text-xs text-muted-foreground">{t(locale, "tts.voice.noSpeakers")}</p>
-              )}
-              {!fixedVoice && numSpeakers > 1 && !sidHidden && (
-                <div className="flex items-center gap-2 pt-3 border-t">
-                  <span className="text-xs text-muted-foreground">sid:</span>
-                  <Input
-                    type="number"
-                    min={0}
-                    max={numSpeakers - 1}
-                    value={tts.voice}
-                    disabled={sidDisabled}
-                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
-                      const v = e.target.value;
-                      if (v !== "") updateTts({ voice: v });
-                    }}
-                    className="h-8 w-20 text-xs"
-                  />
-                  <span className="text-xs text-muted-foreground">/ {numSpeakers - 1}</span>
-                </div>
               )}
             </>
             )}
@@ -1410,7 +1332,11 @@ function useTtsSpeakers() {
   return { speakers, numSpeakers };
 }
 
-function LanguageSelector() {
+/**
+ * 合成语言控件。形态完全由能力表决定（见 ttsCapabilities.ts）：
+ * `edit` 只是 select 一种，其余是「为什么不能选」的徽标。
+ */
+function LanguageSelector({ control }: { control: TtsParamControl }) {
   const locale = useAppStore((s) => s.locale);
   const language = useAppStore((s) => s.tts.language);
   const ttsModel = useAppStore((s) => s.tts.model);
@@ -1433,38 +1359,32 @@ function LanguageSelector() {
     }
   }, [info, langs, updateTts]);
 
-  // 未加载/未选中模型：不支持语言时不知道有哪些语言 ⇒ 不留空行，给一句"先加载模型"
-  if (!info) {
-    return <span className="text-xs text-muted-foreground">{t(locale, "tts.voice.needModel")}</span>;
-  }
-  // 自动识别模式（如 Kokoro 中英混合）→ 不显示语言选择，改为提示
-  if (info.language_mode === "auto") {
+  if (control.kind === "hidden") return null;
+
+  // 只读徽标：模型没有语言自由度，但「为什么没有」有信息量 ⇒ 灰底文字，不留白
+  if (control.kind === "badge") {
+    // 自动识别用绿色（这是能力，不是限制）；其余用中性灰
+    const isAuto = control.badgeKey === "tts.languageAuto";
+    if (!info) {
+      return <span className="text-xs text-muted-foreground">{t(locale, control.badgeKey!)}</span>;
+    }
     return (
-      <span className="inline-flex items-center gap-1.5 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-2.5 py-1 text-xs text-emerald-600 dark:text-emerald-400">
-        <Sparkles className="h-3.5 w-3.5" />
-        {t(locale, "tts.languageAuto")}
+      <span
+        className={
+          isAuto
+            ? "inline-flex items-center gap-1.5 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-2.5 py-1 text-xs text-emerald-600 dark:text-emerald-400"
+            : "inline-flex items-center gap-1.5 rounded-md border border-border bg-muted/50 px-2.5 py-1 text-xs text-muted-foreground"
+        }
+      >
+        {isAuto && <Sparkles className="h-3.5 w-3.5" />}
+        {control.badgeVars?.lang
+          ? t(locale, control.badgeKey!, { lang: langLabel(control.badgeVars.lang) })
+          : t(locale, control.badgeKey!)}
       </span>
     );
   }
-  // 单语言固定（Kokoro-en / Kitten / Matcha-zh）→ 显示固定语言标记（来自描述符）
-  if (info.language_mode === "fixed") {
-    const fixedLang = langs[0] ?? "en";
-    return (
-      <span className="inline-flex items-center rounded-md border border-border bg-muted/50 px-2.5 py-1 text-xs text-muted-foreground">
-        {langLabel(fixedLang)}
-      </span>
-    );
-  }
-  // 语音克隆（ZipVoice）→ 提示需要参考音频
-  if (info.language_mode === "cloning") {
-    return (
-      <span className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/5 px-2.5 py-1 text-xs text-amber-600 dark:text-amber-400">
-        <Mic className="h-3.5 w-3.5" />
-        {t(locale, "tts.languageCloning")}
-      </span>
-    );
-  }
-  // select 模式（Supertonic 31 语言等）→ 显示语言下拉（选项来自描述符）
+
+  // select 模式（Supertonic 31 语言 / Qwen3-TTS 10 语言）→ 下拉（选项来自描述符）
   return (
     <Select
       value={language}
@@ -1503,20 +1423,115 @@ function SynthesizePage() {
   const queued = tasks.some((t) => t.status === "pending" || t.status === "synthesizing");
   const audio = useAudioPreview();
   const { speakers } = useTtsSpeakers();
+  /** 克隆音色库：合成页的音色下拉要能选到它们（来源与预设不同，合并成一份列表） */
+  const [cloneVoices, setCloneVoices] = useState<TtsVoiceItem[]>([]);
+  useEffect(() => {
+    let alive = true;
+    void rustTtsVoicesList()
+      .then((r) => {
+        if (alive) setCloneVoices(r.voices ?? []);
+      })
+      .catch(() => {
+        /* 库不可读：下拉退化为只有预设音色，不阻断合成 */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [ttsClone.id, ttsClone.active]);
+  /** 下拉值域：`preset:<sid>` / `clone:<voiceId>`。两种来源语义不同，用前缀区分。
+   *  空 voice = 用列表第一个（引擎的实际行为）⇒ 下拉要显示成那个，否则 Radix 找不到匹配项会渲染空白。 */
+  const voiceSelectValue =
+    ttsClone.active && ttsClone.id
+      ? `clone:${ttsClone.id}`
+      : speakers.length > 0
+        ? `preset:${tts.voice || String(speakers[0].sid)}`
+        : undefined;
+  /** 切换音色：选预设自动退出克隆（两者互斥），选克隆立刻下发参考音频 */
+  const changeVoice = useCallback(
+    async (value: string) => {
+      const st = useAppStore.getState();
+      if (value.startsWith("preset:")) {
+        st.updateTts({ voice: value.slice(7) });
+        if (st.ttsClone.active) {
+          try {
+            await rustClearTtsCloneVoice();
+          } catch {
+            /* 引擎未加载时清理失败无妨，resetTtsClone 之后不会再显示"克隆生效" */
+          }
+          st.resetTtsClone();
+        }
+        return;
+      }
+      const id = value.slice(6);
+      try {
+        await rustTtsVoiceUse(id);
+        const v = cloneVoices.find((x) => x.id === id);
+        st.updateTtsClone({
+          active: true,
+          id,
+          name: v?.name ?? "",
+          audioPath: v?.audio_path ?? "",
+          referenceText: v?.reference_text ?? "",
+          status: "ok",
+          error: "",
+        });
+      } catch (e) {
+        const msg = String(e);
+        st.addLog(`[tts] 选择克隆音色失败: ${msg}`, "error");
+        st.updateTtsClone({ status: "error", error: msg });
+      }
+    },
+    [cloneVoices],
+  );
+  const modelInfo = useTtsModelInfo(tts.model);
+  /** 克隆音色只在支持克隆的模型上列出：不支持时选它是**必然失败**的操作，
+   *  摆在选项里等于给人挖坑（这类模型的预设音色够用，不给就没有歧义）。 */
+  const cloneSelectable = supportsClone(modelInfo) ? cloneVoices : [];
+  /** 是否给出音色下拉：有预设音色或可用的克隆条目即可；单音色模型两者都空 ⇒ 只读 */
+  const voiceSelectable = speakers.length > 0 || cloneSelectable.length > 0;
   /** 引擎是否就绪：两个信号取"或"——`engines.tts`（modelState 约定的权威字段）与旧徽章
    *  `ttsModelStatus`。二者都出自 sidecar 事件，而启动快照（status_snapshot）只同步 ASR，
    *  单看一个信号可能在"引擎已就绪但事件漏收"时把按钮永久禁掉 ⇒ 任一为就绪即允许。 */
   const ttsEngineReady = useAppStore((s) => s.engines.tts.status === "ready");
   const canSynth = ttsEngineReady || ttsModelStatus === "ready";
+  /** 参数控件表：哪个字段可编辑 / 只能只读展示 / 根本不出现，由模型能力决定 */
+  const controls = useMemo(() => ttsParamControls(modelInfo), [modelInfo]);
+  /** 音色描述：**唯一的设置点在这一页**（音色设置页只负责试听） */
+  const instructTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const syncInstruct = useCallback(async (value: string) => {
+    try {
+      await rustSetTtsInstruct(value);
+    } catch (e) {
+      useAppStore.getState().addLog(`[tts] 音色描述下发失败: ${String(e)}`, "error");
+    }
+  }, []);
+  /** 输入即下发（300ms 防抖）：合成可能紧跟输入发生，不能等到失焦才生效 */
+  function queueInstruct(value: string) {
+    if (instructTimer.current) clearTimeout(instructTimer.current);
+    instructTimer.current = setTimeout(() => {
+      instructTimer.current = null;
+      void syncInstruct(value);
+    }, 300);
+  }
+  /** 立即下发待处理的描述（合成前调用，保证任务用的是最新描述） */
+  async function flushInstruct() {
+    if (instructTimer.current) {
+      clearTimeout(instructTimer.current);
+      instructTimer.current = null;
+    }
+    await syncInstruct(useAppStore.getState().tts.instruct);
+  }
   /** 音色展示：**克隆生效时显示克隆音色名**（此时引擎用的是参考音频，sid 无关）；
    *  否则按 sid 去 `speakers.json` 查名字；两者都拿不到（未加载模型 / sid 不在当前列表）
    *  ⇒ 「默认音色」——不能把裸 sid 当成"当前音色"展示。 */
   const voiceText = (() => {
     if (ttsClone.active) return ttsClone.name || t(locale, "tts.voice.mode.clone");
     const name = speakers.find((s) => String(s.sid) === tts.voice)?.name;
-    // 空 voice = 引擎会用列表第一个（audio.cpp 的族不接受缺省音色）→ 如实显示它，
-    // 不再说「默认音色」：那会让人以为选中的音色和下拉框里那个无关
-    return name ?? speakers[0]?.name ?? t(locale, "tts.voice.default");
+    if (name) return name;
+    if (speakers.length > 0) return speakers[0].name;
+    // 既没有预设音色也没激活克隆（ZipVoice / Qwen3 Base 这类仅克隆模型）：
+    // 说「默认音色」是错的 —— 它们没有默认音色，不给参考音频根本合不出人声
+    return t(locale, "tts.voice.cloneNeeded");
   })();
 
   // 共享导出目录（与 ASR 转写共用一份）
@@ -1562,6 +1577,8 @@ function SynthesizePage() {
   /** 跑一个已派发的任务并落终态；终态写入会改动 tasks ⇒ 上面的 effect 重跑并自动派下一个 */
   async function runTtsTask(task: TtsTask, dir: string) {
     try {
+      // 描述可能还在防抖窗口里：先落地，避免"改了描述但这次合成没用上"
+      if (controls.instruct.kind === "edit") await flushInstruct();
       const res = (await rustSynthesize(task.text, task.voice, dir)) as {
         saved_path?: string;
         size?: string;
@@ -1640,53 +1657,100 @@ function SynthesizePage() {
               <ModelStatusBadge status={ttsModelStatus} modelName={tts.model} />
             </div>
           </div>
-          <div className="flex h-10 items-center gap-4">
-            <span className="w-20 shrink-0 text-sm font-medium">{t(locale, "tts.language")}</span>
-            <div className="flex flex-1 items-center">
-              <LanguageSelector />
+          {controls.language.kind !== "hidden" && (
+            <div className="flex h-10 items-center gap-4">
+              <span className="w-20 shrink-0 text-sm font-medium">{t(locale, "tts.language")}</span>
+              <div className="flex flex-1 items-center">
+                <LanguageSelector control={controls.language} />
+              </div>
             </div>
-          </div>
-          <div className="flex h-10 items-center gap-4">
+          )}
+          {controls.voice.kind !== "hidden" && (
+          <div className="flex min-h-10 items-center gap-4">
             <span className="w-20 shrink-0 text-sm font-medium">{t(locale, "tts.voice.label")}</span>
             <div className="flex min-w-0 flex-1 items-center gap-2 text-sm">
-              {ttsClone.active ? (
-                /* 克隆生效：音色由参考音频决定，这里只展示（改音色要去音色设置页取消克隆） */
-                <>
-                  <span className="truncate">{voiceText}</span>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-7 shrink-0 px-2 text-[11px]"
-                    onClick={() => useAppStore.getState().setActiveSubMenu("voice-settings")}
-                  >
-                    {t(locale, "tts.voice.change")}
-                  </Button>
-                </>
-              ) : speakers.length > 0 ? (
-                /* 预设音色：就地可换 —— 之前这里只有纯文本，换个音色必须切到「音色设置」页 */
-                <>
-                  <Select value={tts.voice || String(speakers[0].sid)} onValueChange={(v) => updateTts({ voice: v })}>
-                    <SelectTrigger className="h-8 w-56">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {speakers.map((sp) => (
-                        <SelectItem key={sp.sid} value={String(sp.sid)}>
-                          {sp.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <span className="text-[11px] text-muted-foreground">
-                    {speakers.length} {t(locale, "tts.voice.speakersAvailable")}
-                  </span>
-                </>
+              {voiceSelectable ? (
+                /* 唯一设置点：预设与克隆合并在一个下拉里，用前缀区分值域。
+                   选预设会自动退出克隆，选克隆会立刻把参考音频下发给引擎。 */
+                <Select value={voiceSelectValue} onValueChange={(v) => void changeVoice(v)}>
+                  <SelectTrigger className="h-8 w-56">
+                    <SelectValue placeholder={t(locale, "tts.voice.selectPlaceholder")} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {speakers.length > 0 && (
+                      <SelectGroup>
+                        <SelectLabel className="text-[11px] text-muted-foreground">
+                          {t(locale, "tts.voice.group.preset")}
+                        </SelectLabel>
+                        {speakers.map((sp) => (
+                          <SelectItem key={`p${sp.sid}`} value={`preset:${sp.sid}`}>
+                            {sp.name}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    )}
+                    {cloneSelectable.length > 0 && (
+                      <SelectGroup>
+                        <SelectLabel className="text-[11px] text-muted-foreground">
+                          {t(locale, "tts.voice.group.clone")}
+                        </SelectLabel>
+                        {cloneSelectable.map((v) => (
+                          <SelectItem key={`c${v.id}`} value={`clone:${v.id}`}>
+                            {v.name}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    )}
+                  </SelectContent>
+                </Select>
               ) : (
-                /* 单音色模型：没有可切换项，保持只读 */
+                /* 单音色模型 / 没有可选来源：只读展示实际音色 */
                 <span>{voiceText}</span>
+              )}
+              {ttsClone.active && (
+                <Badge variant="outline" className="shrink-0 px-1.5 py-0 text-[10px]">
+                  {t(locale, "tts.voice.mode.clone")}
+                </Badge>
               )}
             </div>
           </div>
+          )}
+          {controls.instruct.kind === "edit" && (
+            /* 音色描述：与音色选择正交（用哪个音色 vs 音色听起来怎样） */
+            <div className="flex items-start gap-4 pt-1">
+              <span className="h-8 w-20 shrink-0 pt-1.5 text-sm font-medium">{t(locale, "tts.voice.instruct")}</span>
+              <div className="flex min-w-0 flex-1 items-start gap-2">
+                <Textarea
+                  id="tts-instruct"
+                  value={tts.instruct}
+                  onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => {
+                    updateTts({ instruct: e.target.value });
+                    queueInstruct(e.target.value);
+                  }}
+                  onBlur={() => void flushInstruct()}
+                  placeholder={t(locale, "tts.voice.instructPlaceholder")}
+                  className="min-h-[56px] resize-y text-xs"
+                  rows={2}
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8 shrink-0"
+                  disabled={!tts.instruct.trim()}
+                  onClick={() => {
+                    updateTts({ instruct: "" });
+                    if (instructTimer.current) {
+                      clearTimeout(instructTimer.current);
+                      instructTimer.current = null;
+                    }
+                    void syncInstruct("");
+                  }}
+                >
+                  {t(locale, "tts.voice.instructClear")}
+                </Button>
+              </div>
+            </div>
+          )}
           <div className="flex h-10 items-center gap-4">
             <span className="w-20 shrink-0 text-sm font-medium">{t(locale, "tts.exportDir")}</span>
             <div className="flex flex-1 items-center gap-2">
