@@ -24,8 +24,17 @@ export interface SynthesizeRequest {
   text: string
   /** 语言（可空 = 自动） */
   language: string
-  /** 请求级选项（如 voice_id / speaker） */
+  /** 请求级选项（如 voice_id / speaker / reference_text） */
   options: Record<string, string>
+  /** 克隆参考音频（说话人参考；缺省 = 不用克隆） */
+  voiceAudio?: {
+    /** 交错 float PCM */
+    samples: Float32Array
+    /** 每声道帧数 */
+    frames: number
+    sampleRate: number
+    channels: number
+  }
 }
 
 /** 合成结果 */

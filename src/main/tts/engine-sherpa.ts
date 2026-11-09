@@ -139,6 +139,11 @@ export class SherpaTtsEngine implements TtsEngine {
       throw e
     }
 
+    // 换模型必须丢掉上一份参考音频/文本（与 audio.cpp 引擎同理）：克隆参数只对
+    // 准备它的那个模型有意义，残留会让非克隆模型走带参考音频的合成接口。
+    this.inner.referenceAudio = null
+    this.inner.referenceText = null
+
     // 语言对齐：当前语言不在描述符支持列表 → 切到 "en"（有则用）否则首个支持语言
     if (!spec.languages.includes(this.inner.language)) {
       const fallback = spec.languages.includes('en') ? 'en' : spec.languages[0]

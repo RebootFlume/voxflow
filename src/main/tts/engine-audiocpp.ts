@@ -9,7 +9,9 @@
  * - 推理本身在 worker 的 `session-tts.ts`。
  */
 
+import { existsSync } from 'node:fs'
 import { basename, dirname } from 'node:path'
+import { readWav } from '../audio/wav'
 import { findSpecInLayer, modelRef } from '../models/model-manager'
 import type { ModelSpec } from '../models/spec-data'
 import { AudiocppTtsHost } from '../inference/audiocpp-ffi/host'
@@ -30,6 +32,15 @@ interface AudiocppInner {
   numThreads: number
   /** 当前语言（空 = 自动） */
   language: string
+  /** 克隆参考音频（说话人参考；null = 未设置） */
+  referenceAudio: {
+    samples: Float32Array
+    frames: number
+    sampleRate: number
+    channels: number
+  } | null
+  /** 克隆参考文本（部分模型必填） */
+  referenceText: string | null
 }
 
 /** 合成语速倍率（与其它引擎一致：固定 1.0） */
@@ -81,7 +92,9 @@ export class AudiocppTtsEngine implements TtsEngine {
       family: '',
       backend: 'cpu',
       numThreads: 4,
-      language: ''
+      language: '',
+      referenceAudio: null,
+      referenceText: null
     }
   }
 
@@ -132,6 +145,12 @@ export class AudiocppTtsEngine implements TtsEngine {
       throw e
     }
 
+    // 换模型必须丢掉上一份参考音频/文本：克隆参数是"给某个模型准备的说话人参考"，
+    // 残留到预设音色模型上会被当成克隆请求（Qwen3 custom voice 直接报
+    // "prefill requires speaker"）。就绪后的恢复路径由音色库 active_id 重新下发。
+    this.inner.referenceAudio = null
+    this.inner.referenceText = null
+
     // 语言对齐：当前语言不在描述符支持列表 → 切到 "en"（有则用）否则首个支持语言
     if (this.inner.language && !spec.languages.includes(this.inner.language)) {
       const fallback = spec.languages.includes('en') ? 'en' : spec.languages[0]
@@ -143,6 +162,8 @@ export class AudiocppTtsEngine implements TtsEngine {
     await this.host.unload()
     this.inner.spec = null
     this.inner.family = ''
+    this.inner.referenceAudio = null
+    this.inner.referenceText = null
   }
 
   isLoaded(): boolean {
@@ -159,13 +180,51 @@ export class AudiocppTtsEngine implements TtsEngine {
     this.inner.language = language
   }
 
-  /** audio.cpp 的首批模型无预设音色；克隆参数暂不接线（保持接口默认拒绝） */
-  async setCloneVoice(): Promise<void> {
-    throw new Error('当前 audio.cpp 模型不支持语音克隆')
+  /**
+   * 设置克隆音色：读参考音频 → 交给 C 侧的说话人参考槽。
+   *
+   * Qwen3-TTS Base 这类模型**只有克隆**（没有预设音色），必须提供参考音频 +
+   * 参考文本；缺参考音频 C 侧会直接报
+   * "Qwen3 base TTS requires voice clone reference audio"。
+   */
+  async setCloneVoice(audio: string, text: string): Promise<void> {
+    const spec = this.inner.spec
+    if (!spec) throw new Error('TTS 模型未加载，无法设置克隆音色')
+
+    const vm = spec.voiceMode
+    const cloneCapable = vm.type === 'clone' || vm.type === 'presetAndClone'
+    if (!cloneCapable) {
+      throw new Error(`当前 TTS 模型（${spec.name}）不支持语音克隆`)
+    }
+    const requiresText =
+      vm.type === 'clone' ? vm.requiresText : vm.type === 'presetAndClone' ? vm.clone.requiresText : false
+
+    const trimmed = (text ?? '').trim()
+    if (requiresText && !trimmed) {
+      throw new Error(`模型 ${spec.name} 需要参考文本（参考音频里说的内容）`)
+    }
+    if (!audio || !existsSync(audio)) {
+      throw new Error(`参考音频不存在: ${audio}`)
+    }
+
+    const wav = readWav(audio)
+    const channels = wav.channels || 1
+    const frames = Math.floor(wav.samples.length / channels)
+    if (frames <= 0) throw new Error(`参考音频没有采样数据: ${audio}`)
+
+    this.inner.referenceAudio = {
+      samples: wav.samples,
+      frames,
+      sampleRate: wav.sampleRate,
+      channels
+    }
+    this.inner.referenceText = trimmed ? trimmed : null
   }
 
+  /** 清除克隆参数（回到预设音色） */
   clearCloneVoice(): void {
-    /* 无克隆状态 */
+    this.inner.referenceAudio = null
+    this.inner.referenceText = null
   }
 
   async synthesize(text: string, voice: string): Promise<SynthAudio> {
@@ -175,12 +234,17 @@ export class AudiocppTtsEngine implements TtsEngine {
     const options: Record<string, string> = {}
     // 语音参数非空时透传为 voice_id（部分族支持）；空则用模型默认
     const voiceId = (voice ?? '').trim()
-    if (voiceId && Number.isNaN(Number(voiceId))) options.voice_id = voiceId
+    // 克隆激活时音色由参考音频决定，voice_id 不再参与
+    const clone = this.inner.referenceAudio
+    if (!clone && voiceId && Number.isNaN(Number(voiceId))) options.voice_id = voiceId
+    // 参考文本：Qwen3-TTS 克隆需要它对齐参考音频内容
+    if (clone && this.inner.referenceText) options.reference_text = this.inner.referenceText
 
     const reply = await this.host.synthesize({
       text,
       language: this.inner.language,
-      options
+      options,
+      voiceAudio: clone ?? undefined
     })
     return { samples: reply.samples, sampleRate: reply.sampleRate }
   }

@@ -24,8 +24,17 @@ export interface AudiocppTtsSessionOptions {
 export interface AudiocppSynthOptions {
   /** 语言（空 = 自动） */
   language: string
-  /** 请求级选项（如 voice_id） */
+  /** 请求级选项（如 voice_id / reference_text） */
   options: Record<string, string>
+  /** 克隆参考音频（说话人参考；为空 = 不克隆） */
+  voiceAudio?: {
+    /** 交错 float PCM */
+    samples: Float32Array
+    /** 每声道帧数 */
+    frames: number
+    sampleRate: number
+    channels: number
+  }
 }
 
 /** 合成结果（采样为 [-1,1] 浮点，由调用方转 16bit） */
@@ -110,6 +119,11 @@ export class AudiocppTtsSession {
       ffi.request_set_text(request, text, opts.language || null)
       for (const [key, value] of Object.entries(opts.options)) {
         ffi.request_set_option(request, key, value)
+      }
+      // 克隆参考音频（说话人参考）：Base 类模型必须带，否则 C 侧直接拒绝
+      const va = opts.voiceAudio
+      if (va && va.frames > 0) {
+        ffi.request_set_voice_audio(request, va.samples, va.frames, va.sampleRate, va.channels)
       }
       result = ffi.session_run(this.session, request)
       const audio = ffi.result_audio(result)

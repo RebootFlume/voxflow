@@ -215,6 +215,8 @@ models\hub\   # HuggingFace 下载缓存
 | audio.cpp 端到端 | 真机：`MOSS-TTS-Nano`（q8_0，193MB，CPU）加载 + 中英合成通过，wav 48kHz / 峰值 27592（非静音） |
 | audio.cpp 变体与 ASR | CPU（13MB）/CUDA（435MB + cudart 579MB）两个独立包，按设备选变体；`Qwen3-ASR-0.6B/1.7B`、`Fun-ASR-Nano`、`MOSS-Transcribe-Diarize` 真机转写通过（MOSS 带说话人分离与时间戳）；缺 CUDA 变体时抛 `RUNTIME_VARIANT_MISMATCH` 并指引去装 |
 | audio.cpp TTS 音色 | `Qwen3-TTS-1.7B (CustomVoice)` 9 个预设音色（vivian/serena/uncle_fu/dylan/eric/ryan/aiden/ono_anna/sohee）真机合成通过，24kHz，峰值 18182 / 22500（非静音） |
+| audio.cpp 克隆音色 | `Qwen3-TTS-0.6B (Base)` / `1.7B (Base)`（仅克隆，`voice_mode.type = clone`）：参考音频 5.6s + 参考文本 → `audiocpp_request_set_voice_audio` 下发 → 合成 24kHz 非静音，SenseVoice 回读文本一致 |
+| 音色页对称禁用 | 仅克隆模型禁用「预设音色」页并自动切到克隆工作区；仅预设模型禁用「克隆音色」页；换模型时引擎丢弃上一份参考音频（否则预设模型被当克隆请求，报 `prefill requires speaker`） |
 | 无 Python / 无 eSpeak | 运行时只剩 `llama-cpp` / `sherpa-onnx` / `audio-cpp`（两个变体），三者均 Apache-2.0；TTS 音素化由模型自带 lexicon 完成 |
 
 ### 真实推理验证（最有说服力的一条）

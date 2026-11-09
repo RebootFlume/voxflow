@@ -847,10 +847,17 @@ function VoiceSettingsPage() {
    *  引擎侧 set_clone_voice 仍是最终兜底：门控只是不让人白做录音/命名。 */
   const cloneDeclared = vm !== undefined || info?.supports_clone !== undefined;
   const cloneBlocked = Boolean(info) && cloneDeclared && cloneCapable === false;
+  /** 预设音色不可用：模型明确「仅克隆」（voice_mode.type === 'clone'）⇒ 预设页禁用，
+   *  与 cloneBlocked 互为镜像（两个页永远不会同时禁用：fixed 模型用预设页显示固定音色）。 */
+  const presetBlocked = Boolean(info) && mode === "clone";
   // 模型换成不支持克隆的 ⇒ 自动退出克隆工作区（否则录音+命名做完，点「使用」才被引擎拒绝）
   useEffect(() => {
     if (cloneBlocked && tts.voiceMode === "clone") updateTts({ voiceMode: "preset" });
   }, [cloneBlocked, tts.voiceMode, updateTts]);
+  // 模型只支持克隆 ⇒ 自动切到克隆工作区（否则停在禁用的预设页，界面看着像坏了）
+  useEffect(() => {
+    if (presetBlocked && tts.voiceMode === "preset") updateTts({ voiceMode: "clone" });
+  }, [presetBlocked, tts.voiceMode, updateTts]);
   /** Clone + overrides_preset：克隆激活后隐藏 sid 控件（不是禁用） */
   const sidHidden = mode === "clone" && cloneActive && vm?.overrides_preset === true;
   /** PresetAndClone：克隆激活时 sid 控件禁用（保留可见） */
@@ -939,12 +946,14 @@ function VoiceSettingsPage() {
         {VOICE_MODE_TABS.map((tab) => {
           const Icon = tab.icon;
           const active = tts.voiceMode === tab.key;
-          const blocked = tab.key === "clone" && cloneBlocked;
+          const blocked = tab.key === "clone" ? cloneBlocked : presetBlocked;
+          const blockedText =
+            tab.key === "clone" ? "tts.voice.cloneUnsupported" : "tts.voice.presetUnsupported";
           return (
             <button
               key={tab.key}
               disabled={blocked}
-              title={blocked ? t(locale, "tts.voice.cloneUnsupported") : undefined}
+              title={blocked ? t(locale, blockedText) : undefined}
               className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
                 active
                   ? "bg-primary/10 font-medium text-primary"
@@ -960,6 +969,11 @@ function VoiceSettingsPage() {
         {cloneBlocked && (
           <span className="px-2 text-xs text-muted-foreground">
             {t(locale, "tts.voice.cloneUnsupported")}
+          </span>
+        )}
+        {presetBlocked && (
+          <span className="px-2 text-xs text-muted-foreground">
+            {t(locale, "tts.voice.presetUnsupported")}
           </span>
         )}
       </div>

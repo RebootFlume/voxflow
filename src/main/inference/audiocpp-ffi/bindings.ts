@@ -112,6 +112,14 @@ export interface AudiocppFfi {
   ): void
   /** 设置请求级选项（对应 CLI 的 --request-option） */
   request_set_option(request: Handle, key: string, value: string): void
+  /** 设置克隆参考音频（说话人参考；交错 float PCM，frames = 每声道帧数） */
+  request_set_voice_audio(
+    request: Handle,
+    samples: Float32Array,
+    frames: number,
+    sampleRate: number,
+    channels: number
+  ): void
 
   /** 执行一次离线推理，返回 result 句柄 */
   session_run(session: Handle, request: Handle): Handle
@@ -213,6 +221,13 @@ export function loadAudiocppFfi(runtimeDir: string): AudiocppFfi {
     'int'
   ])
   const requestSetOption = lib.func('audiocpp_request_set_option', 'int32_t', [handle, C, C])
+  const requestSetVoiceAudio = lib.func('audiocpp_request_set_voice_audio', 'int32_t', [
+    handle,
+    koffi.pointer('float'),
+    'size_t',
+    'int',
+    'int'
+  ])
 
   const sessionRun = lib.func('audiocpp_session_run', 'int32_t', [
     handle,
@@ -311,6 +326,12 @@ export function loadAudiocppFfi(runtimeDir: string): AudiocppFfi {
     request_set_option: (request, key, value) => {
       const status = Number(requestSetOption(request, key, value))
       if (status !== 0) fail(reader, status, `设置请求选项 ${key}`)
+    },
+    request_set_voice_audio: (request, samples, frames, sampleRate, channels) => {
+      const status = Number(
+        requestSetVoiceAudio(request, samples, frames, sampleRate, channels)
+      )
+      if (status !== 0) fail(reader, status, '设置克隆参考音频')
     },
 
     session_run: (session, request) => {

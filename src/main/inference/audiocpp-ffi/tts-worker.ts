@@ -51,7 +51,8 @@ runFfiWorker({
       if (!session) throw new Error('TTS 模型未加载')
       const audio = session.synthesize(req.text, {
         language: req.language,
-        options: req.options
+        options: req.options,
+        voiceAudio: req.voiceAudio
       })
       return { samples: toInt16(audio.samples), sampleRate: audio.sampleRate }
     }
