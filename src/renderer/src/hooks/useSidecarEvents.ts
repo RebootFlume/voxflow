@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { onSidecarEvent, rustListTtsSpeakers, rustTtsVoicesList, rustTtsVoiceUse, sendToSidecar } from "@/lib/ipc";
+import { onSidecarEvent, rustListTtsSpeakers, rustSetTtsInstruct, rustTtsVoicesList, rustTtsVoiceUse, sendToSidecar } from "@/lib/ipc";
 import { applyEngineStatus, applyAsrFrameworkFromRust, applyTtsFrameworkFromRust, syncAsrFrameworkFromLoaded, syncTtsFrameworkFromLoaded, resolveModelKind, runtimeKeyOf, ttsSupportsClone, findModelItem, migrateLegacyModelKeys, LOAD_REQ_PENDING } from "@/lib/modelState";
 import { useAppStore, type EngineState } from "@/stores";
 import { t } from "@/lib/i18n";
@@ -250,6 +250,21 @@ export function useSidecarEvents() {
               // （事件权威；此前只有 ASR 回写，TTS 面板可能显示 CUDA 而引擎跑在 CPU 上）
               store.updateTts({ device: device as "cpu" | "cuda" });
               store.setEngineStatus("tts", { device: device as "cpu" | "cuda" });
+              // 音色描述是引擎运行态（换模型时引擎会清空）→ 每次就绪按持久化的值重发。
+              // 只有声明支持的模型才发，否则引擎会以"不支持音色描述"拒绝。
+              {
+                const it = findModelItem(useAppStore.getState().models.items, model);
+                const text = useAppStore.getState().tts.instruct.trim();
+                if (it?.supports_instruct === true && text) {
+                  void rustSetTtsInstruct(text)
+                    .then(() => {
+                      useAppStore.getState().addLog(`[tts] 音色描述已恢复：${text}`, "info");
+                    })
+                    .catch((e) => {
+                      useAppStore.getState().addLog(`[tts] 音色描述下发失败: ${String(e)}`, "error");
+                    });
+                }
+              }
               // 音色对齐：换了模型后把上一个模型遗留的 sid 纠正掉。
               // 单音色 / 克隆模型的说话人列表为空 ⇒ 清空（= 用模型默认音色），否则界面会一直显示
               // 上一个模型的 "sid 47"（用户实际看到的现象）；预设模型则对齐到该模型自己的列表。

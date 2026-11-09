@@ -157,6 +157,7 @@ export const createModelsSlice = (set: (partial: Partial<ModelsSlice> | ((s: Mod
               : undefined,
             voice_mode: pickVoiceMode(m.voice_mode),
             supports_clone: typeof m.supports_clone === "boolean" ? m.supports_clone : undefined,
+            supports_instruct: typeof m.supports_instruct === "boolean" ? m.supports_instruct : undefined,
           } satisfies ModelItemState;
         }),
       },

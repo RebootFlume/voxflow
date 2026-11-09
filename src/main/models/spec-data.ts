@@ -141,6 +141,11 @@ export interface ModelSpec {
   languages: string[]
   languageMode: 'auto' | 'fixed' | 'select' | 'cloning'
   voiceMode: VoiceModeSpec
+  /**
+   * 支持自然语言音色描述（audio.cpp 的 `instruct` 请求选项）。
+   * 例：Qwen3-TTS CustomVoice 用一句话描述嗓音/风格即可改写输出音色。
+   */
+  instruct?: boolean
   backend: BackendSpec
 }
 
@@ -801,6 +806,8 @@ export const SPECS: ModelSpec[] = [
             // audio.cpp 的 voice_id 预设音色（Qwen3-TTS CustomVoice checkpoint 的 9 个命名说话人）
             speakers: ["vivian", "serena", "uncle_fu", "dylan", "eric", "ryan", "aiden", "ono_anna", "sohee"],
         },
+        // CustomVoice checkpoint 的 instruct 可改写音色风格（实测同 seed 输出明显不同）
+        instruct: true,
         backend: { type: 'audiocpp', family: 'qwen3_tts' },
     },
     {

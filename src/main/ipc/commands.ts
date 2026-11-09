@@ -581,6 +581,7 @@ export const commands: Record<string, CommandHandler> = {
   rust_set_tts_clone_voice: (args) =>
     tts.setTtsCloneVoice(str(args, 'audioPath'), str(args, 'referenceText')),
   rust_clear_tts_clone_voice: () => tts.clearTtsCloneVoice(),
+  rust_set_tts_instruct: (args) => tts.setTtsInstruct(str(args, 'text')),
   rust_tts_voices_list: () => tts.listVoices(),
   rust_tts_voice_add: (args) =>
     tts.addVoice(

@@ -136,6 +136,11 @@ export function rustSetTtsCloneVoice(audioPath: string, referenceText: string): 
   return invoke('rust_set_tts_clone_voice', { audioPath, referenceText })
 }
 
+/** 设置自然语言音色描述（audio.cpp 的 instruct；空串 = 关闭） */
+export function rustSetTtsInstruct(text: string): Promise<Record<string, unknown>> {
+  return invoke('rust_set_tts_instruct', { text })
+}
+
 /** 清除语音克隆参数（回到预设音色） */
 export function rustClearTtsCloneVoice(): Promise<Record<string, unknown>> {
   return invoke('rust_clear_tts_clone_voice')

@@ -17,6 +17,7 @@ import type { TtsVoiceMode } from "@/stores/slices/ttsSlice";
 import {
   rustListTtsSpeakers,
   rustClearTtsCloneVoice,
+  rustSetTtsInstruct,
   rustSetTtsLanguage,
   rustSynthesize,
   rustCancelTts,
@@ -842,6 +843,8 @@ function VoiceSettingsPage() {
   /** Fixed（单音色）：隐藏音色遍历/网格，改为固定音色名文本。
    *  vm 缺失（旧 payload）时按方案 §4.2 的兜底判定：无克隆能力且音色数 ≤1 → 视为单音色模型。 */
   const fixedVoice = mode === "fixed" || (vm === undefined && info?.supports_clone === false && numSpeakers <= 1);
+  /** 音色描述（instruct）能力：由描述符下发，缺省视为不支持 */
+  const instructCapable = info?.supports_instruct === true;
   /** 克隆能力：与「模型就绪恢复」同源（modelState.supportsClone） */
   const cloneCapable = supportsClone(info);
   /** 克隆入口门控：只有"能力明确为否"才拦截；能力**未知**（旧 payload 未声明能力）保持既有行为，
@@ -934,6 +937,15 @@ function VoiceSettingsPage() {
     }
   }
 
+  /** 把音色描述下发给引擎（失焦/清空时调用；失败只记日志，不打断用户输入） */
+  async function syncInstruct(text: string) {
+    try {
+      await rustSetTtsInstruct(text);
+    } catch (e) {
+      useAppStore.getState().addLog(`[tts] 音色描述下发失败: ${String(e)}`, "error");
+    }
+  }
+
   async function handleClearClone() {
     try {
       await rustClearTtsCloneVoice();
@@ -1001,6 +1013,36 @@ function VoiceSettingsPage() {
               </div>
             ) : (
               <>
+                {/* 音色描述（instruct）：仅声明支持的模型出现。与音色/克隆相互独立，
+                    一句话改写嗓音或风格；留空 = 不干预。 */}
+                {instructCapable && (
+                  <div className="space-y-1">
+                    <label htmlFor="tts-instruct" className="text-xs font-medium">
+                      {t(locale, "tts.voice.instruct")}
+                    </label>
+                    <div className="flex items-start gap-2">
+                      <Textarea
+                        id="tts-instruct"
+                        value={tts.instruct}
+                        onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => updateTts({ instruct: e.target.value })}
+                        onBlur={() => void syncInstruct(tts.instruct)}
+                        placeholder={t(locale, "tts.voice.instructPlaceholder")}
+                        className="min-h-[56px] resize-y text-xs"
+                        rows={2}
+                      />
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-8 shrink-0"
+                        disabled={!tts.instruct.trim()}
+                        onClick={() => { updateTts({ instruct: "" }); void syncInstruct(""); }}
+                      >
+                        {t(locale, "tts.voice.instructClear")}
+                      </Button>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">{t(locale, "tts.voice.instructHint")}</p>
+                  </div>
+                )}
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <Button
                     variant="outline"

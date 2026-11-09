@@ -1242,6 +1242,8 @@ export type ModelItemPayload = {
   language_mode: string
   voice_mode: Record<string, unknown>
   supports_clone: boolean
+  /** 支持自然语言音色描述（引擎的 instruct 参数）；旧 payload 缺省 = 不支持 */
+  supports_instruct: boolean
 }
 
 /** 模型清单 payload（`models_state` 事件；键名 = 前后端协议，snake_case） */
@@ -1333,7 +1335,8 @@ export function listModelsPayload(kind?: string): ModelsStatePayload {
       runtime_keys: [...runtimeKeysOf(spec.framework)],
       language_mode: languageModeStr(spec.languageMode),
       voice_mode: voiceModeJson(spec.voiceMode),
-      supports_clone: spec.voiceMode.type === 'clone' || spec.voiceMode.type === 'presetAndClone'
+      supports_clone: spec.voiceMode.type === 'clone' || spec.voiceMode.type === 'presetAndClone',
+      supports_instruct: spec.instruct === true
     }
     if (state === 'downloaded') {
       // 有清单就走清单 / 无清单走缓存版遍历（不每轮递归）

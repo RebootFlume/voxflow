@@ -39,6 +39,9 @@ export interface TtsEngine {
   /** 清除语音克隆参数（默认 no-op） */
   clearCloneVoice(): void
 
+  /** 设置自然语言音色描述（`instruct`；仅声明支持该能力的模型有效，默认 no-op） */
+  setInstruct?(text: string): void
+
   /** 估算当前模型显存占用（MB），用于显存监控；无权限时回退 null */
   vramEstimateMb(): number | null
 

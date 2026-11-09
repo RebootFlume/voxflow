@@ -13,6 +13,8 @@ export interface TtsSlice {
     framework: string;
     /** 音色设置页当前模式：内置预设音色 / 克隆音色（默认 preset） */
     voiceMode: TtsVoiceMode;
+    /** 自然语言音色描述（audio.cpp instruct；空串 = 不用）。随 tts 持久化 */
+    instruct: string;
     /** 启动软件时自动加载上次加载过的模型（默认关：TTS 是按需服务，不占开机内存/显存） */
     autoLoad: boolean;
     /** 每个框架各自记住上次选中的模型：切框架只恢复这个，不替用户挑第一个 */
@@ -53,6 +55,7 @@ export const createTtsSlice = (set: (partial: Partial<TtsSlice> | ((s: TtsSlice)
     voice: "",
     framework: "onnx",
     voiceMode: "preset",
+    instruct: "",
     autoLoad: false,
     lastModelByFramework: {},
   },

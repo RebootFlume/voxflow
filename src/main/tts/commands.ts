@@ -85,6 +85,19 @@ export async function unloadTtsModel(): Promise<Record<string, unknown>> {
   return { status: 'unloaded' }
 }
 
+/**
+ * 设置自然语言音色描述（audio.cpp 的 instruct）。
+ *
+ * 与克隆互不干扰：描述可以单独用，也可以和预设音色一起用；空串 = 关闭。
+ */
+export async function setTtsInstruct(text: string): Promise<Record<string, unknown>> {
+  const engine = ttsRegistry().active()
+  if (!engine) throw new Error('TTS 模型未加载')
+  if (!engine.setInstruct) throw new Error('当前引擎不支持音色描述')
+  engine.setInstruct(text)
+  return { status: 'ok', instruct: text.trim() }
+}
+
 /** 设置语音克隆参数（参考音频 + 参考文本；仅克隆模型支持） */
 export async function setTtsCloneVoice(
   audioPath: string,

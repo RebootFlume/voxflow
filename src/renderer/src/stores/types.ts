@@ -134,4 +134,6 @@ export interface ModelItemState {
     overrides_preset?: boolean;
   };
   supports_clone?: boolean;
+  /** 支持自然语言音色描述（引擎 instruct 参数）；缺省 = 不支持 */
+  supports_instruct?: boolean;
 }
