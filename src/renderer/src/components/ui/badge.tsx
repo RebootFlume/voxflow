@@ -4,7 +4,10 @@ import { cva, type VariantProps } from "class-variance-authority"
 import { cn } from "@/lib/utils"
 
 const badgeVariants = cva(
-  "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2",
+  // whitespace-nowrap + shrink-0：徽章是一枚不可分割的标记，任何长度都不该折行。
+  // 缺 nowrap 时 "sherpa-onnx" 会在连字符处断成两行；容器一窄就有徽章被压成两行、
+  // 行高错乱。宽度不固定 —— 按内容自适应比写死更稳（"audio.cpp" 与 "sherpa-onnx" 差很多）。
+  "inline-flex shrink-0 items-center whitespace-nowrap rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2",
   {
     variants: {
       variant: {
