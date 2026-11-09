@@ -3,6 +3,8 @@ dist
 out
 release
 dist-bundle
+# InnoSetup 打包产物（安装版 exe + 便携版 zip，各 100MB+）
+dist-inno
 .DS_Store
 *.log*
 .env

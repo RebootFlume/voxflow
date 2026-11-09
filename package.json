@@ -37,7 +37,8 @@
     "check:abi": "node scripts/check-runtime-abi.mjs",
     "test:tts": "node scripts/run-ts-tests.mjs scripts/tts-tests.ts",
     "screenshot": "node scripts/screenshot.mjs",
-    "check:consistency": "node scripts/check-consistency.mjs"
+    "check:consistency": "node scripts/check-consistency.mjs",
+    "bundle:inno": "powershell -ExecutionPolicy Bypass -File scripts/bundle-inno.ps1"
   },
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.2",

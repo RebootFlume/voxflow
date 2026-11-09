@@ -13,14 +13,19 @@
  */
 
 import { join } from 'path'
-import { exeDir } from '../core/data-root'
+import { appRootDir, exeDir } from '../core/data-root'
 import { RUNTIME_PACKAGES, type RuntimePkg } from './runtime-packages'
 
-export { exeDir }
+export { exeDir, appRootDir }
 
-/** libs 根目录（exe 旁） */
+/**
+ * libs 根目录（**应用根目录**旁，不是 exe 旁）。
+ *
+ * InnoSetup 版把 Electron 放在 bin\ 下，libs 必须落在根目录 ——
+ * 与 data\ 同级（见 appRootDir 的说明）。
+ */
 export function libsDir(): string {
-  return join(exeDir(), 'libs')
+  return join(appRootDir(), 'libs')
 }
 
 /** 某运行时包的解压目录（`<libs>/<targetDir>`） */

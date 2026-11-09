@@ -10,7 +10,7 @@
 
 import { app } from 'electron'
 import { existsSync, mkdirSync, readFileSync } from 'fs'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path'
 import { projectRoot } from './paths'
 
 /** 配置文件（数据根下） */
@@ -33,15 +33,34 @@ export function exeDir(): string {
   return projectRoot()
 }
 
-/** 当前是否便携模式（exe 旁有 portable.txt） */
+/**
+ * **应用根目录** —— data\ / libs\ / portable.txt 所在的那一层。
+ *
+ * 为什么与 exeDir 分开：InnoSetup 版把 Electron 塞进 `bin\`，根目录只放一个启动器 exe。
+ * 此时 `app.getPath('exe')` 指向 `bin\`，若按老逻辑用 exe 旁目录，
+ * data\ 与 libs\ 就会跑到 `bin\` 下面，与用户要求的目录结构不符。
+ *
+ * 判定：exe 所在目录名为 `bin` → 根目录取它的上一级。
+ * 认 `bin` 这个名字是因为 InnoSetup 脚本里 Electron 固定解到 `{app}\bin`。
+ * 认不出来时退回 exeDir()（electron-builder 原生打包仍按老规则工作）。
+ */
+export function appRootDir(): string {
+  const dir = exeDir()
+  if (basename(dir).toLowerCase() !== 'bin') return dir
+  const parent = dirname(dir)
+  // 上级存在同名 bin 的兄弟目录（Electron 本体所在）→ 确认是 InnoSetup 布局
+  return parent
+}
+
+/** 当前是否便携模式（应用根目录旁有 portable.txt） */
 export function isPortable(): boolean {
-  return existsSync(join(exeDir(), PORTABLE_MARKER))
+  return existsSync(join(appRootDir(), PORTABLE_MARKER))
 }
 
 /** 计算统一数据根目录（便携 marker + AppData 兜底） */
 export function getDataRoot(): string {
   if (isPortable()) {
-    const portable = join(exeDir(), 'data')
+    const portable = join(appRootDir(), 'data')
     mkdirSync(join(portable, 'models'), { recursive: true })
     return portable
   }

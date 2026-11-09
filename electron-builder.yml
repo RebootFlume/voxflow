@@ -17,6 +17,13 @@ files:
   # 打包产物目录，避免自我嵌套
   - '!release/**'
   - '!dist-bundle/**'
+  # InnoSetup 产物目录：里面有 100MB+ 的 setup exe，漏掉就会被塞进 asar
+  # （实测 app.asar 从 41MB 涨到 153MB，其中 117MB 就是那个 setup exe）
+  - '!dist-inno/**'
+  # 构建缓存（启动器 exe / ABI 头文件 / 压缩包）：不是运行期依赖
+  - '!.cache/**'
+  # tsc 增量信息：纯构建产物
+  - '!*.tsbuildinfo'
   - '!docs/**'
   - '!temp/**'
   - '!*.log'
