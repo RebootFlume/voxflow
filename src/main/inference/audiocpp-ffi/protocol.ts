@@ -13,7 +13,7 @@ export interface LoadTtsRequest {
   modelPath: string
   /** 模型族名（对应 audiocpp 的 family，如 "moss_tts_nano"；空 = 按路径自动识别） */
   familyHint: string
-  /** 后端（"cpu" / "cuda" / "vulkan"…） */
+  /** 后端（"cpu" / "cuda"） */
   backend: string
   /** 推理线程数 */
   numThreads: number

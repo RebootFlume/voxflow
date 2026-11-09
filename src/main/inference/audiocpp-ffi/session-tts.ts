@@ -14,7 +14,7 @@ export interface AudiocppTtsSessionOptions {
   modelPath: string
   /** 族名（空 = 让 C 侧按路径识别） */
   familyHint: string
-  /** 后端（"cpu" / "cuda" / "vulkan"…） */
+  /** 后端（"cpu" / "cuda"） */
   backend: string
   /** 线程数 */
   numThreads: number

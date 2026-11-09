@@ -281,7 +281,7 @@ const LAST_FRAMEWORK_KEYS = ["onnx"];
  * 装没装、实际跑的是 CPU 还是 GPU，标签永远显示 CPU，与实际加载日志矛盾。
  */
 export function frameworkDisplayName(name: string): string {
-  return name.replace(/\s*\((?:cpu|cuda[\d.]*|vulkan|rocm|metal|gpu)\)$/i, "");
+  return name.replace(/\s*\((?:cpu|cuda[\d.]*)\)$/i, "");
 }
 
 /** 运行时包 key → 引擎展示名（查不到就原样返回该 key） */

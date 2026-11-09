@@ -35,7 +35,7 @@ const modelConfig = koffi.struct('AudiocppModelConfig', {
   model_spec_override: C
 })
 
-/** 后端选择：backend = "cpu"/"cuda"/"vulkan"/…，NULL 等价 "cpu" */
+/** 后端选择：backend = "cpu"/"cuda"，NULL 等价 "cpu" */
 const backendConfig = koffi.struct('AudiocppBackendConfig', {
   backend: C,
   device: 'int',

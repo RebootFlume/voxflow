@@ -139,7 +139,7 @@ function ModelDevicePage() {
             <div className="rounded-md border border-sky-500/30 bg-sky-500/5 px-3 py-2 text-xs text-sky-700 dark:text-sky-400">
               {t(locale, "tts.framework.loaded", {
                 model: modelDisplayName(modelItems, engine.model ?? ""),
-                framework: engine.framework ?? "",
+                framework: loadedFw || engine.framework || "",
               })}
               <span className="ml-2 text-muted-foreground">{t(locale, "tts.framework.loadedHint")}</span>
             </div>

@@ -76,7 +76,6 @@ function resolveSpec(modelPath: string): ModelSpec | undefined {
 function backendFor(device: string): string {
   const d = device.trim().toLowerCase()
   if (d === 'cuda' || d === 'gpu') return 'cuda'
-  if (d === 'vulkan') return 'vulkan'
   return 'cpu'
 }
 
