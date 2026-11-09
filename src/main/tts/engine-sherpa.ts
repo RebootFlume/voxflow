@@ -13,12 +13,14 @@
 
 import { existsSync } from 'node:fs'
 import { basename, dirname } from 'node:path'
+import { log } from '../core/logger'
 import { findSpecInLayer, layerRoot, modelRef } from '../models/model-manager'
 import type { ModelSpec, VoiceModeSpec } from '../models/spec-data'
 import { sherpaRuntimeDir } from '../inference/runtime-paths'
 import { SherpaTtsHost } from '../inference/sherpa-ffi/host'
 import { readWav, toMono } from '../audio/wav'
 import { buildTtsModelPayload, resolveMainModelFile } from './sherpa-model-config'
+import { resolveVoice, voiceListOf } from './speakers'
 import type { SynthAudio, TtsEngine } from './traits'
 
 /** 引擎可变状态 */
@@ -209,9 +211,22 @@ export class SherpaTtsEngine implements TtsEngine {
     if (!this.isLoaded()) throw new Error('TTS 模型未加载')
     if (!text) return { samples: new Int16Array(0), sampleRate: 0 }
 
-    // voice 参数作为 sid（如 "45"）；非法值保持当前 sid（与旧实现一致）
-    const sid = Number.parseInt(voice, 10)
-    if (Number.isFinite(sid)) this.inner.sid = sid
+    // voice 支持「序号」与「音色名」两种写法（API 调用方习惯传名字，如 alloy）：
+    // 名字必须先查表换成 sid —— 旧实现 parseInt("alloy") = NaN 就静默保留当前 sid，
+    // 调用方以为换了音色、实际拿到的是默认音色，且没有任何报错。
+    const spec = this.inner.spec
+    if (spec) {
+      const list = voiceListOf(spec, this.inner.modelDir)
+      const picked = resolveVoice(voice, list, spec.name)
+      if (picked) {
+        this.inner.sid = picked.sid
+      } else if (list && list.length > 0 && voice.trim() && voice.trim().toLowerCase() !== 'default') {
+        // 名字/序号认不出：已退到默认音色，但要留下痕迹（否则调用方以为换成了某个音色）
+        log.warn(
+          `[tts] ${spec.name} 不认识音色 "${voice}"，改用默认音色（sid ${this.inner.sid}）`
+        )
+      }
+    }
 
     const reference = this.readReferenceAudio()
 

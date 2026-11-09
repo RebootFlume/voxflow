@@ -14,6 +14,7 @@ import { basename, dirname } from 'node:path'
 import { readWav } from '../audio/wav'
 import { findSpecInLayer, modelRef } from '../models/model-manager'
 import type { ModelSpec } from '../models/spec-data'
+import { resolveVoice, voiceListOf } from './speakers'
 import { AudiocppTtsHost } from '../inference/audiocpp-ffi/host'
 import { audiocppRuntimeForDevice } from '../inference/runtime-download'
 import { getGpuInfo } from '../inference/vram'
@@ -43,6 +44,8 @@ interface AudiocppInner {
   referenceText: string | null
   /** 自然语言音色描述（audio.cpp 的 instruct；null = 不用） */
   instruct: string | null
+  /** 当前模型目录（音色表 / voices.json 之类要按目录读） */
+  modelDir: string
 }
 
 /** 合成语速倍率（与其它引擎一致：固定 1.0） */
@@ -96,7 +99,8 @@ export class AudiocppTtsEngine implements TtsEngine {
       language: '',
       referenceAudio: null,
       referenceText: null,
-      instruct: null
+      instruct: null,
+      modelDir: ''
     }
   }
 
@@ -129,6 +133,7 @@ export class AudiocppTtsEngine implements TtsEngine {
     this.inner.spec = spec
     this.inner.family = spec.backend.family
     this.inner.backend = choice.backend
+    this.inner.modelDir = dirname(modelPath)
 
     try {
       await this.host.load({
@@ -164,6 +169,7 @@ export class AudiocppTtsEngine implements TtsEngine {
     await this.host.unload()
     this.inner.spec = null
     this.inner.family = ''
+    this.inner.modelDir = ''
     this.inner.referenceAudio = null
     this.inner.referenceText = null
     this.inner.instruct = null
@@ -243,36 +249,31 @@ export class AudiocppTtsEngine implements TtsEngine {
     }
     const trimmed = (text ?? '').trim()
     this.inner.instruct = trimmed ? trimmed : null
+    // 留痕：描述是运行态、且会显著改变输出，排查「为什么音色和预期不符」时要能对上时间点
+    log.info(`[tts] 音色描述${trimmed ? `已设置：${trimmed}` : '已清空'}（${spec.name}）`)
   }
 
   /**
-   * UI 传进来的音色 → C 侧的 voice_id。
+   * UI / API 传进来的音色 → C 侧的 voice_id。
    *
-   * 前端对所有模型统一用 **sid（数字序号）** 标识音色（sherpa 的 sid 本身就是整数
-   * speaker id）；但 audio.cpp 的预设音色是**名字**（qwen3_tts 的 vivian / serena…）。
-   * 描述符里有 `speakers: string[]` 时按序号取名，没有则原样透传
-   * （数字 = 该族自己的 speaker id，非数字 = voice_id）。
+   * 前端对所有模型统一用 **sid（数字序号）** 标识音色，但 audio.cpp 的预设音色是
+   * **名字**（qwen3_tts 的 vivian / serena…），API 调用方又习惯传名字。
+   * 统一交给共享解析器（序号 / 名字都认，认不出抛错而不是静默换音色）。
+   *
+   * 两个 audio.cpp 专属规则：
+   * - 未指定（空 / "default"）时落到**第一个**音色：有命名预设音色的族不接受缺省
+   *   （Qwen3 CustomVoice 对缺 speaker 的请求直接报 "prefill requires speaker"）；
+   * - 没有预设音色的族（fixed / 仅克隆）返回空串 = 不下发 voice_id。
    */
   private resolveVoiceId(voice: string): string {
-    const v = (voice ?? '').trim()
     const spec = this.inner.spec
-    const vm = spec?.voiceMode
-    const names = vm?.type === 'preset' ? vm.speakers : vm?.type === 'presetAndClone' ? vm.preset.speakers : undefined
-    if (!v) {
-      // 空 = 用模型默认音色。但**有命名预设音色的族不接受缺省**（Qwen3 CustomVoice
-      // 直接报 "prefill requires speaker"），所以这里落到第一个。
-      return names && names.length > 0 ? names[0] : ''
-    }
-    if (names && names.length > 0) {
-      const idx = Number(v)
-      if (Number.isInteger(idx) && idx >= 0 && idx < names.length) return names[idx]
-      if (names.includes(v)) return v
-      // 有预设音色列表却给不出有效项（空串 / 越界 / 别的模型遗留）：用第一个。
-      // 不能下发空值 —— Qwen3 CustomVoice 对缺 speaker 的请求直接报
-      // "prefill requires speaker"，比"用了默认音色"更糟。
-      return names[0]
-    }
-    return v
+    if (!spec) return ''
+    const list = voiceListOf(spec, this.inner.modelDir)
+    if (!list || list.length === 0) return ''
+    // 越界序号不抛错：前端所有模型共用一个 `voice` 字段，切到音色更少的模型时
+    // 必然残留上一个 sid —— 抛错会让「选了个音色就再也合不成」不可用。
+    const picked = resolveVoice(voice, list, spec.name, { invalidNumber: 'default' })
+    return picked ? picked.name : list[0].name
   }
 
   async synthesize(text: string, voice: string): Promise<SynthAudio> {

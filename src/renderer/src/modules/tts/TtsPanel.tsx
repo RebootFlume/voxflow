@@ -922,6 +922,8 @@ function VoiceSettingsPage() {
     setPreviewBusy(true);
     setPreviewError("");
     try {
+      // 描述可能还在防抖窗口里：试听必须先让它落到引擎，否则听到的是旧音色
+      if (instructCapable) await flushInstruct();
       const r = await rustSynthesize(sampleText, voice, exportDir);
       const saved = typeof r.saved_path === "string" ? r.saved_path : "";
       if (saved) {
@@ -937,13 +939,41 @@ function VoiceSettingsPage() {
     }
   }
 
-  /** 把音色描述下发给引擎（失焦/清空时调用；失败只记日志，不打断用户输入） */
+  /**
+   * 把音色描述下发给引擎；失败只记日志，不打断用户输入。
+   *
+   * 返回 promise 供调用方 await（试听 / 清空要先确保引擎拿到最新描述）。
+   */
   async function syncInstruct(text: string) {
     try {
       await rustSetTtsInstruct(text);
     } catch (e) {
       useAppStore.getState().addLog(`[tts] 音色描述下发失败: ${String(e)}`, "error");
     }
+  }
+
+  /**
+   * 输入即下发（300ms 防抖），不再依赖 onBlur。
+   *
+   * 之前只在失焦时下发：用户写完描述直接点「试听当前音色」时，blur 与 click 的
+   * 先后顺序由浏览器决定，实测会出现「描述没进引擎、试听用的是旧音色」且毫无提示。
+   * 现在既防抖自动下发，又在试听/合成前显式 flush 一次。
+   */
+  const instructTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  function queueInstruct(text: string) {
+    if (instructTimer.current) clearTimeout(instructTimer.current);
+    instructTimer.current = setTimeout(() => {
+      instructTimer.current = null;
+      void syncInstruct(text);
+    }, 300);
+  }
+  /** 立即下发待处理的描述（若有），保证随后的合成立即生效 */
+  async function flushInstruct() {
+    if (instructTimer.current) {
+      clearTimeout(instructTimer.current);
+      instructTimer.current = null;
+    }
+    await syncInstruct(useAppStore.getState().tts.instruct);
   }
 
   async function handleClearClone() {
@@ -1024,8 +1054,11 @@ function VoiceSettingsPage() {
                       <Textarea
                         id="tts-instruct"
                         value={tts.instruct}
-                        onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => updateTts({ instruct: e.target.value })}
-                        onBlur={() => void syncInstruct(tts.instruct)}
+                        onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => {
+                          updateTts({ instruct: e.target.value });
+                          queueInstruct(e.target.value);
+                        }}
+                        onBlur={() => void flushInstruct()}
                         placeholder={t(locale, "tts.voice.instructPlaceholder")}
                         className="min-h-[56px] resize-y text-xs"
                         rows={2}
@@ -1035,7 +1068,14 @@ function VoiceSettingsPage() {
                         size="sm"
                         className="h-8 shrink-0"
                         disabled={!tts.instruct.trim()}
-                        onClick={() => { updateTts({ instruct: "" }); void syncInstruct(""); }}
+                        onClick={() => {
+                          updateTts({ instruct: "" });
+                          if (instructTimer.current) {
+                            clearTimeout(instructTimer.current);
+                            instructTimer.current = null;
+                          }
+                          void syncInstruct("");
+                        }}
                       >
                         {t(locale, "tts.voice.instructClear")}
                       </Button>
@@ -1346,6 +1386,10 @@ function useTtsModelInfo(model: string) {
 function useTtsSpeakers() {
   const model = useAppStore((s) => s.tts.model);
   const language = useAppStore((s) => s.tts.language);
+  /** 引擎就绪状态也作为依赖：音色列表来自**引擎**，不是清单。
+   *  只依赖 tts.model 会漏掉「加载同一个模型」的场景（点了卡片但选中值没变）
+   *  —— 那时引擎起来了，列表却还是上一次加载前的空数组。 */
+  const engineReady = useAppStore((s) => s.engines.tts.status);
   const info = useTtsModelInfo(model);
   const langDep = info?.voice_mode?.per_language === true ? language : "";
   const [speakers, setSpeakers] = useState<{ sid: number; name: string }[]>([]);
@@ -1361,7 +1405,7 @@ function useTtsSpeakers() {
         setSpeakers([]);
         setNumSpeakers(0);
       });
-  }, [model, langDep]);
+  }, [model, langDep, engineReady]);
 
   return { speakers, numSpeakers };
 }
@@ -1448,6 +1492,7 @@ function LanguageSelector() {
 function SynthesizePage() {
   const locale = useAppStore((s) => s.locale);
   const tts = useAppStore((s) => s.tts);
+  const updateTts = useAppStore((s) => s.updateTts);
   const ttsClone = useAppStore((s) => s.ttsClone);
   const ttsModelStatus = useAppStore((s) => s.ttsModelStatus);
   const tasks = useAppStore((s) => s.ttsTasks);
@@ -1469,7 +1514,9 @@ function SynthesizePage() {
   const voiceText = (() => {
     if (ttsClone.active) return ttsClone.name || t(locale, "tts.voice.mode.clone");
     const name = speakers.find((s) => String(s.sid) === tts.voice)?.name;
-    return name ? name + " · sid " + tts.voice : t(locale, "tts.voice.default");
+    // 空 voice = 引擎会用列表第一个（audio.cpp 的族不接受缺省音色）→ 如实显示它，
+    // 不再说「默认音色」：那会让人以为选中的音色和下拉框里那个无关
+    return name ?? speakers[0]?.name ?? t(locale, "tts.voice.default");
   })();
 
   // 共享导出目录（与 ASR 转写共用一份）
@@ -1601,8 +1648,43 @@ function SynthesizePage() {
           </div>
           <div className="flex h-10 items-center gap-4">
             <span className="w-20 shrink-0 text-sm font-medium">{t(locale, "tts.voice.label")}</span>
-            <div className="flex flex-1 items-center gap-2 text-sm">
-              <span>{voiceText}</span>
+            <div className="flex min-w-0 flex-1 items-center gap-2 text-sm">
+              {ttsClone.active ? (
+                /* 克隆生效：音色由参考音频决定，这里只展示（改音色要去音色设置页取消克隆） */
+                <>
+                  <span className="truncate">{voiceText}</span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 shrink-0 px-2 text-[11px]"
+                    onClick={() => useAppStore.getState().setActiveSubMenu("voice-settings")}
+                  >
+                    {t(locale, "tts.voice.change")}
+                  </Button>
+                </>
+              ) : speakers.length > 0 ? (
+                /* 预设音色：就地可换 —— 之前这里只有纯文本，换个音色必须切到「音色设置」页 */
+                <>
+                  <Select value={tts.voice || String(speakers[0].sid)} onValueChange={(v) => updateTts({ voice: v })}>
+                    <SelectTrigger className="h-8 w-56">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {speakers.map((sp) => (
+                        <SelectItem key={sp.sid} value={String(sp.sid)}>
+                          {sp.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <span className="text-[11px] text-muted-foreground">
+                    {speakers.length} {t(locale, "tts.voice.speakersAvailable")}
+                  </span>
+                </>
+              ) : (
+                /* 单音色模型：没有可切换项，保持只读 */
+                <span>{voiceText}</span>
+              )}
             </div>
           </div>
           <div className="flex h-10 items-center gap-4">

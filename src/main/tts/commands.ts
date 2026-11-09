@@ -6,14 +6,14 @@
  * - `rust_synthesize` 按引擎返回的真实采样率写盘（不硬编码 24k）。
  */
 
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { mkdir, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { emitSidecar } from '../core/events'
 import { setTtsBusy } from '../api-server'
 import { getDataRoot } from '../core/data-root'
 import { findSpec, modelRef } from '../models/model-manager'
-import type { PresetSpec } from '../models/spec-data'
+import { speakerList } from './speakers'
 import { MAX_CHARS_PER_CHUNK, splitText } from './chunk'
 import { ttsRegistry } from './registry'
 import * as voices from './voices'
@@ -39,24 +39,6 @@ export function ttsProgressPayload(done: number, total: number): Record<string, 
     chunks: total,
     progress: done / Math.max(total, 1)
   }
-}
-
-/** 说话人列表：speakers.json 优先（名字 + 数量 = 列表长度），否则生成 0..count 编号 */
-function speakerList(dir: string, preset: PresetSpec): { sid: number; name: string }[] {
-  // 内联音色名（模型族的 voice_id 预设）：名字即 voice_id，sid 仅作序号
-  if (preset.speakers && preset.speakers.length > 0) {
-    return preset.speakers.map((name, i) => ({ sid: i, name }))
-  }
-  if (preset.speakersFile) {
-    try {
-      const data = readFileSync(join(dir, preset.speakersFile), 'utf-8')
-      const list = JSON.parse(data) as { sid: number; name: string }[]
-      if (Array.isArray(list) && list.length > 0) return list
-    } catch {
-      // 读不到就退回编号列表
-    }
-  }
-  return Array.from({ length: preset.count }, (_, i) => ({ sid: i, name: `speaker ${i}` }))
 }
 
 /** 加载 TTS 模型（唯一权威路由：展示名 / 引擎 id / 目录名均可） */
