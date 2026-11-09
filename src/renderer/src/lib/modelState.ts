@@ -273,6 +273,27 @@ export function syncTtsFrameworkFromLoaded(): void {
  */
 const LAST_FRAMEWORK_KEYS = ["onnx"];
 
+/**
+ * 框架展示名 = 运行时包名去掉变体后缀（"audio.cpp (CPU)" → "audio.cpp"）。
+ *
+ * 下拉框与提示里选/说的是**引擎**，具体跑哪个变体由设备与「推理框架」页的安装情况决定。
+ * 把包名原样当标签会写死变体：audio.cpp 的主包叫 "audio.cpp (CPU)"，于是无论 CUDA 包
+ * 装没装、实际跑的是 CPU 还是 GPU，标签永远显示 CPU，与实际加载日志矛盾。
+ */
+export function frameworkDisplayName(name: string): string {
+  return name.replace(/\s*\((?:cpu|cuda[\d.]*|vulkan|rocm|metal|gpu)\)$/i, "");
+}
+
+/** 运行时包 key → 引擎展示名（查不到就原样返回该 key） */
+export function frameworkKeyLabel(
+  key: string,
+  packages: { framework: string; name: string }[] | null | undefined,
+): string {
+  if (!key) return "";
+  const pkg = packages?.find((p) => p.framework === key);
+  return pkg ? frameworkDisplayName(pkg.name) : key;
+}
+
 export function frameworkOptionsOf(
   items: Pick<ModelItemState, "kind" | "runtime_key" | "runtime_keys" | "format">[],
   kind: "asr" | "tts",
@@ -286,7 +307,7 @@ export function frameworkOptionsOf(
     const key = runtimeKeyOf(m);
     if (!key || seen.has(key)) continue;
     seen.add(key);
-    derived.push({ key, label: packages?.find((p) => p.framework === key)?.name ?? key });
+    derived.push({ key, label: frameworkKeyLabel(key, packages) });
   }
   // 垫底项从 derived 里摘出来接到末尾（不是 sort：其余项的相对顺序必须保持清单顺序）
   const head = derived.filter((o) => !LAST_FRAMEWORK_KEYS.includes(o.key));
@@ -295,8 +316,7 @@ export function frameworkOptionsOf(
   );
   const out = [...head, ...tail];
   if (current && !seen.has(current)) {
-    const pkg = packages?.find((p) => p.framework === current);
-    out.unshift({ key: current, label: pkg?.name ?? current });
+    out.unshift({ key: current, label: frameworkKeyLabel(current, packages) });
   }
   return out;
 }
@@ -330,7 +350,7 @@ export function loadedFrameworkLabel(kind: ModelKind): string {
   if (!e.model) return "";
   const item = findModelItem(s.models.items, e.model);
   const key = runtimeKeyOf(item) ?? e.framework;
-  return s.runtime.packages?.find((p) => p.framework === key)?.name ?? e.framework ?? "";
+  return frameworkKeyLabel(key ?? "", s.runtime.packages);
 }
 
 /** 某模型是否属于该运行时包（cuda 变体共用同一引擎：按 runtime_keys 成员判定） */

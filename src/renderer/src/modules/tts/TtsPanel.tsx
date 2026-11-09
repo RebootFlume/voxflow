@@ -29,7 +29,7 @@ import {
   rustTtsVoiceUse,
   type TtsVoiceItem,
 } from "@/lib/ipc";
-import { belongsToFramework, findModelItem, frameworkOptionsOf, loadedFrameworkLabel, modelDisplayName, selectLoadingKind, supportsClone, ttsModelInfoOf } from "@/lib/modelState";
+import { belongsToFramework, findModelItem, frameworkKeyLabel, frameworkOptionsOf, loadedFrameworkLabel, modelDisplayName, selectLoadingKind, supportsClone, ttsModelInfoOf } from "@/lib/modelState";
 import { useAudioPreview } from "@/lib/useAudioPreview";
 import { loadTtsModel, selectTtsFramework } from "@/lib/modelLoader";
 import { useExportDir } from "@/lib/useExportDir";
@@ -129,7 +129,9 @@ function ModelDevicePage() {
             </Select>
           </div>
           <p className="text-xs text-muted-foreground">
-            {t(locale, "tts.framework.hint", { framework: tts.framework })}
+            {t(locale, "tts.framework.hint", {
+              framework: frameworkKeyLabel(tts.framework, runtimePackages),
+            })}
           </p>
 
           {/* 已加载的模型属于别的框架：切框架不会替你卸载，这里如实说明 */}
