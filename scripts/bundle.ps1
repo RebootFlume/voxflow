@@ -31,7 +31,7 @@ function New-InstallDir {
 # ---------- 1. 打安装版（NSIS） ----------
 Write-Host "`n=== [1/2] NSIS 安装版（electron-builder --win） ===" -ForegroundColor Cyan
 Push-Location "$root"
-npm run build:win
+npm run build:win   # 内含 typecheck（一致性 + 两侧 tsc），失败即中止
 $buildExit = $LASTEXITCODE
 Pop-Location
 if ($buildExit -ne 0) {

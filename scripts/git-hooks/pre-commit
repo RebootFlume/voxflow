@@ -1,0 +1,26 @@
+#!/bin/sh
+#
+# 提交前跑一遍类型 + 一致性检查。
+#
+# 为什么需要它：npm script 里的 typecheck 只在「有人用 npm run build」时生效，
+# 而实际开发中大家（包括 AI）常直接调 electron-vite、tsc 或干脆不构建就提交。
+# hook 是唯一与「怎么调命令」无关的关卡。
+#
+# 临时跳过（不推荐）：git commit --no-verify
+#
+# 安装：node scripts/install-git-hooks.mjs（postinstall 时自动执行）
+# 归属标记（安装脚本据此判断能否安全覆盖，勿删）：scripts/git-hooks/
+
+node scripts/typecheck.mjs
+status=$?
+
+# 检查脚本自己挂了（比如 node 不在 PATH）不能让提交永久卡死，
+# 但要显式喊出来 —— 静默放过比报错更糟。
+if [ $status -ne 0 ]; then
+  echo ""
+  echo "✗ 提交被阻止：类型或一致性检查未通过。"
+  echo "  修完后重试；确实要跳过用 git commit --no-verify"
+  exit $status
+fi
+
+exit 0
