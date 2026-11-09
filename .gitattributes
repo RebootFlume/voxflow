@@ -1,14 +1,14 @@
-# 行尾约定
+# 行尾约定（只约束**必须**固定行尾的文件）
 #
-# 仓库内文件一律 LF（.editorconfig / 现有文件都是）。git 的 autocrlf 在各机器上
-# 配置不一致，靠它保证行尾会让同一份文件在不同 checkout 里长得不一样。
-* text=auto eol=lf
+# 本仓库历史文件是 CRLF / LF 混合的，且各文件的行尾是有意保留的。
+# 所以这里**不写** `* text=auto eol=lf` —— 那会在下次 checkout 时把全仓库行尾
+# 改一遍，产生几千行与内容无关的 diff，还会冲掉有意为之的 CRLF。
+#
+# 需要固定行尾的只有一类：被直接执行的脚本。
 
-# shell 脚本必须是 LF：CRLF 会让 `#!/bin/sh` 变成 `#!/bin/sh\r`，
-# git 报 "bad interpreter"，hook 静默失效（这比报错更难发现）。
-*.sh   text eol=lf
-*.ps1  text eol=crlf
-*.mjs  text eol=lf
-
-# pre-commit hook 会被复制到 .git/hooks 并直接执行 —— 必须 LF 且保留可执行位
+# git hook 会被复制到 .git/hooks 并直接执行：CRLF 会让 `#!/bin/sh` 变成
+# `#!/bin/sh\r`，git 报 "bad interpreter" 后静默跳过 hook（比报错更难发现）。
 scripts/git-hooks/* text eol=lf
+
+# PowerShell 脚本必须 CRLF（部分 Windows PowerShell 版本对 LF 的解析有差异）
+*.ps1 text eol=crlf
