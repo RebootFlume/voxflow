@@ -1,6 +1,6 @@
 {
   "name": "voxflow",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "VoxFlow - 本地语音识别（ASR）+ 语音合成（TTS）桌面工具 | Electron + React + TypeScript",
   "main": "./out/main/index.js",
   "author": "",
