@@ -38,8 +38,17 @@ export const MAX_WAV_DATA_BYTES = 0xffffffff - 36
  * 这是 WAV 事实上的"未知长度"约定（ffmpeg 等解码器按流式处理）。
  */
 export function wavHeader(dataBytes: number, sampleRate: number): Buffer {
+  return fillWavHeader(Buffer.alloc(WAV_HEADER_BYTES), dataBytes, sampleRate)
+}
+
+/**
+ * 把 WAV 头写进已有的 buffer 并返回它。
+ *
+ * 单独拆出来是为了让 WavStreamWriter 复用同一块 44 字节 buffer：
+ * 每写完一段都要更新长度，每段都重新 alloc 一次纯属浪费。
+ */
+export function fillWavHeader(header: Buffer, dataBytes: number, sampleRate: number): Buffer {
   const sr = Math.max(sampleRate, 1)
-  const header = Buffer.alloc(WAV_HEADER_BYTES)
   header.write('RIFF', 0, 'ascii')
   // 长度未知（0xFFFFFFFF）时不能算 `36 + dataBytes`：会溢出成 35，
   // 写出一个"总长 43 字节"的头，解码器直接判文件损坏。
@@ -76,17 +85,19 @@ async function writeAll(fh: FileHandle, buf: Buffer, position?: number): Promise
 export class WavStreamWriter {
   private dataBytes = 0
   private sampleRate = 0
+  /** 复用同一块头：每段都要更新长度，每段重新 alloc 纯属浪费 */
+  private readonly header = Buffer.alloc(WAV_HEADER_BYTES)
 
   private constructor(
     private readonly fh: FileHandle,
     private readonly path: string
   ) {}
 
-  /** 建文件并写占位头（长度为 0，待 `finalize` 回填） */
+  /** 建文件并写占位头（长度为 0，待首次 `append` 与 `finalize` 回填） */
   static async create(path: string): Promise<WavStreamWriter> {
     const fh = await open(path, 'w')
     const writer = new WavStreamWriter(fh, path)
-    await writeAll(fh, wavHeader(0, 0))
+    await writeAll(fh, fillWavHeader(writer.header, 0, 0))
     return writer
   }
 
@@ -123,13 +134,30 @@ export class WavStreamWriter {
     const view = Buffer.from(samples.buffer, samples.byteOffset, bytes)
     await writeAll(this.fh, view)
     this.dataBytes += bytes
+
+    // **先 PCM 后头**，顺序不能反：崩溃时头只能"少报"，不能"多报"。
+    // 头说 0 字节但有数据 → 播放器当空文件，但文件里其实有东西；
+    // 头说 N 字节但只有 M < N → 播放器读到末尾报错，比空文件更糟。
+    //
+    // 每段都回填（一次 44 字节 pwrite，相对每段 1.3MB 的音频可忽略），
+    // 这样进程被强杀 / 窗口崩溃时，盘上那个文件到头来仍是**完整可播**的，
+    // 不需要任何"崩溃恢复"机制 —— 文件本来就没坏过。
+    // 数据在 OS page cache 里，进程被杀不会丢；只有整机断电才可能丢最后一段，
+    // 那种情况下头会少报一段，仍然可播（不会多报）。
+    await this.writeHeader()
   }
 
-  /** 回填真实长度并关闭。返回 PCM 字节数（0 表示一段都没写出来） */
+  /** 回填头（position=0，文件指针此刻在尾部，不指定会追加到屁股上） */
+  private async writeHeader(): Promise<void> {
+    fillWavHeader(this.header, this.dataBytes, this.sampleRate)
+    await writeAll(this.fh, this.header, 0)
+  }
+
+  /** 回填最终长度并关闭。返回 PCM 字节数（0 表示一段都没写出来） */
   async finalize(): Promise<number> {
-    const header = wavHeader(this.dataBytes, this.sampleRate)
-    // 显式 position=0：文件指针此刻在尾部，不指定就会把"头"追加到屁股上
-    await writeAll(this.fh, header, 0)
+    // 最后一次 append 已经写过同样的头；这里再写一次是为了兜住
+    // "一段都没产出"（头仍是 create 时的 0）和将来可能出现的其他退出路径。
+    await this.writeHeader()
     await this.fh.close()
     return this.dataBytes
   }
