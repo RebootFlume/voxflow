@@ -8,7 +8,7 @@
 import { mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { splitText, MAX_CHARS_PER_CHUNK } from '../src/main/tts/chunk'
+import { splitText, MAX_CHARS_PER_CHUNK } from '../src/shared/tts-chunk'
 import * as voices from '../src/main/tts/voices'
 import { clampSeconds } from '../src/main/tts/reference-audio'
 

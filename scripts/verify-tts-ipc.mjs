@@ -174,10 +174,46 @@ if (realLoad.ok === false && String(realLoad.err).includes('缺少主模型文�
   console.log('    ! 本机未安装 Kokoro 模型，跳过"真实加载"断言')
 } else {
   check('加载已安装的 TTS 模型成功', realLoad.ok === true, JSON.stringify(realLoad))
-  await call('rust_unload_tts_model')
 }
 
-// 12. 清理：删除条目 + 删掉测试文件
+// 12. 合成期间禁止改引擎参数
+// 为什么这条重要：引擎在**每一段**都重新读 language / instruct / sid，
+// 中途改掉会让同一个 WAV 前半段一种语言/音色、后半段另一种，而且不报错。
+// 前端会置灰，但 HTTP API 走同一条引擎 —— 正确性不能依赖调用方记得禁用按钮。
+{
+  // 通过长合成制造 busy 状态：用一段足够长的文本 + 已加载模型（若可用）
+  const longText = '这是一句用于制造合成忙碌状态的测试文本。'.repeat(12)
+  const synthP = call('rust_synthesize', {
+    text: longText,
+    voice: 'alloy',
+    exportDir: ''
+  })
+  // 给它一点时间进入 synthesizing（引擎若未加载会立刻失败，那就是另一条路径）
+  await new Promise((r) => setTimeout(r, 1200))
+  const langBlocked = await call('rust_set_tts_language', { language: 'en' })
+  const instructBlocked = await call('rust_set_tts_instruct', { text: 'x' })
+  const synthRes = await synthP
+
+  const busy = !!(synthRes.ok && synthRes.r && synthRes.r.chunks > 1) ||
+    String(langBlocked.err || '').includes('合成进行中')
+  if (busy && String(langBlocked.err || '').includes('合成进行中')) {
+    check('合成中拒绝修改语言', langBlocked.ok === false &&
+      String(langBlocked.err).includes('合成进行中'), JSON.stringify(langBlocked))
+    check('合成中拒绝修改音色描述', instructBlocked.ok === false &&
+      String(instructBlocked.err).includes('合成进行中'), JSON.stringify(instructBlocked))
+  } else {
+    console.log('    ! 未能制造合成忙碌状态（模型未加载或合成过快），跳过参数锁定断言')
+  }
+  // 收尾：把可能的产物删掉
+  if (synthRes.ok && synthRes.r?.saved_path) {
+    try { rmSync(synthRes.r.saved_path, { force: true }) } catch {}
+  }
+}
+
+// 13. 卸载模型（上面可能加载过）
+await call('rust_unload_tts_model')
+
+// 14. 清理：删除条目 + 删掉测试文件
 const rm = await call('rust_tts_voice_remove', { id: voiceId })
 check('删除条目成功', rm.ok === true, JSON.stringify(rm))
 const list4 = await call('rust_tts_voices_list')
