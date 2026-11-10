@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FileAudio, FileText, Info, Loader2, Mic, Pencil, Play, RotateCw, Sparkles, Trash2, Volume2, X, type LucideIcon } from "lucide-react";
+import { FileAudio, FileText, Info, Loader2, Mic, Pencil, Play, RotateCcw, RotateCw, Sparkles, Trash2, Volume2, X, type LucideIcon } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -1685,16 +1685,70 @@ function SynthesizePage() {
     setFileError("");
   }
 
-  // 入队：只登记 pending 任务并清空输入（不 await），真正派发交给下面的串行派发 effect
+  /**
+   * 把某条任务的来源文件重新读回输入区。
+   *
+   * 存在的理由：提交后输入区会被清空，而"同一份文件换个音色再合成一次"
+   * 是很自然的操作 —— 没有这个入口就只能再去资源管理器里找一遍文件。
+   * 重新读盘而不是复用 task.text：任务里的文本可能已经是几小时前的，
+   * 用户很可能刚好改过那个 TXT。
+   */
+  async function reloadTaskSource(task: TtsTask) {
+    const path = task.sourcePath;
+    if (!path) return;
+    setFileBusy(true);
+    setFileError("");
+    try {
+      const r = await rustReadTextFile(path);
+      if (!r.text.trim()) {
+        setFileError(t(locale, "tts.source.readFailed", { msg: "文件没有内容" }));
+        return;
+      }
+      updateTtsInput({
+        file: {
+          path,
+          name: task.sourceName ?? path.split(/[/\\]/).pop() ?? path,
+          chars: r.chars,
+          encoding: r.encoding,
+          body: r.text,
+        },
+        source: "file",
+      });
+      useAppStore.getState().addLog(`[tts] 重新载入 ${task.sourceName ?? path}（${r.chars} 字）`, "info");
+    } catch (e) {
+      setFileError(t(locale, "tts.source.readFailed", { msg: describeIpcError(e) }));
+    } finally {
+      setFileBusy(false);
+    }
+  }
+
+  // 入队：登记 pending 任务并**立刻清空输入区**，真正派发交给下面的串行派发 effect
   function enqueueSynthesize() {
     const trimmed = synthText.trim();
     if (!trimmed) return;
     const st = useAppStore.getState();
     st.addLog(`[synthesize] queued: "${trimmed.slice(0, 40)}" voice=${tts.voice} dir=${st.io.exportDir || "-"}`, "info");
-    st.addTtsTask({ text: trimmed, voice: tts.voice, voiceLabel: voiceText, status: "pending" });
-    // 清空"刚提交的那个来源"：文件源提交后保留文件（用户可能想换音色再合成一次），
-    // 只清输入框 —— 否则 60 万字的文件被清掉，重选一次要等好几秒。
-    if (source === "text") updateTtsInput({ text: "" });
+    st.addTtsTask({
+      text: trimmed, // 快照：之后输入区怎么改都不影响这条任务
+      voice: tts.voice,
+      voiceLabel: voiceText,
+      status: "pending",
+      sourceName: source === "file" ? textFile?.name : undefined,
+      sourcePath: source === "file" ? textFile?.path : undefined,
+    });
+    /**
+     * 提交完就把输入区清空 —— 两种来源都清。
+     *
+     * 之前文件源是刻意保留的（想着"用户可能想换音色再合成一次"），但那个"贴心"
+     * 造成了更糟的误导：合成跑到一半，输入区还摆着刚才那个文件，
+     * 用户会以为「界面上这份」和「正在跑的任务」还连着，于是不敢碰（换文件？覆盖？），
+     * 而实际上任务早已持有自己的文本快照。
+     *
+     * 清空之后语义就干净了：输入区 = 下一份待提交的，任务列表 = 已提交的。
+     * 想用同一份文件再合成一次，走任务条上的「重新载入」（见任务列表）。
+     */
+    updateTtsInput({ text: "", file: null, source: "text" });
+    setFileError("");
   }
 
   // 串行派发：没有 synthesizing 任务时取最早的 pending 发出去，一次只发一个 rust_synthesize。
@@ -2091,7 +2145,15 @@ function SynthesizePage() {
                       <div className="flex items-start justify-between gap-2">
                         {/* 只渲染前 200 字：导入 TXT 后 task.text 可能是几十万字，
                             line-clamp-2 只是视觉裁切，DOM 里依然是全文 —— 任务列表多几条就卡 */}
-                        <p className="text-sm flex-1 line-clamp-2">{task.text.slice(0, 200)}</p>
+                        <div className="min-w-0 flex-1">
+                          {task.sourceName && (
+                            <p className="truncate text-[11px] text-muted-foreground" title={task.sourceName}>
+                              <FileText className="mr-1 inline h-3 w-3 align-[-2px]" />
+                              {task.sourceName}
+                            </p>
+                          )}
+                          <p className="text-sm line-clamp-2">{task.text.slice(0, 200)}</p>
+                        </div>
                         <Button variant="ghost" size="icon" className="h-6 w-6 shrink-0" onClick={() => useAppStore.getState().removeTtsTask(task.id)}>
                           <Trash2 className="h-3 w-3" />
                         </Button>
@@ -2133,6 +2195,19 @@ function SynthesizePage() {
                             {t(locale, "tts.task.cancel")}
                           </Button>
                         )}
+                        {/* 与状态无关：排队中/合成中/已完成都能把这份文件再拿回输入区
+                            （"换个音色重来一次"通常发生在任务还没跑完的时候） */}
+                        {task.sourcePath && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-6 px-2"
+                            onClick={() => void reloadTaskSource(task)}
+                          >
+                            <RotateCcw className="h-3 w-3" />
+                            {t(locale, "tts.reloadSource")}
+                          </Button>
+                        )}
                       </div>
                       {task.status === "synthesizing" && task.progress && (
                         <div className="space-y-1">
@@ -2166,6 +2241,7 @@ function SynthesizePage() {
                           >
                             {t(locale, "tts.showInFolder")}
                           </button>
+
                         </div>
                       )}
                     </div>

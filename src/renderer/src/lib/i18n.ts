@@ -443,6 +443,8 @@ const DICTS: Record<Locale, Dict> = {
     "tts.paramsLocked": "合成进行中，参数已临时锁定（中途改动会让同一个文件前后不一致）",
     "tts.openFolder": "打开文件夹",
     "tts.showInFolder": "打开位置",
+    /** 把任务来源文件重新读回输入区（提交后输入区已清空，用于换音色重合成） */
+    "tts.reloadSource": "重新载入",
     "tts.browse": "浏览",
     "tts.inputPlaceholder": "输入要合成的文字...",
     "tts.voiceLabel": "音色",
@@ -933,6 +935,7 @@ const DICTS: Record<Locale, Dict> = {
     "tts.paramsLocked": "Synthesizing — parameters are locked so one file stays consistent",
     "tts.openFolder": "Open folder",
     "tts.showInFolder": "Show in folder",
+    "tts.reloadSource": "Reload source",
     "tts.browse": "Browse",
     "tts.inputPlaceholder": "Type text to synthesize...",
     "tts.voiceLabel": "Voice",

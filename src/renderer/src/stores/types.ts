@@ -34,6 +34,20 @@ export interface TtsTask {
   voice: string;
   /** 展示用的音色名（入队那一刻的界面文案：预设名 / 克隆音色名 / 默认音色） */
   voiceLabel?: string;
+  /**
+   * 来源标注（文件名；直接输入时为空）。
+   *
+   * 为什么需要：入队后输入区会清空（避免用户误以为界面上那份还和正在跑的任务有关），
+   * 那份文件就只活在任务里了 —— 不标出来，用户回头看列表根本分不清哪条是哪个文件。
+   */
+  sourceName?: string;
+  /**
+   * 来源文件路径（仅导入 TXT 的任务有）。
+   *
+   * 用于「重新载入」：把这份文件再读回输入区（换音色再合成一次）。
+   * 存路径而不是把全文塞进列表项：全文已经在 `text` 里，再存一份是双倍内存。
+   */
+  sourcePath?: string;
   status: "pending" | "synthesizing" | "done" | "error" | "cancelled";
   /** 分段进度（sidecar 的 tts_progress 事件回填；仅在 synthesizing 期间有意义） */
   progress?: { chunk: number; chunks: number };
