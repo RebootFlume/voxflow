@@ -22,7 +22,7 @@ import { decodeAny, ffmpegAvailable } from './audio'
 import { decodeWav } from './audio/wav'
 import { registry } from './inference/registry'
 import { transcribeLong } from './inference/transcribe'
-import { splitText, MAX_CHARS_PER_CHUNK } from './tts/chunk'
+import { splitText, MAX_CHARS_PER_CHUNK } from '@shared/tts-chunk'
 import { ttsRegistry } from './tts/registry'
 
 export interface ApiConfig {

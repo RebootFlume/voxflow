@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FileAudio, Info, Loader2, Mic, Pencil, Play, RotateCw, Sparkles, Trash2, Volume2, X, type LucideIcon } from "lucide-react";
+import { FileAudio, FileText, Info, Loader2, Mic, Pencil, Play, RotateCw, Sparkles, Trash2, Volume2, X, type LucideIcon } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -28,14 +28,25 @@ import {
   rustTtsVoiceUpdate,
   rustTtsVoiceRemove,
   rustTtsVoiceUse,
+  rustReadTextFile,
   type TtsVoiceItem,
 } from "@/lib/ipc";
+import { MAX_CHARS_PER_CHUNK, splitText } from "@shared/tts-chunk";
 import { belongsToFramework, findModelItem, frameworkKeyLabel, frameworkOptionsOf, loadedFrameworkLabel, modelDisplayName, selectLoadingKind, supportsClone, ttsModelInfoOf } from "@/lib/modelState";
 import { ttsParamControls, type TtsParamControl } from "@/lib/ttsCapabilities";
 import { useAudioPreview } from "@/lib/useAudioPreview";
 import { loadTtsModel, selectTtsFramework } from "@/lib/modelLoader";
 import { useExportDir } from "@/lib/useExportDir";
 
+/**
+ * IPC 抛出的错误带一层 Electron 前缀，直接显示给用户是一句废话：
+ *   "Error invoking remote method 'voxflow:invoke': Error: 文件过大（3.0MB，上限 2MB）"
+ * 主进程抛的才是真正的原因，剥掉壳再展示。
+ */
+function describeIpcError(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e);
+  return raw.replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, "");
+}
 // ============================================================
 // 模型与设备子页面
 // ============================================================
@@ -1416,7 +1427,17 @@ function SynthesizePage() {
   const ttsClone = useAppStore((s) => s.ttsClone);
   const ttsModelStatus = useAppStore((s) => s.ttsModelStatus);
   const tasks = useAppStore((s) => s.ttsTasks);
-  const [text, setText] = useState("");
+  /**
+   * 合成输入放在 store（不是 useState）：TtsPanel 按子页面条件渲染，
+   * 切到「模型与设备」加载模型再回来，组件会卸载 —— 本地 state 里刚导入的文件、
+   * 刚打的草稿全没了。而"先导入、再去加载模型、回来合成"正是主流动线。
+   */
+  const ttsInput = useAppStore((s) => s.ttsInput);
+  const updateTtsInput = useAppStore((s) => s.updateTtsInput);
+  const { source, text, file: textFile } = ttsInput;
+  /** 读取中 / 读取失败原因（纯瞬态，切页丢掉无妨） */
+  const [fileBusy, setFileBusy] = useState(false);
+  const [fileError, setFileError] = useState("");
   /** 正在等 `rust_synthesize` 返回的任务 id：派发 effect 的去重锁（串行队列下最多一个在飞） */
   const inFlightRef = useRef<number | null>(null);
   /** 队列里还有未跑完的任务（只驱动按钮 spinner，不参与 disabled —— 合成中仍可继续排队） */
@@ -1494,6 +1515,23 @@ function SynthesizePage() {
    *  单看一个信号可能在"引擎已就绪但事件漏收"时把按钮永久禁掉 ⇒ 任一为就绪即允许。 */
   const ttsEngineReady = useAppStore((s) => s.engines.tts.status === "ready");
   const canSynth = ttsEngineReady || ttsModelStatus === "ready";
+
+  /**
+   * 当前要合成的文本 —— 唯一的判定点。
+   * 两个来源互斥，所以这里是 if/else 而不是拼接。
+   */
+  const synthText = source === "file" ? (textFile?.body ?? "") : text;
+
+  /** 分段与时长预估：与主进程共用 `splitText`，段数不会与后端漂移 */
+  const synthStats = useMemo(() => {
+    const trimmed = synthText.trim();
+    if (!trimmed) return null;
+    const chunks = splitText(trimmed, MAX_CHARS_PER_CHUNK).length;
+    const chars = [...trimmed].length;
+    // 中文朗读约 5 字/秒；只用于"要等多久"的量级提示，界面明确写「约」
+    const minutes = Math.max(1, Math.round(chars / 5 / 60));
+    return { chars, chunks, minutes };
+  }, [synthText]);
   /** 参数控件表：哪个字段可编辑 / 只能只读展示 / 根本不出现，由模型能力决定 */
   const controls = useMemo(() => ttsParamControls(modelInfo), [modelInfo]);
   /** 音色描述：**唯一的设置点在这一页**（音色设置页只负责试听） */
@@ -1547,14 +1585,58 @@ function SynthesizePage() {
     if (!picked.canceled && picked.paths[0]) setExportDir(picked.paths[0]);
   }, [exportDir, setExportDir]);
 
+  /** 选一个 .txt/.md 并读入（编码识别在主进程做） */
+  async function pickTextFile() {
+    const picked = await window.voxflow.openDialog({
+      kind: "file",
+      multiple: false,
+      filters: [
+        { name: t(locale, "tts.source.file"), extensions: ["txt", "md"] },
+        { name: "All", extensions: ["*"] },
+      ],
+      title: t(locale, "tts.source.pick"),
+    });
+    if (picked.canceled || !picked.paths[0]) return;
+    const path = picked.paths[0];
+    setFileBusy(true);
+    setFileError("");
+    try {
+      const r = await rustReadTextFile(path);
+      if (!r.text.trim()) {
+        setFileError(t(locale, "tts.source.readFailed", { msg: "文件没有内容" }));
+        return;
+      }
+      const name = path.split(/[/\\]/).pop() ?? path;
+      updateTtsInput({
+        file: { path, name, chars: r.chars, encoding: r.encoding, body: r.text },
+        source: "file",
+      });
+      useAppStore
+        .getState()
+        .addLog(`[synthesize] 已导入 ${name}（${r.chars} 字，${r.encoding}）`, "info");
+    } catch (e) {
+      setFileError(t(locale, "tts.source.readFailed", { msg: describeIpcError(e) }));
+    } finally {
+      setFileBusy(false);
+    }
+  }
+
+  /** 清掉已导入的文件，退回「直接输入」 */
+  function clearTextFile() {
+    updateTtsInput({ file: null, source: "text" });
+    setFileError("");
+  }
+
   // 入队：只登记 pending 任务并清空输入（不 await），真正派发交给下面的串行派发 effect
   function enqueueSynthesize() {
-    const trimmed = text.trim();
+    const trimmed = synthText.trim();
     if (!trimmed) return;
     const st = useAppStore.getState();
     st.addLog(`[synthesize] queued: "${trimmed.slice(0, 40)}" voice=${tts.voice} dir=${st.io.exportDir || "-"}`, "info");
     st.addTtsTask({ text: trimmed, voice: tts.voice, voiceLabel: voiceText, status: "pending" });
-    setText("");
+    // 清空"刚提交的那个来源"：文件源提交后保留文件（用户可能想换音色再合成一次），
+    // 只清输入框 —— 否则 60 万字的文件被清掉，重选一次要等好几秒。
+    if (source === "text") updateTtsInput({ text: "" });
   }
 
   // 串行派发：没有 synthesizing 任务时取最早的 pending 发出去，一次只发一个 rust_synthesize。
@@ -1766,13 +1848,83 @@ function SynthesizePage() {
       {/* 输入区 */}
       <Card>
         <CardContent className="pt-4 space-y-3">
-          <Textarea
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder={t(locale, "tts.inputPlaceholder")}
-            className="min-h-[100px]"
-            onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) enqueueSynthesize(); }}
-          />
+          {/* 输入源切换：直接输入 vs 导入 TXT（互斥）。
+              用按钮组而不是 Tabs 组件：这里没有"面板"语义，切换只改变下方一个控件。 */}
+          <div className="flex items-center gap-2" role="radiogroup" aria-label={t(locale, "tts.source.type")}>
+            {(["text", "file"] as const).map((k) => (
+              <button
+                key={k}
+                type="button"
+                role="radio"
+                aria-checked={source === k}
+                onClick={() => {
+                  if (source === k) return;
+                  // 只切换来源，**不销毁**另一侧的内容。
+                  // 互斥由 `source` 保证（合成时只取其一），不需要靠清空来"证明"——
+                  // 用户临时改几个字再切回来，不该白白丢掉刚读进来的几十万字文件。
+                  // 真正的清空入口是下面的「清除」按钮（显式、可预期）。
+                  setFileError("");
+                  updateTtsInput({ source: k });
+                }}
+                className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs transition-colors ${
+                  source === k
+                    ? "border-primary bg-primary/10 text-primary"
+                    : "border-border text-muted-foreground hover:border-primary/40"
+                }`}
+              >
+                {k === "text" ? <Pencil className="h-3 w-3" /> : <FileText className="h-3 w-3" />}
+                {t(locale, k === "text" ? "tts.source.text" : "tts.source.file")}
+              </button>
+            ))}
+          </div>
+
+          {source === "text" ? (
+            <Textarea
+              value={text}
+              onChange={(e) => updateTtsInput({ text: e.target.value })}
+              placeholder={t(locale, "tts.inputPlaceholder")}
+              className="min-h-[100px]"
+              onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) enqueueSynthesize(); }}
+            />
+          ) : textFile ? (
+            /* 已导入：只显示摘要，不把全文倒进输入框（几十万字会让受控组件卡死） */
+            <div className="rounded-lg border bg-muted/30 px-3 py-2.5 space-y-1">
+              <div className="flex items-center gap-2">
+                <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 flex-1 truncate text-sm font-medium" title={textFile.path}>
+                  {textFile.name}
+                </span>
+                <Button size="sm" variant="ghost" className="h-7 shrink-0" onClick={() => void pickTextFile()}>
+                  {t(locale, "tts.source.change")}
+                </Button>
+                <Button size="sm" variant="ghost" className="h-7 shrink-0" onClick={clearTextFile}>
+                  {t(locale, "tts.source.clear")}
+                </Button>
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                {synthStats
+                  ? t(locale, "tts.source.stats", {
+                      chars: synthStats.chars.toLocaleString(),
+                      chunks: synthStats.chunks,
+                      minutes: synthStats.minutes,
+                    })
+                  : ""}
+                {" · "}
+                {t(locale, "tts.source.encoding", { enc: textFile.encoding })}
+              </p>
+            </div>
+          ) : (
+            <div className="rounded-lg border border-dashed px-3 py-6 text-center space-y-2">
+              <FileText className="mx-auto h-6 w-6 text-muted-foreground/60" />
+              <p className="text-[11px] text-muted-foreground">{t(locale, "tts.source.emptyHint")}</p>
+              <Button size="sm" variant="outline" disabled={fileBusy} onClick={() => void pickTextFile()}>
+                {fileBusy ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <FileText className="mr-1.5 h-3.5 w-3.5" />}
+                {fileBusy ? t(locale, "tts.source.reading") : t(locale, "tts.source.pick")}
+              </Button>
+            </div>
+          )}
+
+          {fileError && <p className="text-[11px] text-destructive">{fileError}</p>}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               {/* 空值 / 名字查不到 ⇒ 显示「默认音色」，不渲染成 "sid " */}
@@ -1798,7 +1950,7 @@ function SynthesizePage() {
             <Button
               size="sm"
               onClick={enqueueSynthesize}
-              disabled={text.trim() === "" || !canSynth}
+              disabled={synthText.trim() === "" || !canSynth}
             >
               {queued ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Play className="mr-1.5 h-3.5 w-3.5" />}
               {t(locale, "tts.synthesize")}
@@ -1823,7 +1975,9 @@ function SynthesizePage() {
                   return (
                     <div key={task.id} className="rounded-lg border p-3 space-y-1">
                       <div className="flex items-start justify-between gap-2">
-                        <p className="text-sm flex-1 line-clamp-2">{task.text}</p>
+                        {/* 只渲染前 200 字：导入 TXT 后 task.text 可能是几十万字，
+                            line-clamp-2 只是视觉裁切，DOM 里依然是全文 —— 任务列表多几条就卡 */}
+                        <p className="text-sm flex-1 line-clamp-2">{task.text.slice(0, 200)}</p>
                         <Button variant="ghost" size="icon" className="h-6 w-6 shrink-0" onClick={() => useAppStore.getState().removeTtsTask(task.id)}>
                           <Trash2 className="h-3 w-3" />
                         </Button>

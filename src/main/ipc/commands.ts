@@ -42,6 +42,7 @@ import * as apiServer from '../api-server'
 import * as tts from '../tts/commands'
 import { setHotkey } from '../system/hotkey'
 import { openInExplorer } from '../system/explorer'
+import { decodeTextFile, MAX_TEXT_FILE_BYTES } from '@shared/text-file'
 import { listAudioDevices } from '../system/audio-devices'
 
 /** 关闭到托盘标志（内存态，持久化由前端 config.json 负责） */
@@ -529,6 +530,35 @@ export const commands: Record<string, CommandHandler> = {
   },
 
   rust_list_audio_devices: () => listAudioDevices(),
+
+  /**
+   * 读纯文本文件（TTS 导入 TXT）。
+   *
+   * 与 rust_read_audio 的区别不只是白名单：这里要处理编码。
+   * 返回解码后的字符串 + 实际编码，让界面能显示「GB18030」这种线索
+   * （用户看到乱码时至少知道是编码问题，而不是模型抽风）。
+   */
+  rust_read_text_file: async (args) => {
+    const path = str(args, 'path')
+    const ext = extname(path).replace(/^\./, '').toLowerCase()
+    if (!['txt', 'md', 'text'].includes(ext)) {
+      throw new Error(`不支持的文件类型: ${ext}（仅支持 .txt / .md）`)
+    }
+    const data = await readFile(path)
+    if (data.length > MAX_TEXT_FILE_BYTES) {
+      const mb = (MAX_TEXT_FILE_BYTES / 1024 / 1024).toFixed(0)
+      const actual = (data.length / 1024 / 1024).toFixed(1)
+      throw new Error(`文件过大（${actual}MB，上限 ${mb}MB）`)
+    }
+    const decoded = decodeTextFile(new Uint8Array(data))
+    return {
+      text: decoded.text,
+      encoding: decoded.encoding,
+      bytes: decoded.bytes,
+      chars: [...decoded.text].length,
+      raw_chars: decoded.rawChars
+    }
+  },
 
   rust_read_audio: async (args) => {
     // 返回裸字节（前端拿到 ArrayBuffer）——扩展名白名单 + 32MiB 上限。

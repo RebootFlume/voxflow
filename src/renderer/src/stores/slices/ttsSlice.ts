@@ -36,6 +36,22 @@ export interface TtsSlice {
     status: "idle" | "setting" | "ok" | "error";
     error: string;
   };
+  /**
+   * 合成输入（运行态，不持久化）。
+   *
+   * 为什么放在 store 而不是 SynthesizePage 的 useState：TtsPanel 按子页面条件渲染，
+   * 切到「模型与设备」再回来组件会卸载 → 刚导入的 60 万字文本直接消失。
+   * 用户的实际动线就是「先导入文件 → 去加载模型 → 回来合成」，中间必然切页。
+   */
+  ttsInput: {
+    /** 输入源（二选一）：直接输入文本 / 导入的文本文件 */
+    source: "text" | "file";
+    /** 直接输入的文本 */
+    text: string;
+    /** 已导入的文件（null = 未导入）。`body` 是解码后的全文 */
+    file: { path: string; name: string; chars: number; encoding: string; body: string } | null;
+  };
+  updateTtsInput: (patch: Partial<TtsSlice["ttsInput"]>) => void;
   updateTts: (patch: Partial<TtsSlice["tts"]>) => void;
   setTtsModelStatus: (s: TtsSlice["ttsModelStatus"]) => void;
   addTtsTask: (task: Omit<TtsTask, "id">) => number;
@@ -63,6 +79,8 @@ export const createTtsSlice = (set: (partial: Partial<TtsSlice> | ((s: TtsSlice)
   },
   ttsModelStatus: "idle",
   ttsTasks: [],
+  ttsInput: { source: "text", text: "", file: null },
+  updateTtsInput: (patch) => set((s) => ({ ttsInput: { ...s.ttsInput, ...patch } })),
   ttsClone: { active: false, id: "", name: "", audioPath: "", referenceText: "", status: "idle", error: "" },
   updateTts: (patch) => set((s) => ({ tts: { ...s.tts, ...patch } })),
   setTtsModelStatus: (ttsModelStatus) => set({ ttsModelStatus }),

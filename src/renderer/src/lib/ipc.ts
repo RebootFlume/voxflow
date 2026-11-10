@@ -63,6 +63,22 @@ export async function rustReadAudio(path: string): Promise<ArrayBuffer> {
 }
 
 /**
+ * 读纯文本文件（TTS 导入 TXT）。
+ *
+ * 编码识别在主进程做（UTF-8 BOM / UTF-16 BOM / 严格 UTF-8 / GB18030 兜底）——
+ * 中文 TXT 大量是 ANSI，渲染进程拿裸字节自己猜只会猜错。
+ */
+export function rustReadTextFile(path: string): Promise<{
+  text: string
+  encoding: string
+  bytes: number
+  chars: number
+  raw_chars: number
+}> {
+  return invoke('rust_read_text_file', { path })
+}
+
+/**
  * 用系统文件管理器打开目录。
  * 失败时抛出可读原因。
  */
