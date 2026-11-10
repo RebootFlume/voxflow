@@ -304,12 +304,15 @@ export function AsrPanel() {
               </Select>
             </div>
 
-            {/* 当前已加载模型提示 */}
-            {asr.modelStatus === "ready" && (
+            {/* 当前已加载模型提示 —— 读**引擎状态**，不读 UI 选中。
+                此前用 asr.model + asr.framework：只要加载了别的框架的模型，
+                这里就会谎报「当前已加载 X (当前标签的框架)」，
+                而引擎里其实是另一个（同名模型在 llama.cpp 与 audio.cpp 各有一份时尤其明显）。 */}
+            {asr.modelStatus === "ready" && asrEngine.model && (
               <div className="rounded-md border border-sky-500/30 bg-sky-500/5 px-3 py-2 text-xs text-sky-700 dark:text-sky-400">
                 {t(locale, "asr.framework.loaded", {
-                  model: modelDisplayName(modelItems, asr.model),
-                  framework: frameworkKeyLabel(asr.framework, runtimePackages),
+                  model: modelDisplayName(modelItems, asrEngine.model),
+                  framework: loadedFw || frameworkKeyLabel(asr.framework, runtimePackages),
                 })}
                 <span className="ml-2 text-muted-foreground">
                   {t(locale, "asr.framework.switchHint")}

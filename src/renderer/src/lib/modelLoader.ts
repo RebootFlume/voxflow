@@ -165,26 +165,32 @@ export function unloadTtsModel(): Promise<void> {
 }
 
 /**
- * 切换 TTS 推理框架 —— **只改选中，绝不碰引擎**。
+ * 切换 TTS 推理框架 —— **只改框架，绝不碰引擎，也不替用户挑模型**。
  *
  * 加载/卸载只由"点模型卡片""点激活""点应用并重载"触发（见方案：统一加载策略）。
  * 之前这里会直接加载新框架下"第一个已下载"的模型：用户只是想看看另一个框架下有什么模型，
  * 就会被起一个 worker（首次加载 3–8s、吃内存/显存）。
  *
- * 选中项 = 该框架下**你上次选过的那个**（`lastModelByFramework`）；从没选过则谁都不选，
- * 也不替用户挑第一个。
+ * **不再从 `lastModelByFramework` 恢复选中**：那个表按运行时包 key 各存一份，
+ * 跨框架同名模型（Qwen3-ASR-0.6B 同时属于 llama.cpp 与 audio.cpp）会各存一条，
+ * 于是切到哪个标签、哪个标签的同名卡片就立刻高亮 —— 看起来像两个都被选中。
+ * 选中应当由用户点出来，而不是从历史里翻出来。
+ * `lastModelByFramework` 仍然写（启动自动加载要用），只是不再回流到 UI 选中。
+ * `model` 保持原值（不动）：它同时是「上次用过的模型」的持久化来源，
+ * 清空会污染 config、连带废掉启动自动加载。新框架下没有同 id 的卡片，
+ * 自然就不会有任何一个高亮。
  */
 export function selectTtsFramework(framework: string): void {
   const s = useAppStore.getState();
   if (!framework || framework === s.tts.framework) return;
-  s.updateTts({ framework, model: s.tts.lastModelByFramework[framework] ?? "" });
+  s.updateTts({ framework });
 }
 
-/** ASR 版：同样只改选中（切框架不加载、不卸载，也不替用户挑模型） */
+/** ASR 版：同样只改框架（切框架不加载、不卸载，也不替用户挑模型） */
 export function selectAsrFramework(framework: string): void {
   const s = useAppStore.getState();
   if (!framework || framework === s.asr.framework) return;
-  s.updateAsr({ framework, model: s.asr.lastModelByFramework[framework] ?? "" });
+  s.updateAsr({ framework });
 }
 
 /** 启动自动加载只允许发生一次（清单可能在启动期到多次，重复加载无意义） */

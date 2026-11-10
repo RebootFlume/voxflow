@@ -9,17 +9,21 @@
  * - 推理本身在 worker 的 `session-tts.ts`。
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { basename, dirname } from 'node:path'
 import { readWav } from '../audio/wav'
-import { findSpecInLayer, modelRef } from '../models/model-manager'
+import { findSpecInLayer, mainModelFile, modelRef } from '../models/model-manager'
 import type { ModelSpec } from '../models/spec-data'
 import { resolveVoice, voiceListOf } from './speakers'
 import { AudiocppTtsHost } from '../inference/audiocpp-ffi/host'
 import { audiocppRuntimeForDevice } from '../inference/runtime-download'
 import { getGpuInfo } from '../inference/vram'
+import { estimateVramMb, readGgufKvGeometry } from '../inference/gguf-vram'
 import { log } from '../core/logger'
 import type { SynthAudio, TtsEngine } from './traits'
+
+/** 推理 ctx 长度 —— 与 audio.cpp ASR 侧及 llama.cpp 取同一值时，显存账目才可比 */
+const AUDIOCPP_CTX_SIZE = 2048
 
 /** 引擎可变状态 */
 interface AudiocppInner {
@@ -299,8 +303,25 @@ export class AudiocppTtsEngine implements TtsEngine {
     return { samples: reply.samples, sampleRate: reply.sampleRate }
   }
 
+  /**
+   * 显存预估（权重 + KV + 固定开销）。
+   *
+   * 此前直接 `return null` —— TTS 用 audio.cpp 时显存面板不出任何明细。
+   * 口径与 ASR 侧及 llama.cpp 共用 `estimateVramMb`：audio.cpp worker 同为
+   * ggml/CUDA 运行时，账目结构一样；TTS 没有 mmproj，传 0。
+   */
   vramEstimateMb(): number | null {
-    return null
+    const spec = this.inner.spec
+    if (!spec) return null
+    try {
+      const path = mainModelFile(spec, this.inner.modelDir)
+      if (!path) return null
+      const weights = statSync(path).size
+      const geom = readGgufKvGeometry(path)
+      return estimateVramMb(weights, 0, geom, AUDIOCPP_CTX_SIZE)
+    } catch {
+      return null
+    }
   }
 
   /** 退出路径：同步杀掉 worker */

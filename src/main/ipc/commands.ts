@@ -439,16 +439,14 @@ export const commands: Record<string, CommandHandler> = {
   },
 
   rust_get_status: async () => {
-    const llama = await llamaEngine.snapshot()
-    const loaded = llama.loaded
+    // 唯一数据源 = 注册表（它知道是哪个框架的引擎在跑）。
+    // 此前这里只查 llamaEngine：用 sherpa / audio.cpp 加载时快照恒为 loaded:false，
+    // 前端每轮对账把 ready 清成 idle —— 「加载完过一会变未加载，但还能用」。
+    const asrSnap = registry().activeSnapshot()
     const snap = {
       status: 'status_snapshot',
       seq: nextStatusSeq(),
-      asr: {
-        loaded,
-        model: loaded ? llama.model : '',
-        device: loaded ? llama.device : ''
-      },
+      asr: asrSnap,
       recording: false
     }
     emitSidecar(snap)

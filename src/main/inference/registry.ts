@@ -32,6 +32,8 @@ export function findModelSpec(input: string): ModelSpec | undefined {
 export class AsrRegistry {
   private engines = new Map<string, AsrEngine>()
   private activeFramework = ''
+  /** 当前引擎的加载设备（cpu / cuda）—— 状态快照需要它，见 activeSnapshot */
+  private activeDevice = ''
 
   constructor() {
     // llama.cpp → 进程内 FFI（llama.dll + mtmd.dll，worker 子进程隔离崩溃）
@@ -151,6 +153,7 @@ export class AsrRegistry {
     try {
       await engine.loadModelWithStageAndDevice(name, device, onStage)
       this.activeFramework = framework
+      this.activeDevice = device
       return { framework: engine.framework(), model: engine.currentModel() }
     } catch (e) {
       const err = e instanceof Error ? e.message : String(e)
@@ -177,6 +180,7 @@ export class AsrRegistry {
     try {
       await engine.loadModelWithStageAndDevice(prev.model, device, () => {})
       this.activeFramework = prev.framework
+      this.activeDevice = device
       return `${err}；已回滚到 ${prev.model}`
     } catch (e) {
       return `${err}；回滚 ${prev.model} 也失败: ${e instanceof Error ? e.message : String(e)}`
@@ -188,7 +192,10 @@ export class AsrRegistry {
     const e = this.engine(framework)
     if (!e) return
     await e.unload()
-    if (this.activeFramework === framework) this.activeFramework = ''
+    if (this.activeFramework === framework) {
+      this.activeFramework = ''
+      this.activeDevice = ''
+    }
   }
 
   /** 卸载当前已加载的引擎 */
@@ -198,15 +205,30 @@ export class AsrRegistry {
     // 后续判断「引擎在不在跑」会被这份陈旧缓存误导（见 activeEngine 的注释）。
     if (!e) {
       this.activeFramework = ''
+      this.activeDevice = ''
       return
     }
     await e.unload()
     this.activeFramework = ''
+    this.activeDevice = ''
   }
 
   /** 当前已加载引擎的显存估算（MB） */
   activeVramMb(): number | null {
     return this.activeEngine()?.vramEstimateMb() ?? null
+  }
+
+  /**
+   * 当前引擎的真实快照 —— 状态对账（rust_get_status）的唯一数据源。
+   *
+   * 为什么需要它：此前 rust_get_status 只查 llamaEngine.snapshot()，于是
+   * 用 sherpa / audio.cpp 加载时快照恒为 loaded:false，前端收到后把
+   * ready 清成 idle —— 表现为「加载完过一会变未加载，但还能用」。
+   */
+  activeSnapshot(): { loaded: boolean; model: string; device: string } {
+    const e = this.activeEngine()
+    if (!e) return { loaded: false, model: '', device: '' }
+    return { loaded: true, model: e.currentModel(), device: this.activeDevice }
   }
 }
 

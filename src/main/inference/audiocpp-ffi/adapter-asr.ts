@@ -6,10 +6,11 @@
  */
 
 import { cpus } from 'node:os'
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import type { AsrEngine, AsrStageCallback } from '../engine'
 import { findAsrModelSpec } from '../asr-target'
 import { mainModelFile, modelDir } from '../../models/model-manager'
+import { estimateVramMb, readGgufKvGeometry } from '../gguf-vram'
 import { audiocppRuntimeForDevice } from '../runtime-download'
 import { getGpuInfo } from '../vram'
 import { log } from '../../core/logger'
@@ -20,6 +21,13 @@ import type { LoadAsrRequest } from './protocol'
 function defaultThreads(): number {
   return Math.max(1, Math.floor(cpus().length / 2))
 }
+
+/**
+ * audio.cpp 推理的 ctx 长度 —— 与 llama.cpp 的 `DEFAULT_CTX_SIZE` 同值。
+ * audio.cpp 的 C 侧未暴露该参数（走它自己的默认），估算显存时按同口径取，
+ * 保证「同一份权重在两个引擎下显示的占用量级一致」。
+ */
+const AUDIOCPP_CTX_SIZE = 2048
 
 /** audio.cpp ASR 引擎（进程内 FFI） */
 export class AudiocppAsrAdapter implements AsrEngine {
@@ -110,8 +118,31 @@ export class AudiocppAsrAdapter implements AsrEngine {
     return await this.host.transcribe(samples, sampleRate)
   }
 
+  /**
+   * 显存预估（权重 + KV + 固定开销）。
+   *
+   * 此前直接 `return null` —— 于是 audio.cpp 的模型在显存面板上完全不出明细，
+   * 用户看到的是「推理框架未加载或显存信息不可用」，即使引擎正在跑。
+   *
+   * 口径与 llama.cpp 完全一致（同一个 `estimateVramMb`）：audio.cpp worker 也是
+   * ggml/CUDA 运行时，账目结构相同。差别只有 mmproj —— audio.cpp 的 ASR 模型
+   * 是单文件自带前端的（spec 里没有 mmproj 角色），所以传 0。
+   * ctx 也用 2048：audio.cpp 的 C 侧没有暴露 ctx 参数，走的是它自己的默认值。
+   */
   vramEstimateMb(): number | null {
-    return null
+    if (!this.modelName) return null
+    try {
+      const spec = findAsrModelSpec(this.modelName)
+      if (!spec) return null
+      const dir = modelDir(this.modelName)
+      const modelPath = mainModelFile(spec, dir)
+      if (!modelPath) return null
+      const weights = statSync(modelPath).size
+      const geom = readGgufKvGeometry(modelPath)
+      return estimateVramMb(weights, 0, geom, AUDIOCPP_CTX_SIZE)
+    } catch {
+      return null
+    }
   }
 
   /** worker 进程 PID（显存监控按 PID 归因） */
