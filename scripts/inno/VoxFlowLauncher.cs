@@ -4,9 +4,18 @@
 // 壳要做的事很窄 —— 找到 bin\ 里的 Electron、把它拉起来、转发退出码。
 // 故意不碰别的事：单实例、托盘、数据根全部由 Electron 自己管。
 //
-// 编译：.NET Framework 4 的 csc（系统自带，无外部依赖）
+// ── 为什么不能省 ────────────────────────────────────────────────────────
+// InnoSetup 本身是原生程序、不需要 .NET，但**它不会替你造启动器**。
+// 目录布局要求 exe 在根、Electron 在 bin\ —— 根目录那个 exe 必须由别的东西产生。
+// 两个选择：C#（本文件，csc 编译，需 .NET Framework）或原生 C（需 MSVC）。
+// 选 C# 是因为 csc 是 Windows 自带组件，打包机零安装；MSVC 要多装 2GB。
+//
+// 若哪天放弃「根 exe + bin\」布局，改让 Electron 主程序直接放根目录，
+// 这个文件连同 appRootDir() 都能删掉 —— electron-builder 原生就是这样。
+//
+// 编译：.NET Framework 4 的 csc（系统自带）
 //   C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe
-//   /target:winexe /out:VoxFlowLauncher.exe VoxFlowLauncher.cs
+//   /target:winexe /win32icon:build\icon.ico /out:VoxFlowLauncher.exe VoxFlowLauncher.cs
 //
 // 为什么要 winexe：带 /target:winexe 就不弹控制台窗口。
 //

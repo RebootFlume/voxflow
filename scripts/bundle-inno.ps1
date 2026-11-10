@@ -86,7 +86,8 @@ if ($SkipBuild) {
     & node "$root\node_modules\electron-vite\bin\electron-vite.js" build
     if ($LASTEXITCODE -ne 0) { Pop-Location; Write-Error "electron-vite build 失败，中止打包" }
     # --dir 只产出解包目录；不传 --win 就不碰 nsis/dmg 那些安装器 target。
-    # 直接调 cli.js 而不是 npx：这台机器 npm 的 shim 坏了（nvm 的 sh 脚本找不到 node）。
+    # 直接调 cli.js 而不是 npx：少一层进程，且不依赖 npm/npx 是否健康
+    # （此前 nvm 的 npm shim 脱节，bash 里 npm 完全跑不了，只能在 PowerShell 里用）。
     & node "$root\node_modules\electron-builder\cli.js" --dir
     $code = $LASTEXITCODE
     Pop-Location
