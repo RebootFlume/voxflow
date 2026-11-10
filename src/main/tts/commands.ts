@@ -7,7 +7,7 @@
  */
 
 import { existsSync } from 'node:fs'
-import { mkdir, stat, writeFile } from 'node:fs/promises'
+import { mkdir, stat, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { emitSidecar } from '../core/events'
 import { setTtsBusy } from '../api-server'
@@ -15,6 +15,7 @@ import { getDataRoot } from '../core/data-root'
 import { findSpec, modelRef } from '../models/model-manager'
 import { speakerList } from './speakers'
 import { MAX_CHARS_PER_CHUNK, splitText } from '@shared/tts-chunk'
+import { WavStreamWriter } from './wav-writer'
 import { ttsRegistry } from './registry'
 import * as voices from './voices'
 import { recordTo } from './reference-audio'
@@ -135,28 +136,32 @@ export async function listTtsSpeakers(): Promise<Record<string, unknown>> {
 }
 
 /**
- * 逐段合成并拼接 PCM。返回 [样本, 采样率, 是否被取消]。
+ * 逐段合成并**边合成边写盘**。返回 [采样率, 是否被取消]（字节数从 writer 读）。
  *
- * - 取消只在**段与段之间**生效；命中即返回空样本 + true，调用方不落盘。
+ * 为什么不再把所有 PCM 攒在内存里：同一份音频会在内存中存在三份
+ * （分段数组 + 合并目标数组 + 写盘 Buffer），峰值 ≈ 音频总长 × 3。
+ * 2MB 中文 TXT 能解出 37 小时音频（6GB），峰值 18GB，必然 OOM。
+ * 流式写盘后峰值只有「当前这一段」那么大，与文本长度无关。
+ *
+ * - 取消只在**段与段之间**生效；命中即停止，已写入的部分由调用方决定去留。
  * - 单段失败重试一次（子进程偶发启动失败）；仍失败 ⇒ 整单失败，错误点名段号与段首文本。
- * - 采样率不一致视为异常（同一模型不该变），直接失败而不是拼出变速音频。
+ * - 采样率不一致视为异常（同一模型不该变），由 writer 内部拦截并抛错。
  */
 async function synthesizeChunks(
   engine: TtsEngine,
   cancel: TtsCancel,
+  writer: WavStreamWriter,
   chunks: string[],
   voice: string,
   onProgress: (done: number, total: number) => void
-): Promise<{ samples: Int16Array; sampleRate: number; cancelled: boolean }> {
+): Promise<{ sampleRate: number; cancelled: boolean }> {
   const total = chunks.length
-  const parts: Int16Array[] = []
   let sampleRate = 0
-  let totalLength = 0
 
   for (let i = 0; i < chunks.length; i++) {
     const part = chunks[i]
     if (cancel.isCancelled()) {
-      return { samples: new Int16Array(0), sampleRate: 0, cancelled: true }
+      return { sampleRate, cancelled: true }
     }
 
     let audio: SynthAudio
@@ -175,25 +180,13 @@ async function synthesizeChunks(
       }
     }
 
-    if (sampleRate === 0) {
-      sampleRate = audio.sampleRate
-    } else if (audio.sampleRate !== sampleRate) {
-      throw new Error(
-        `分段采样率不一致（${sampleRate} vs ${audio.sampleRate}），已中止以免拼出变速音频`
-      )
-    }
-    parts.push(audio.samples)
-    totalLength += audio.samples.length
+    if (sampleRate === 0) sampleRate = audio.sampleRate
+    // 立即落盘：这一段之后就不再需要留在内存里
+    await writer.append(audio.samples, audio.sampleRate)
     onProgress(i + 1, total)
   }
 
-  const merged = new Int16Array(totalLength)
-  let offset = 0
-  for (const p of parts) {
-    merged.set(p, offset)
-    offset += p.length
-  }
-  return { samples: merged, sampleRate, cancelled: false }
+  return { sampleRate, cancelled: false }
 }
 
 /** 当前本地时间 HHMMSS（对齐 chrono 的 `%H%M%S`） */
@@ -203,7 +196,12 @@ function localTimeStamp(): string {
   return `${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
 }
 
-/** 合成 + 落盘（注册表锁覆盖整个合成，保持 API server 的 503 忙碌语义） */
+/**
+ * 合成 + 落盘（注册表锁覆盖整个合成，保持 API server 的 503 忙碌语义）。
+ *
+ * 文件在**第一段产出之前**就创建好了（`WavStreamWriter.create` 先写占位头），
+ * 之后每段 PCM 直接追加。内存占用只剩当前这一段。
+ */
 export async function synthesize(
   text: string,
   voice: string,
@@ -218,23 +216,6 @@ export async function synthesize(
   const reg = ttsRegistry()
   const engine = reg.active()
   if (!engine) throw new Error('TTS 模型未加载，请先在「模型与设备」中加载模型')
-
-  ttsCancel.begin()
-  // UI 合成期间对外 HTTP API 返回 503（对齐 Rust 的 try_lock 忙碌语义）
-  setTtsBusy(true)
-  let outcome: { samples: Int16Array; sampleRate: number; cancelled: boolean }
-  try {
-    outcome = await synthesizeChunks(engine, ttsCancel, chunks, voice, onProgress)
-  } finally {
-    setTtsBusy(false)
-    ttsCancel.end()
-  }
-
-  if (outcome.cancelled) {
-    // 被取消：不写文件、不算失败（前端按 cancelled 标记任务为「已取消」）
-    return { text, voice, chunks: chunks.length, cancelled: true }
-  }
-  if (outcome.samples.length === 0) throw new Error('合成音频为空')
 
   // 导出目录未设置（试听也走这条路径）→ 落到数据根下的 tts-output。
   // 空串直接 mkdir 会抛 ENOENT: no such file or directory, mkdir ''，
@@ -251,7 +232,39 @@ export async function synthesize(
   const fileName = safeText.trim() ? `${safeText.trim()}_${ts}.wav` : `tts_${ts}.wav`
   const outPath = join(outDir, fileName)
 
-  await writeInt16Wav(outPath, outcome.samples, Math.max(outcome.sampleRate, 1))
+  const writer = await WavStreamWriter.create(outPath)
+
+  ttsCancel.begin()
+  // UI 合成期间对外 HTTP API 返回 503（对齐 Rust 的 try_lock 忙碌语义）
+  setTtsBusy(true)
+  let outcome: { sampleRate: number; cancelled: boolean }
+  try {
+    outcome = await synthesizeChunks(engine, ttsCancel, writer, chunks, voice, onProgress)
+  } catch (e) {
+    // 失败：已写入的部分仍然回填空头 —— 跑了很久才失败时，前面的音频扔掉才是浪费。
+    // 一段都没成功（bytes === 0）则删掉这个空壳文件。
+    // 把产物路径补进错误信息，否则文件躺在盘上而用户以为什么都没留下。
+    const msg = e instanceof Error ? e.message : String(e)
+    if (writer.bytes > 0) {
+      const ok = await writer.finalize().then(() => true).catch(() => false)
+      throw new Error(
+        ok ? `${msg}（已保留此前合成好的部分：${outPath}）` : msg
+      )
+    }
+    await writer.discard().catch(() => {})
+    throw e
+  } finally {
+    setTtsBusy(false)
+    ttsCancel.end()
+  }
+
+  const dataBytes = await writer.finalize()
+
+  if (dataBytes === 0) {
+    // 一段都没产出（第一段就被取消）⇒ 不留下 44 字节的空 WAV
+    await unlink(outPath).catch(() => {})
+    return { text, voice, chunks: chunks.length, cancelled: true }
+  }
 
   const fileSize = (await stat(outPath)).size
   const sizeStr =
@@ -266,36 +279,9 @@ export async function synthesize(
     saved_path: outPath,
     size: sizeStr,
     chunks: chunks.length,
-    cancelled: false
+    // 取消后仍然返回已产出的部分（saved_path 有效）：没跑完但能听
+    cancelled: outcome.cancelled
   }
-}
-
-/** 写 16bit 单声道 WAV（与 hound 的 WavSpec{channels:1, bits:16, int} 一致）
- *
- * 采样数据一次性转成 Buffer 再异步落盘：
- * 逐样本 `writeInt16LE` 是 N 次 JS 调用，长文本合成时会把 Electron 主线程占住数秒
- * （表现为整个窗口无响应）；`writeFile` 走线程池，不占主线程。
- */
-async function writeInt16Wav(path: string, samples: Int16Array, sampleRate: number): Promise<void> {
-  const dataBytes = samples.length * 2
-  const header = Buffer.alloc(44)
-  header.write('RIFF', 0, 'ascii')
-  header.writeUInt32LE(36 + dataBytes, 4)
-  header.write('WAVE', 8, 'ascii')
-  header.write('fmt ', 12, 'ascii')
-  header.writeUInt32LE(16, 16)
-  header.writeUInt16LE(1, 20)
-  header.writeUInt16LE(1, 22)
-  header.writeUInt32LE(sampleRate, 24)
-  header.writeUInt32LE(sampleRate * 2, 28)
-  header.writeUInt16LE(2, 32)
-  header.writeUInt16LE(16, 34)
-  header.write('data', 36, 'ascii')
-  header.writeUInt32LE(dataBytes, 40)
-
-  // Int16Array → 原始字节：一次 memcpy 取代逐样本写入（长度按字节算，避免尾字节错位）
-  const body = Buffer.from(new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength))
-  await writeFile(path, Buffer.concat([header, body]))
 }
 
 /** 取消正在进行的合成（段边界生效） */

@@ -47,6 +47,16 @@ function describeIpcError(e: unknown): string {
   const raw = e instanceof Error ? e.message : String(e);
   return raw.replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, "");
 }
+
+/**
+ * WAV 可容纳的最长音频（分钟）。
+ *
+ * RIFF 的 data 段是 32 位字节数，上限 4GB。24kHz / 16bit / 单声道 = 48KB/s，
+ * 4GB ≈ 24.9 小时。留一点余量按 24 小时算；按 5 字/秒 ≈ 43 万字。
+ * 主进程（wav-writer 的 MAX_WAV_DATA_BYTES）也会拦，这里是提前提示。
+ */
+const WAV_MAX_MINUTES = 24 * 60;
+
 // ============================================================
 // 模型与设备子页面
 // ============================================================
@@ -1530,7 +1540,13 @@ function SynthesizePage() {
     const chars = [...trimmed].length;
     // 中文朗读约 5 字/秒；只用于"要等多久"的量级提示，界面明确写「约」
     const minutes = Math.max(1, Math.round(chars / 5 / 60));
-    return { chars, chunks, minutes };
+    /**
+     * 超过这行长度的文本不必再往后端送 —— WAV 的 data 段是 32 位字节数，
+     * 封顶 4GB（24kHz/16bit/mono ≈ 24.9 小时 ≈ 45 万字）。
+     * 提前拦下比让用户等几小时后拿到一个播放器打不开的文件强。
+     */
+    const tooLong = minutes > WAV_MAX_MINUTES;
+    return { chars, chunks, minutes, tooLong };
   }, [synthText]);
   /** 参数控件表：哪个字段可编辑 / 只能只读展示 / 根本不出现，由模型能力决定 */
   const controls = useMemo(() => ttsParamControls(modelInfo), [modelInfo]);
@@ -1668,9 +1684,20 @@ function SynthesizePage() {
       };
       const cur = useAppStore.getState();
       if (res.cancelled === true) {
-        // 段边界取消：invoke 正常返回但没有产物 ⇒ 终态"已取消"
-        cur.addLog(`[synthesize] cancelled: "${task.text.slice(0, 40)}"`, "warn");
-        cur.updateTtsTask(task.id, { status: "cancelled", cancelling: false, progress: undefined });
+        // 段边界取消。流式写盘后**可能已经有产物**：跑到一半取消，
+        // 前半段音频还在盘上且可播放 —— 有就保留，别让用户白等。
+        const partial = String(res.saved_path || "");
+        cur.addLog(
+          `[synthesize] cancelled${partial ? `（已保留部分产物 ${res.size || ""}）` : ""}: "${task.text.slice(0, 40)}"`,
+          "warn",
+        );
+        cur.updateTtsTask(task.id, {
+          status: "cancelled",
+          cancelling: false,
+          progress: undefined,
+          savedPath: partial || undefined,
+          fileSize: partial ? String(res.size || "") : undefined,
+        });
       } else {
         cur.addLog(`[synthesize] done: ${String(res.saved_path || "")} size=${String(res.size || "")}`, "success");
         cur.updateTtsTask(task.id, {
@@ -1912,6 +1939,9 @@ function SynthesizePage() {
                 {" · "}
                 {t(locale, "tts.source.encoding", { enc: textFile.encoding })}
               </p>
+              {synthStats?.tooLong && (
+                <p className="text-[11px] text-destructive">{t(locale, "tts.source.tooLong")}</p>
+              )}
             </div>
           ) : (
             <div className="rounded-lg border border-dashed px-3 py-6 text-center space-y-2">
@@ -1950,7 +1980,7 @@ function SynthesizePage() {
             <Button
               size="sm"
               onClick={enqueueSynthesize}
-              disabled={synthText.trim() === "" || !canSynth}
+              disabled={synthText.trim() === "" || !canSynth || synthStats?.tooLong === true}
             >
               {queued ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Play className="mr-1.5 h-3.5 w-3.5" />}
               {t(locale, "tts.synthesize")}
@@ -2000,7 +2030,8 @@ function SynthesizePage() {
                         {task.status === "error" && (
                           <Badge variant="destructive">{task.error || t(locale, "tts.task.error")}</Badge>
                         )}
-                        {task.status === "done" && (
+                        {/* 取消也可能留下部分产物（流式写盘边合成边落盘），有路径就能听 */}
+                        {task.savedPath && (task.status === "done" || task.status === "cancelled") && (
                           <Button variant="ghost" size="sm" className="h-6 px-2" onClick={() => playAudio(task)}>
                             <Play className="h-3 w-3" />
                             {audio.playing === task.savedPath ? t(locale, "tts.stop") : t(locale, "tts.play")}
@@ -2030,7 +2061,10 @@ function SynthesizePage() {
                       )}
                       {task.savedPath && (
                         <p className="text-[11px] text-emerald-600 dark:text-emerald-400 truncate" title={task.savedPath}>
-                          ✓ {t(locale, "tts.saved")}
+                          {task.status === "cancelled" ? "·" : "✓"}{" "}
+                          {task.status === "cancelled"
+                            ? t(locale, "tts.savedPartial")
+                            : t(locale, "tts.saved")}
                         </p>
                       )}
                     </div>

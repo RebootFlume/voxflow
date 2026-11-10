@@ -449,9 +449,11 @@ const DICTS: Record<Locale, Dict> = {
     "tts.source.pick": "选择文本文件",
     "tts.source.change": "更换",
     "tts.source.clear": "清除",
-    "tts.source.emptyHint": "支持 .txt / .md，最大 2 MB；自动识别 UTF-8 与 GBK 编码",
+    "tts.source.emptyHint": "支持 .txt / .md，最大 10 MB；自动识别 UTF-8 与 GBK 编码",
     "tts.source.stats": "{chars} 字 · {chunks} 段 · 约 {minutes} 分钟音频",
     "tts.source.encoding": "编码 {enc}",
+    /** 超过 WAV 32 位长度上限（约 25 小时）：提前拦下，而不是让用户等几小时后拿到打不开的文件 */
+    "tts.source.tooLong": "文本太长，超出 WAV 约 25 小时的时长上限，请拆成多份合成",
     "tts.source.reading": "正在读取…",
     "tts.source.readFailed": "读取失败：{msg}",
     "tts.taskList": "任务列表",
@@ -465,6 +467,8 @@ const DICTS: Record<Locale, Dict> = {
     "tts.task.progress": "第 {chunk}/{chunks} 段",
     "tts.play": "播放",
     "tts.saved": "已保存",
+    /** 取消时已产出的部分音频（流式写盘边合成边落盘，跑到一半停下也有东西可听） */
+    "tts.savedPartial": "已保存已合成的部分",
     "tts.analyzing": "正在分析音频...",
     // Hardcoded text replacements
     "common.minimize": "最小化",
@@ -931,9 +935,10 @@ const DICTS: Record<Locale, Dict> = {
     "tts.source.pick": "Choose text file",
     "tts.source.change": "Change",
     "tts.source.clear": "Clear",
-    "tts.source.emptyHint": ".txt / .md up to 2 MB; UTF-8 and GBK are auto-detected",
+    "tts.source.emptyHint": ".txt / .md up to 10 MB; UTF-8 and GBK are auto-detected",
     "tts.source.stats": "{chars} chars · {chunks} segments · about {minutes} min of audio",
     "tts.source.encoding": "Encoding {enc}",
+    "tts.source.tooLong": "Text is too long for a single WAV file (about 25 h max); split it into several runs",
     "tts.source.reading": "Reading…",
     "tts.source.readFailed": "Failed to read: {msg}",
     "tts.taskList": "Task list",
@@ -947,6 +952,7 @@ const DICTS: Record<Locale, Dict> = {
     "tts.task.progress": "Segment {chunk}/{chunks}",
     "tts.play": "Play",
     "tts.saved": "Saved",
+    "tts.savedPartial": "Saved the part completed so far",
     "tts.analyzing": "Analyzing audio...",
     // Hardcoded text replacements
     "common.minimize": "Minimize",

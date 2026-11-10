@@ -14,6 +14,7 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { once } from 'node:events'
 import { existsSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { extname, join } from 'node:path'
@@ -23,6 +24,7 @@ import { decodeWav } from './audio/wav'
 import { registry } from './inference/registry'
 import { transcribeLong } from './inference/transcribe'
 import { splitText, MAX_CHARS_PER_CHUNK } from '@shared/tts-chunk'
+import { wavHeader } from './tts/wav-writer'
 import { ttsRegistry } from './tts/registry'
 
 export interface ApiConfig {
@@ -262,35 +264,69 @@ async function handleTts(res: ServerResponse, body: Buffer): Promise<void> {
     return
   }
 
-  // 与 UI 侧同一条实现（长文本分段 + 拼接）；HTTP 侧无取消入口 ⇒ 一次性令牌（恒不取消）
+  // 与 UI 侧同一条实现（长文本分段）；HTTP 侧无取消入口 ⇒ 一次性令牌（恒不取消）
   const chunks = splitText(input, MAX_CHARS_PER_CHUNK)
   if (chunks.length === 0) {
     sendJson(res, 400, errorJson(400, 'empty text'))
     return
   }
+
+  // 边合成边发：不攒内存，也不攒响应体。
+  // 以前是 `Int16Array[] → merged → wavFromI16` 全量驻留，长文本必然 OOM ——
+  // 音频总长 × 3 倍内存（分段数组 + 合并数组 + 编码 Buffer）。
+  // 流式之后内存只有「当前一段」，客户端也能边收边播。
+  //
+  // 头必须等第一段合成完才能发：采样率要由引擎真实输出决定，
+  // 事前猜一个会把整条流的速率写错（听上去全部变调）。代价只是首字节晚一段的时间。
+  // 客户端中途挂断：继续合成只是白烧 GPU，而且 drain 永远不会再来。
+  let aborted = false
+  res.on('close', () => {
+    if (!res.writableEnded) aborted = true
+  })
+
   try {
-    const samples: Int16Array[] = []
-    let sampleRate = 0
+    let headerSent = false
     for (const part of chunks) {
+      if (aborted) {
+        log.info(`[api] TTS 客户端已断开，中止剩余分段`)
+        return
+      }
       const audio = await engine.synthesize(part, voice)
-      if (sampleRate === 0) sampleRate = audio.sampleRate
-      samples.push(audio.samples)
+      if (audio.samples.length === 0) continue
+
+      if (!headerSent) {
+        // data 段长度未知 ⇒ RIFF 约定用 0xFFFFFFFF（ffmpeg 等按流式处理）
+        res.writeHead(200, {
+          'Content-Type': 'audio/wav',
+          'Transfer-Encoding': 'chunked'
+        })
+        res.write(wavHeader(0xffffffff, audio.sampleRate))
+        headerSent = true
+      }
+      const ok = res.write(
+        Buffer.from(audio.samples.buffer, audio.samples.byteOffset, audio.samples.byteLength)
+      )
+      // 背压：write 返回 false 表示发送缓冲已满（客户端慢/网络差）。
+      // 不等 drain 继续写，Node 会把这个客户端的所有音频攒在内存里 ——
+      // 流式写盘省下来的内存又被 HTTP 缓冲吃回去。
+      if (!ok) {
+        // 同时等 close：客户端断开时 'drain' 永远不会触发，单等它会卡死在这里
+        await Promise.race([once(res, 'drain'), once(res, 'close')])
+        if (aborted) return
+      }
     }
-    const merged = new Int16Array(samples.reduce((n, s) => n + s.length, 0))
-    let offset = 0
-    for (const s of samples) {
-      merged.set(s, offset)
-      offset += s.length
-    }
-    if (merged.length === 0) {
+
+    if (!headerSent) {
       sendJson(res, 500, errorJson(500, 'TTS returned empty audio'))
       return
     }
-    // 3. 编码为 WAV（采样率与 PCM 一致）
-    const wavBytes = wavFromI16(merged, sampleRate)
-    res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': wavBytes.length })
-    res.end(wavBytes)
+    if (!aborted) res.end()
   } catch (e) {
+    // 头已发出去就不能再改状态码 —— 只能掐断连接，让客户端看到传输不完整
+    if (res.headersSent) {
+      res.destroy(e instanceof Error ? e : new Error(String(e)))
+      return
+    }
     sendJson(
       res,
       500,
@@ -316,32 +352,6 @@ function errorJson(code: number, message: string): Record<string, unknown> {
 
 function isWav(data: Buffer): boolean {
   return data.length >= 4 && data.toString('ascii', 0, 4) === 'RIFF'
-}
-
-/** i16 PCM → 内存 WAV（采样率由调用方传入） */
-export function wavFromI16(samples: Int16Array, sampleRate: number): Buffer {
-  const sr = Math.max(sampleRate, 1)
-  const dataBytes = samples.length * 2
-  const header = Buffer.alloc(44)
-  header.write('RIFF', 0, 'ascii')
-  header.writeUInt32LE(36 + dataBytes, 4)
-  header.write('WAVE', 8, 'ascii')
-  header.write('fmt ', 12, 'ascii')
-  header.writeUInt32LE(16, 16)
-  header.writeUInt16LE(1, 20)
-  header.writeUInt16LE(1, 22)
-  header.writeUInt32LE(sr, 24)
-  header.writeUInt32LE(sr * 2, 28)
-  header.writeUInt16LE(2, 32)
-  header.writeUInt16LE(16, 34)
-  header.write('data', 36, 'ascii')
-  header.writeUInt32LE(dataBytes, 40)
-
-  const body = Buffer.alloc(dataBytes)
-  for (let i = 0; i < samples.length; i++) {
-    body.writeInt16LE(samples[i], i * 2)
-  }
-  return Buffer.concat([header, body])
 }
 
 // ─── Multipart 解析（手写：node:http 无内置 multipart）──────────────────────
