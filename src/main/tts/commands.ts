@@ -10,7 +10,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, stat, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { emitSidecar } from '../core/events'
-import { setTtsBusy } from '../api-server'
+import { isTtsBusy, setTtsBusy } from '../api-server'
 import { getDataRoot } from '../core/data-root'
 import { findSpec, modelRef } from '../models/model-manager'
 import { speakerList } from './speakers'
@@ -26,6 +26,44 @@ export const ttsCancel = new TtsCancel()
 
 /** 未设置导出目录时的落盘位置（数据根下 `tts-output/`） */
 const DEFAULT_EXPORT_DIR = 'tts-output'
+
+/**
+ * 解析实际落盘目录（未设置 → 数据根下的默认位置）。
+ *
+ * 单独导出的理由：界面要能把「你没设，我存在这里」显示出来 ——
+ * 否则用户合成成功了却不知道去哪找（界面上写着"未设置"）。
+ */
+export function resolveExportDir(exportDir: string): string {
+  return exportDir.trim() || join(getDataRoot(), DEFAULT_EXPORT_DIR)
+}
+
+/**
+ * 确保导出目录存在并返回它。
+ *
+ * 为什么需要：`tts-output/` 只在第一次落盘时创建，而用户很可能在合成之前
+ * 就想点「打开文件夹」看看存哪 —— 不先建目录的话 shell.openPath 会直接
+ * 返回 "Failed to open path"，看起来像功能坏了。
+ * 用户自己选的目录同理（可能已被删除/移动）。
+ */
+export async function ensureExportDir(exportDir: string): Promise<string> {
+  const dir = resolveExportDir(exportDir)
+  await mkdir(dir, { recursive: true })
+  return dir
+}
+
+/**
+ * 合成进行中禁止改动引擎参数。
+ *
+ * 为什么必须有这一道：引擎在**每一段**都重新读 `inner.language` / `inner.instruct` /
+ * `sid`，中途改掉会让同一个 WAV 文件前半段是一种语言/音色、后半段是另一种，
+ * 而且不会报任何错 —— 用户只是拿到一个"听起来哪里不对"的文件。
+ *
+ * 前端会把这些控件置灰，但那只是体验层；HTTP API 走的是同一条引擎，
+ * 其他调用方照样能改。正确性不能依赖前端记得禁用按钮。
+ */
+function assertNotSynthesizing(what: string): void {
+  if (isTtsBusy()) throw new Error(`合成进行中，无法修改${what}（否则同一个文件前后不一致）`)
+}
 
 /** 音色库目录（数据根下 `tts-voices/`） */
 export function voicesDir(): string {
@@ -77,6 +115,7 @@ export async function unloadTtsModel(): Promise<Record<string, unknown>> {
  * 与克隆互不干扰：描述可以单独用，也可以和预设音色一起用；空串 = 关闭。
  */
 export async function setTtsInstruct(text: string): Promise<Record<string, unknown>> {
+  assertNotSynthesizing('音色描述')
   const engine = ttsRegistry().active()
   if (!engine) throw new Error('TTS 模型未加载')
   if (!engine.setInstruct) throw new Error('当前引擎不支持音色描述')
@@ -89,6 +128,7 @@ export async function setTtsCloneVoice(
   audioPath: string,
   referenceText: string
 ): Promise<Record<string, unknown>> {
+  assertNotSynthesizing('克隆音色')
   const engine = ttsRegistry().active()
   if (!engine) throw new Error('TTS 模型未加载')
   await engine.setCloneVoice(audioPath, referenceText)
@@ -103,6 +143,7 @@ export async function setTtsCloneVoice(
  * - 音色库的 `active_id`——否则下次 TTS 模型就绪时按它恢复，会把用户**刚取消的克隆装回来**。
  */
 export async function clearTtsCloneVoice(): Promise<Record<string, unknown>> {
+  assertNotSynthesizing('克隆音色')
   ttsRegistry().active()?.clearCloneVoice()
   voices.clearActive(voicesDir())
   return { status: 'ok' }
@@ -110,6 +151,7 @@ export async function clearTtsCloneVoice(): Promise<Record<string, unknown>> {
 
 /** 切换 TTS 语言（按模型描述符校验） */
 export async function setTtsLanguage(language: string): Promise<Record<string, unknown>> {
+  assertNotSynthesizing('合成语言')
   const lang = language.trim().toLowerCase()
   const engine = ttsRegistry().active()
   if (!engine) throw new Error('TTS 模型未加载')
@@ -220,7 +262,7 @@ export async function synthesize(
   // 导出目录未设置（试听也走这条路径）→ 落到数据根下的 tts-output。
   // 空串直接 mkdir 会抛 ENOENT: no such file or directory, mkdir ''，
   // 用户在「音色设置」点试听就只看到一句莫名其妙的内核错误。
-  const outDir = exportDir.trim() || join(getDataRoot(), DEFAULT_EXPORT_DIR)
+  const outDir = resolveExportDir(exportDir)
   // 建目录改异步：Electron 主线程做同步 IO 会让窗口卡住（长文本合成时尤其明显）
   if (!existsSync(outDir)) await mkdir(outDir, { recursive: true })
 
@@ -356,6 +398,7 @@ export function removeVoice(id: string): { ok: true } {
  * 顺序不可反（否则库里显示已选中、引擎里根本没有这份参数 = 谎报）。
  */
 export async function useVoice(id: string): Promise<{ ok: true; name: string }> {
+  assertNotSynthesizing('音色')
   const dir = voicesDir()
   const lib = voices.load(dir)
   const voice = lib.voices.find((v) => v.id === id)

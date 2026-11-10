@@ -437,6 +437,12 @@ const DICTS: Record<Locale, Dict> = {
     "tts.exportDir": "导出到",
     "tts.stop": "停止",
     "tts.exportDir.empty": "未设置",
+    /** 没设目录时显示的是默认位置（跟随数据根），标注一下免得用户以为是自己的设置 */
+    "tts.exportDir.defaultTag": "默认位置",
+    /** 合成期间锁定参数的原因：引擎每段都重读参数，中途改会让同一文件前后不一致 */
+    "tts.paramsLocked": "合成进行中，参数已临时锁定（中途改动会让同一个文件前后不一致）",
+    "tts.openFolder": "打开文件夹",
+    "tts.showInFolder": "打开位置",
     "tts.browse": "浏览",
     "tts.inputPlaceholder": "输入要合成的文字...",
     "tts.voiceLabel": "音色",
@@ -923,6 +929,10 @@ const DICTS: Record<Locale, Dict> = {
     "tts.exportDir": "Export to",
     "tts.stop": "Stop",
     "tts.exportDir.empty": "Not set",
+    "tts.exportDir.defaultTag": "default",
+    "tts.paramsLocked": "Synthesizing — parameters are locked so one file stays consistent",
+    "tts.openFolder": "Open folder",
+    "tts.showInFolder": "Show in folder",
     "tts.browse": "Browse",
     "tts.inputPlaceholder": "Type text to synthesize...",
     "tts.voiceLabel": "Voice",

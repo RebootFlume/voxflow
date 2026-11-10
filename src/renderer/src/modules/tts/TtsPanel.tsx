@@ -29,6 +29,9 @@ import {
   rustTtsVoiceRemove,
   rustTtsVoiceUse,
   rustReadTextFile,
+  rustDefaultExportDir,
+  rustOpenInExplorer,
+  rustOpenExportDir,
   type TtsVoiceItem,
 } from "@/lib/ipc";
 import { MAX_CHARS_PER_CHUNK, splitText } from "@shared/tts-chunk";
@@ -1357,7 +1360,7 @@ function useTtsSpeakers() {
  * 合成语言控件。形态完全由能力表决定（见 ttsCapabilities.ts）：
  * `edit` 只是 select 一种，其余是「为什么不能选」的徽标。
  */
-function LanguageSelector({ control }: { control: TtsParamControl }) {
+function LanguageSelector({ control, disabled }: { control: TtsParamControl; disabled?: boolean }) {
   const locale = useAppStore((s) => s.locale);
   const language = useAppStore((s) => s.tts.language);
   const ttsModel = useAppStore((s) => s.tts.model);
@@ -1409,10 +1412,11 @@ function LanguageSelector({ control }: { control: TtsParamControl }) {
   return (
     <Select
       value={language}
+      disabled={disabled}
       onValueChange={(v) => {
         updateTts({ language: v });
-        void rustSetTtsLanguage(v).catch(() => {
-          useAppStore.getState().addLog(`[tts] switch language failed: ${v}`, "error");
+        void rustSetTtsLanguage(v).catch((e) => {
+          useAppStore.getState().addLog(`[tts] switch language failed: ${v}: ${String(e)}`, "error");
         });
       }}
     >
@@ -1452,6 +1456,21 @@ function SynthesizePage() {
   const inFlightRef = useRef<number | null>(null);
   /** 队列里还有未跑完的任务（只驱动按钮 spinner，不参与 disabled —— 合成中仍可继续排队） */
   const queued = tasks.some((t) => t.status === "pending" || t.status === "synthesizing");
+  /**
+   * 是否有任务**正在合成**（注意：pending 不算）。
+   *
+   * 用于锁住会影响「正在产出的那个文件」的参数。为什么要锁：
+   * 引擎在**每一段**都重新读自己的 language / instruct / sid，
+   * 中途改掉会让同一个 WAV 前半段是一种语言/音色、后半段是另一种，
+   * 而且不会报任何错 —— 用户只是拿到一个"听起来哪里不对"的文件。
+   *
+   * 不锁 pending 状态：排队期间禁掉参数等于把"边跑边排下一批"废掉，
+   * 而 pending 的任务还没开始读参数，改了不影响任何东西。
+   *
+   * 输入区（直接输入 / 导入 TXT）**也不锁**：task.text 是入队快照，
+   * 编辑它不会影响已经在跑的任务。
+   */
+  const synthesizing = tasks.some((t) => t.status === "synthesizing");
   const audio = useAudioPreview();
   const { speakers } = useTtsSpeakers();
   /** 克隆音色库：合成页的音色下拉要能选到它们（来源与预设不同，合并成一份列表） */
@@ -1590,6 +1609,29 @@ function SynthesizePage() {
 
   // 共享导出目录（与 ASR 转写共用一份）
   const { exportDir, setExportDir } = useExportDir();
+  /**
+   * 用户没设导出目录时的实际落盘位置。
+   *
+   * 只用于**回显**，绝不写回 config：默认值必须跟着数据根走（便携版换目录要自动跟随），
+   * 存成绝对路径就锁死了。所以"未设置"这个状态在配置里保持不变，
+   * 界面上显示真实路径 —— 否则用户合成成功了却不知道去哪找。
+   */
+  const [defaultExportDir, setDefaultExportDir] = useState("");
+  useEffect(() => {
+    let alive = true;
+    void rustDefaultExportDir()
+      .then((r) => {
+        if (alive) setDefaultExportDir(r.path);
+      })
+      .catch(() => {
+        /* 拿不到就不回显，退回"未设置"文案，不阻断合成 */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  /** 实际生效的目录（用户选了就用选的，否则用默认） */
+  const effectiveExportDir = exportDir || defaultExportDir;
 
   const browseDir = useCallback(async () => {
     const picked = await window.voxflow.openDialog({
@@ -1760,6 +1802,14 @@ function SynthesizePage() {
     <div className="space-y-4">
       <Card>
         <CardContent className="space-y-1 p-4">
+          {/* 置灰必须给原因：不给理由的禁用只会让人以为界面卡了。
+              顺带解释了"为什么"——不是防误触，是防止同一个文件前后不一致。 */}
+          {synthesizing && (
+            <div className="mb-2 flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+              <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+              {t(locale, "tts.paramsLocked")}
+            </div>
+          )}
           <div className="flex h-10 items-center gap-4">
             <span className="w-20 shrink-0 text-sm font-medium">{t(locale, "tts.model")}</span>
             <div className="flex flex-1 items-center">
@@ -1770,7 +1820,7 @@ function SynthesizePage() {
             <div className="flex h-10 items-center gap-4">
               <span className="w-20 shrink-0 text-sm font-medium">{t(locale, "tts.language")}</span>
               <div className="flex flex-1 items-center">
-                <LanguageSelector control={controls.language} />
+                <LanguageSelector control={controls.language} disabled={synthesizing} />
               </div>
             </div>
           )}
@@ -1781,7 +1831,11 @@ function SynthesizePage() {
               {voiceSelectable ? (
                 /* 唯一设置点：预设与克隆合并在一个下拉里，用前缀区分值域。
                    选预设会自动退出克隆，选克隆会立刻把参考音频下发给引擎。 */
-                <Select value={voiceSelectValue} onValueChange={(v) => void changeVoice(v)}>
+                <Select
+                  value={voiceSelectValue}
+                  disabled={synthesizing}
+                  onValueChange={(v) => void changeVoice(v)}
+                >
                   <SelectTrigger className="h-8 w-56">
                     <SelectValue placeholder={t(locale, "tts.voice.selectPlaceholder")} />
                   </SelectTrigger>
@@ -1831,6 +1885,7 @@ function SynthesizePage() {
               <div className="flex min-w-0 flex-1 items-start gap-2">
                 <Textarea
                   id="tts-instruct"
+                  disabled={synthesizing}
                   value={tts.instruct}
                   onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => {
                     updateTts({ instruct: e.target.value });
@@ -1845,7 +1900,7 @@ function SynthesizePage() {
                   variant="outline"
                   size="sm"
                   className="h-8 shrink-0"
-                  disabled={!tts.instruct.trim()}
+                  disabled={!tts.instruct.trim() || synthesizing}
                   onClick={() => {
                     updateTts({ instruct: "" });
                     if (instructTimer.current) {
@@ -1863,7 +1918,36 @@ function SynthesizePage() {
           <div className="flex h-10 items-center gap-4">
             <span className="w-20 shrink-0 text-sm font-medium">{t(locale, "tts.exportDir")}</span>
             <div className="flex flex-1 items-center gap-2">
-              <span className="flex-1 truncate rounded-md border bg-muted px-3 py-1.5 text-xs font-mono">{exportDir || t(locale, "tts.exportDir.empty")}</span>
+              {/* 没设目录时显示**实际落盘位置**而不是"未设置"：
+                  否则用户合成成功了却不知道文件去哪了。
+                  灰色斜体标明这是默认值，不是用户选的。 */}
+              <span
+                className={`flex-1 truncate rounded-md border bg-muted px-3 py-1.5 text-xs font-mono ${
+                  exportDir ? "" : "italic text-muted-foreground"
+                }`}
+                title={effectiveExportDir || undefined}
+              >
+                {effectiveExportDir || t(locale, "tts.exportDir.empty")}
+              </span>
+              {!exportDir && effectiveExportDir && (
+                <span className="shrink-0 text-[10px] text-muted-foreground">
+                  {t(locale, "tts.exportDir.defaultTag")}
+                </span>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 shrink-0"
+                disabled={!effectiveExportDir}
+                onClick={() => {
+                  if (!effectiveExportDir) return;
+                  void rustOpenExportDir(exportDir).catch((e) => {
+                    useAppStore.getState().addLog(`[tts] 打开导出目录失败: ${String(e)}`, "error");
+                  });
+                }}
+              >
+                {t(locale, "tts.openFolder")}
+              </Button>
               <Button variant="outline" size="sm" className="h-8 shrink-0" onClick={() => void browseDir()}>
                 {t(locale, "tts.browse")}
               </Button>
@@ -2060,12 +2144,29 @@ function SynthesizePage() {
                         </div>
                       )}
                       {task.savedPath && (
-                        <p className="text-[11px] text-emerald-600 dark:text-emerald-400 truncate" title={task.savedPath}>
-                          {task.status === "cancelled" ? "·" : "✓"}{" "}
-                          {task.status === "cancelled"
-                            ? t(locale, "tts.savedPartial")
-                            : t(locale, "tts.saved")}
-                        </p>
+                        <div className="flex items-center gap-2">
+                          <p
+                            className="min-w-0 flex-1 truncate text-[11px] text-emerald-600 dark:text-emerald-400"
+                            title={task.savedPath}
+                          >
+                            {task.status === "cancelled" ? "·" : "✓"}{" "}
+                            {task.status === "cancelled"
+                              ? t(locale, "tts.savedPartial")
+                              : t(locale, "tts.saved")}
+                          </p>
+                          {/* 有路径却没法打开，等于让用户自己去找 —— 长文件名 + 时间戳更难认 */}
+                          <button
+                            type="button"
+                            className="shrink-0 text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                            onClick={() => {
+                              void rustOpenInExplorer(task.savedPath!).catch((e) => {
+                                useAppStore.getState().addLog(`[tts] 打开文件失败: ${String(e)}`, "error");
+                              });
+                            }}
+                          >
+                            {t(locale, "tts.showInFolder")}
+                          </button>
+                        </div>
                       )}
                     </div>
                   );

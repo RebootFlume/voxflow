@@ -534,7 +534,7 @@ export const commands: Record<string, CommandHandler> = {
   /**
    * 读纯文本文件（TTS 导入 TXT）。
    *
-   * 与 rust_read_audio 的区别不只是白名单：这里要处理编码。
+   * 与音频播放协议的入口不同：这里不只是白名单，还要处理编码。
    * 返回解码后的字符串 + 实际编码，让界面能显示「GB18030」这种线索
    * （用户看到乱码时至少知道是编码问题，而不是模型抽风）。
    */
@@ -558,22 +558,6 @@ export const commands: Record<string, CommandHandler> = {
       chars: [...decoded.text].length,
       raw_chars: decoded.rawChars
     }
-  },
-
-  rust_read_audio: async (args) => {
-    // 返回裸字节（前端拿到 ArrayBuffer）——扩展名白名单 + 32MiB 上限。
-    // 用异步读：试听几十 MB 的音频时，同步 readFileSync 会让主线程（进而整个 UI）顿一下。
-    const path = str(args, 'path')
-    const allowed = ['wav', 'mp3', 'flac', 'ogg', 'm4a']
-    const ext = extname(path).replace(/^\./, '').toLowerCase()
-    if (!allowed.includes(ext)) {
-      throw new Error(`不支持的文件类型: ${ext}`)
-    }
-    const data = await readFile(path)
-    if (data.length > 32 * 1024 * 1024) {
-      throw new Error('文件过大（上限 32MB）')
-    }
-    return new Uint8Array(data)
   },
 
   rust_open_in_explorer: async (args) => {
@@ -632,6 +616,22 @@ export const commands: Record<string, CommandHandler> = {
     return tts.recordTtsReference(seconds)
   },
   rust_list_tts_speakers: () => tts.listTtsSpeakers(),
+  /**
+   * 导出目录的"实际生效值"。
+   *
+   * 界面上的输入框存的是用户选择（空 = 未设置）。空的时候文件仍会落在
+   * 数据根下的 tts-output/ —— 但用户看不出来，只知道"未设置"，
+   * 于是合成成功却不知道去哪找。这里把实际目录回显出去。
+   * 注意：只读，不写回 config —— 默认值必须跟着数据根走，
+   * 一旦存成绝对路径，便携版换个目录就全错了。
+   */
+  rust_default_export_dir: () => ({ path: tts.resolveExportDir('') }),
+  /** 打开导出目录（不存在就先建出来 —— 见 ensureExportDir 的注释） */
+  rust_open_export_dir: async (args) => {
+    const dir = await tts.ensureExportDir(optStr(args, 'dir') ?? '')
+    await openInExplorer(dir)
+    return { path: dir }
+  },
   rust_set_tts_language: (args) => tts.setTtsLanguage(str(args, 'language')),
   rust_synthesize: (args) =>
     tts.synthesize(str(args, 'text'), str(args, 'voice'), str(args, 'exportDir'), (done, total) => {

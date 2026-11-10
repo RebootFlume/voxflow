@@ -52,17 +52,6 @@ export async function pickFolder(title: string, defaultPath?: string): Promise<s
 }
 
 /**
- * 读取音频文件字节（主进程返回裸字节 ⇒ 前端拿到 ArrayBuffer）。
- * 供应用内试听；比走系统默认播放器可靠（不依赖文件关联）。
- */
-export async function rustReadAudio(path: string): Promise<ArrayBuffer> {
-  const r = await invoke<ArrayBuffer | Uint8Array | number[]>('rust_read_audio', { path })
-  if (r instanceof ArrayBuffer) return r
-  if (r instanceof Uint8Array) return r.buffer.slice(r.byteOffset, r.byteOffset + r.byteLength) as ArrayBuffer
-  return new Uint8Array(r).buffer
-}
-
-/**
  * 读纯文本文件（TTS 导入 TXT）。
  *
  * 编码识别在主进程做（UTF-8 BOM / UTF-16 BOM / 严格 UTF-8 / GB18030 兜底）——
@@ -76,6 +65,34 @@ export function rustReadTextFile(path: string): Promise<{
   raw_chars: number
 }> {
   return invoke('rust_read_text_file', { path })
+}
+
+/**
+ * 导出目录的"实际生效值"（用户没设时的默认位置）。
+ *
+ * 只读，不回写 config：默认值必须跟着数据根走，存成绝对路径的话
+ * 便携版换个目录就全错了。
+ */
+export function rustDefaultExportDir(): Promise<{ path: string }> {
+  return invoke('rust_default_export_dir')
+}
+
+/** 打开导出目录（不存在时主进程会先创建，避免点了报 "Failed to open path"） */
+export function rustOpenExportDir(dir: string): Promise<{ path: string }> {
+  return invoke('rust_open_export_dir', { dir })
+}
+
+/**
+ * 本地音频的可播放 URL（`voxflow-audio://` 协议）。
+ *
+ * 不走「IPC 读全文件转 Blob」：那条路一次读全文件且有 32MB 上限
+ * （24kHz/16bit/mono ≈ 11.6 分钟），长文本合成的产物动辄几百 MB。
+ * 这条路径由 Chromium 自己分块读盘 + seek，内存与音频长度无关。
+ *
+ * 纯字符串拼接，不需要 IPC —— 协议 handler 在主进程侧解析路径。
+ */
+export function audioUrl(path: string): string {
+  return `voxflow-audio://local/${encodeURIComponent(path)}`;
 }
 
 /**

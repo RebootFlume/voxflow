@@ -49,6 +49,11 @@ export function setTtsBusy(v: boolean): void {
   ttsBusy = v
 }
 
+/** 当前是否有合成在跑（引擎参数写操作据此拒绝：中途改动会让同一文件前后不一致） */
+export function isTtsBusy(): boolean {
+  return ttsBusy
+}
+
 /** 启动 API 服务 */
 export function start(cfg: ApiConfig): void {
   if (running) throw new Error('API service already running')

@@ -7,7 +7,7 @@
  * 关闭行为：`closeToTray=true` 时隐藏到托盘继续运行（默认），false 时直接退出。
  */
 
-import { app, BrowserWindow, session, shell } from 'electron'
+import { app, BrowserWindow, protocol, session, shell } from 'electron'
 import { join } from 'path'
 import { existsSync } from 'fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
@@ -28,6 +28,7 @@ import { setVramRuntimeHooks } from './inference/vram'
 import { killOrphanEngineProcesses } from './inference/device'
 import { migrateLegacyAudiocppRuntime } from './inference/runtime-download'
 import { ttsRegistry } from './tts/registry'
+import { AUDIO_SCHEME, serveAudioRequest } from './tts/audio-protocol'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -130,6 +131,20 @@ function setupPermissions(): void {
   })
 }
 
+/**
+ * 自定义音频协议的特权声明 —— 必须在 app ready **之前**。
+ *
+ * 声明 stream:true 才能返回 Readable 流式响应；supportFetchAPI 才能用 fetch/Response；
+ * bypassCSP 让 <audio src> 不被页面 CSP 的 media-src 拦掉。
+ * 注册晚了会抛 "Failed to register protocol" 或者流式响应被降级成整段缓冲。
+ */
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: AUDIO_SCHEME,
+    privileges: { stream: true, supportFetchAPI: true, bypassCSP: true, standard: true }
+  }
+])
+
 app.whenReady().then(async () => {
   setQuitting(false)
   electronApp.setAppUserModelId('com.voxflow.app')
@@ -176,6 +191,26 @@ app.whenReady().then(async () => {
 
   setupPermissions()
   registerIpc(() => mainWindow)
+
+  /**
+   * 本地音频流协议 —— 给试听/回放用。
+   *
+   * 为什么不走「IPC 一次读全文件 + Blob」：那条路把整段音频读进渲染进程内存，
+   * 且有 32MB 上限（24kHz/16bit/mono ≈ 11.6 分钟）。长文本合成的产物一段就几百 MB ——
+   * 播放按钮会在最需要它的时候报「文件过大」，等于把内存问题从合成搬到了播放。
+   *
+   * 改成自定义协议后，由 Chromium 自己按需分块读盘 + seek，
+   * 渲染进程内存与音频长度无关，`<audio>` 的进度条拖动也是真的 seek。
+   *
+   * 安全性：只允许读「数据根」内的文件（tts-output / 用户设置的导出目录
+   * 可能在外面，所以再加一条：必须是音频扩展名）。渲染进程只能通过
+   * 我们生成的 URL 访问，不能任意读盘 —— 协议 handler 里做白名单校验。
+   * 不支持 Range 会退化成"整段下载"，Chromium 对 <audio> 的 seek 依赖 206，
+   * 所以这里实现 Range。
+   */
+  protocol.handle('voxflow-audio', async (request) => {
+    return serveAudioRequest(request)
+  })
 
   // 显存监控钩子：让 vram 模块知道「哪些框架此刻真有引擎在跑」。
   // 没有它，vram 只能每轮都盲查 WMI（3.3s PowerShell）；有了它，空闲时一个外部命令都不起。
